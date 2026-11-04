@@ -98,6 +98,10 @@ First-party plugins that add nothing to your game until you use them: physics, d
 ragdolls, motion-matching animation, AI minds with smart objects and navmesh, terrain, foliage,
 water, VFX, portals, cinematics, world streaming and more.
 
+Anyone can write a plugin: it lives in its own repository and, listed in the
+[plugin catalog](https://github.com/mirai-engine/mirai-plugins), installs from the editor or from
+the command line. An agent can write one for you.
+
 <p align="center">
   <img src=".github/media/editor.png" alt="The Mirai editor" width="100%">
 </p>
@@ -149,7 +153,8 @@ The layers and contracts are in [ARCHITECTURE.md](docs/ARCHITECTURE.md) and the 
 Mirai is young and moves fast, so yes, there are bugs. If something breaks, looks wrong or is
 harder than it should be, [open an issue](https://github.com/mirai-engine/mirai/issues) with the
 steps to reproduce it — or send a pull request. Bug reports, fixes, plugins and demo scenes are
-all welcome, from humans and agents alike.
+all welcome, from humans and agents alike: [CONTRIBUTING.md](CONTRIBUTING.md) says how, and which
+models we do not accept code from.
 
 Come say hi on [Discord](https://discord.gg/xeq5unRgG), follow [@mirai3d](https://x.com/mirai3d)
 on X for news, and if Mirai is useful to you,

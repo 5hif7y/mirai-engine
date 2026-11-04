@@ -27,15 +27,15 @@ jobs:
           - platform: windows-amd64
             runner: windows-2025
             odin: odin-windows-amd64-dev-2026-11.zip
-            odin_sha256: b6b2e426a8b6f147b74ec7e18bef8df27cf40fe16193159df7ca09a0cc0c2011
+            odin_sha256: 259effedf2997293c8fa4a5e497496f8ebce9f826652d9dd353a9dd2113c31fd
           - platform: linux-amd64
             runner: ubuntu-24.04
             odin: odin-linux-amd64-dev-2026-11.tar.gz
-            odin_sha256: c3c8b095621fd0c75f7f73e3a0829f1b4d45324225f20ba11ed8dc4da310a8ab
+            odin_sha256: 65c9f6e97d6f8a30930e151f270ce5aeaa98fe8b2ba49fe067394e2af04f7618
           - platform: macos-arm64
             runner: macos-15
             odin: odin-macos-arm64-dev-2026-11.tar.gz
-            odin_sha256: b276c6ac87c3eea17446a6ca9080089b6e9f492057fb773591775ee49d92a1cf
+            odin_sha256: fa10eee280c8786758e3ff0b8fdd9355e1c9447b1f0b8c72764e25ee4ebc3e22
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     defaults:
@@ -58,7 +58,8 @@ jobs:
         run: |
           archive="$RUNNER_TEMP/${{ matrix.odin }}"
           curl -fsSL -o "$archive" "https://github.com/odin-lang/Odin/releases/download/$ODIN_RELEASE/${{ matrix.odin }}"
-          echo "${{ matrix.odin_sha256 }}  $archive" | shasum -a 256 -c -
+          sum=$(command -v sha256sum || echo "shasum -a 256")
+          (cd "$RUNNER_TEMP" && echo "${{ matrix.odin_sha256 }}  ${{ matrix.odin }}" | $sum -c -)
           mkdir -p "$RUNNER_TEMP/odin" .deps/odin
           if [ "$RUNNER_OS" = Windows ]; then 7z x -bd -o"$RUNNER_TEMP/odin" "$archive" > /dev/null; else tar -xzf "$archive" -C "$RUNNER_TEMP/odin"; fi
           compiler=$(find "$RUNNER_TEMP/odin" -maxdepth 3 -type f \( -name odin -o -name odin.exe \) | head -n 1)

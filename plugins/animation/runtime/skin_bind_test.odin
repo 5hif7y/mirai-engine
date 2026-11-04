@@ -1,0 +1,136 @@
+package anim
+
+import "core:fmt"
+import "core:log"
+import "core:os"
+import "core:path/filepath"
+import "core:testing"
+import "mirai:asset"
+import "mirai:core"
+import erender "mirai:engine/render"
+import "mirai:host"
+import gpu "mirai:render"
+import "mirai:rhi"
+import "mirai:rhi/shared_device"
+import "mirai:std/base"
+import mm "mirai:std/math"
+
+// Many rigs of one skinned mesh at its bind pose draw the mesh of the world,
+// shared, and make no copy of it until a pose leaves the bind.
+@(test)
+rigs_at_the_bind_pose_share_their_mesh_until_a_pose_leaves_it :: proc(t:^testing.T) {
+    RIGS :: 64
+    SIDE :: 64
+    problems:core.Problems
+    temp,_:=os.temp_directory(context.temp_allocator)
+    directory:=fmt.tprintf("%s/mirai-animation-bind-%d",temp,os.get_pid())
+    os.make_directory(directory);defer os.remove(directory)
+    path,_:=filepath.join({directory,"grid.mesh"},context.temp_allocator)
+    defer os.remove(path)
+    skeleton_path,_:=filepath.join({directory,"grid.skeleton"},context.temp_allocator)
+    defer os.remove(skeleton_path)
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    vertices:=make([]asset.Vertex,SIDE*SIDE);defer delete(vertices)
+    influences:=make([]asset.Skin_Vertex,SIDE*SIDE);defer delete(influences)
+    indices:=make([dynamic]u32);defer delete(indices)
+    for y in 0..<SIDE {
+        for x in 0..<SIDE {
+            vertices[y*SIDE+x]={position={f32(x)/SIDE,f32(y)/SIDE,0},normal=mm.normal_pack({0,0,1}),color=0xffffffff}
+            influences[y*SIDE+x].weights[7]=255
+            if x+1<SIDE && y+1<SIDE {
+                at:=u32(y*SIDE+x)
+                append(&indices,at,at+1,at+SIDE,at+1,at+SIDE+1,at+SIDE)
+            }
+        }
+    }
+    nodes:=[2]asset.Skeleton_Bone{{parent=-1,rotation=1,scale={1,1,1}},{parent=0,rotation=1,scale={1,1,1}}}
+    for &node,i in nodes {
+        named:="root" if i==0 else "foot"
+        full:="root" if i==0 else "root/foot"
+        base.text_set(node.name[:],named);base.text_set(node.path[:],full);node.target=base.name_hash(full)
+    }
+    joints:=[1]asset.Rig_Joint{{node=1,inverse_bind=1}}
+    id:=base.Asset_Id{0x617,0x99}
+    skeleton_id:=base.Asset_Id{0x618,0x98}
+    if !testing.expect_value(t,asset.skeleton_save(skeleton_path,&types,{id=skeleton_id,bones=nodes[:]}),asset.Error.None) {return}
+    if !testing.expect_value(t,rig_mesh_save(path,&types,{id=id,skeleton=skeleton_id,joints=joints[:]},vertices,indices[:],influences),asset.Error.None) {return}
+    device,message:=shared_device.take(t, hardware_rt = false)
+    if device==nil {if !rhi.gpu_skip_allowed() {testing.expect(t,false,message)};return}
+    renderer:=new(gpu.Renderer);defer free(renderer)
+    settings:=gpu.DEFAULT_SETTINGS;settings.gi_enabled,settings.reflections,settings.taa=false,false,false
+    if !testing.expect(t,gpu.renderer_init(renderer,{device=device,width=96,height=64,settings=settings}),renderer.error) {return}
+    defer gpu.renderer_destroy(renderer)
+    assets:host.Assets
+    if !testing.expect(t,host.assets_init(&assets,{root=directory,renderer=renderer})) {return}
+    defer host.assets_destroy(&assets)
+    app:=host.App{allocator=context.allocator,renderer=renderer,assets=&assets}
+    cache:Skin_Runtime;defer skin_runtime_free(&cache)
+    state:Skin_Instances;defer skin_instances_free(&state)
+    playback:Playback;defer playback_free(&playback)
+    skeleton_assets:Skeleton_Assets;defer skeleton_assets_free(&skeleton_assets)
+    entities:core.Entities;core.entities_init(&entities);defer core.entities_destroy(&entities)
+    meshes:core.Table(erender.Mesh_Renderer);defer core.table_destroy(&meshes)
+    skins:core.Table(Pose_Source);defer core.table_destroy(&skins)
+    transforms:core.Table(core.Transform);defer core.table_destroy(&transforms)
+    parents:core.Table(core.Parent);defer core.table_destroy(&parents)
+    worlds:core.Table(core.World_Transform);defer core.table_destroy(&worlds)
+    tints:core.Table(erender.Tint);defer core.table_destroy(&tints)
+    overrides:core.Table(erender.Material_Override);defer core.table_destroy(&overrides)
+    hidden:core.Table(erender.Hidden);defer core.table_destroy(&hidden)
+    elsewhere:core.Table(erender.Drawn_Elsewhere);defer core.table_destroy(&elsewhere)
+    highlights:core.Table(erender.Highlight);defer core.table_destroy(&highlights)
+    offsets:core.Table(erender.Draw_Offset);defer core.table_destroy(&offsets)
+    roots,draws:[RIGS]core.Entity
+    for i in 0..<RIGS {
+        roots[i]=core.create(&entities);draws[i]=core.create(&entities)
+        core.add(&parents,draws[i],{entity=roots[i]})
+        core.add(&skins,draws[i],{rig=roots[i]})
+        core.add(&meshes,draws[i],{mesh=id})
+        transform:=mm.TRANSFORM_IDENTITY;transform.position.x=f32(i)*2
+        core.add(&transforms,roots[i],core.Transform(transform))
+        core.add(&worlds,roots[i],{transform=transform,previous=transform})
+        core.add(&worlds,draws[i],{transform=transform,previous=transform})
+    }
+    core.table_settle(&parents,&entities);core.table_settle(&skins,&entities);core.table_settle(&transforms,&entities)
+    core.table_settle(&meshes,&entities);core.table_settle(&worlds,&entities)
+    definition:=skeleton_content(&skeleton_assets,&app,skeleton_id)
+    if !testing.expect(t,definition!=nil) {return}
+    for rig in roots {
+        pose:=state_get(&playback,rig)
+        if !testing.expect(t,pose!=nil && skeleton_bind(&playback,pose,definition,nil,&transforms)) {return}
+        copy(pose.previous[:],pose.local[:]);pose.pose_ready=true
+    }
+    tick :: proc(app:^host.App,cache:^Skin_Runtime,state:^Skin_Instances,playback:^Playback,meshes:^core.Table(erender.Mesh_Renderer),skins:^core.Table(Pose_Source),parents:^core.Table(core.Parent),worlds:^core.Table(core.World_Transform),tints:^core.Table(erender.Tint),overrides:^core.Table(erender.Material_Override),hidden:^core.Table(erender.Hidden),elsewhere:^core.Table(erender.Drawn_Elsewhere),highlights:^core.Table(erender.Highlight),offsets:^core.Table(erender.Draw_Offset),problems:^core.Problems) {
+        app.extras.instance_count=0
+        outlines:core.Table(erender.Outline);defer core.table_destroy(&outlines)
+        animation_skin(core.read(meshes),core.read(skins),core.read(parents),core.read(worlds),core.read(tints),core.read(overrides),core.read(hidden),core.read(elsewhere),core.read(highlights),core.read(&outlines),core.read(offsets),cache,state,app,{},core.FRAME_TIME_DEFAULT,core.Ref(Playback){ptr=playback},{},problems,{},nil,ANIMATION_BUDGET_CONFIG_DEFAULT,{},{},{})
+    }
+    measure :: proc(renderer:^gpu.Renderer,label:string) -> int {
+        s:=&renderer.scene
+        bytes:=len(s.vertices)*size_of(u32)+len(s.blas_nodes)*size_of(gpu.Gpu_Bvh_Node)+len(s.blas_triangles)*size_of(gpu.Gpu_Bvh_Triangle)
+        log.infof("%s: %d skinned copies, %d vertices, %d BVH nodes, %d BVH triangles, %.1f MB of geometry",label,len(s.skinned),len(s.vertices),len(s.blas_nodes),len(s.blas_triangles),f64(bytes)/(1<<20))
+        return len(s.skinned)
+    }
+    measure(renderer,"loaded")
+    tick(&app,&cache,&state,&playback,&meshes,&skins,&parents,&worlds,&tints,&overrides,&hidden,&elsewhere,&highlights,&offsets,&problems)
+    testing.expect_value(t,problems.count,0)
+    testing.expect_value(t,measure(renderer,"64 rigs at the bind pose"),0)
+    testing.expect_value(t,len(host.app_instances(&app)),0)
+
+    // A pose that leaves the bind makes the copy of that rig alone.
+    pose:=constraint_playing(&playback,roots[0])
+    pose.local[1].position.y=0.5
+    copy(pose.previous[:],pose.local[:])
+    pose.changed+=1
+    tick(&app,&cache,&state,&playback,&meshes,&skins,&parents,&worlds,&tints,&overrides,&hidden,&elsewhere,&highlights,&offsets,&problems)
+    testing.expect_value(t,measure(renderer,"one rig posed"),1)
+    if !testing.expect_value(t,len(host.app_instances(&app)),1) {return}
+    gpu.scene_set(renderer,host.app_instances(&app),nil,{},gpu.Environment{sky={1,1,1}})
+    if !testing.expect(t,gpu.renderer_frame(renderer,{camera={position={1,2,8},forward={0,-1,-8},up={0,1,0},fov_y=50,near=0.1,far=100}}),renderer.error) {return}
+    record:=renderer.scene.meshes[core.entity_map_get(&state.instances,draws[0]).mesh]
+    result:[1]gpu.Gpu_Posed_Vertex
+    testing.expect(t,rhi.buffer_read_slice(device,renderer.scene.vertex_buffer,u64(record.posed_word)*4,result[:]))
+    testing.expect_value(t,result[0].position,vertices[0].position+[3]f32{0,0.5,0})
+    testing.expect_value(t,problems.count,0)
+    testing.expectf(t,rhi.device_validation_errors(device)==0,"validation: %s",rhi.device_validation_message(device))
+}

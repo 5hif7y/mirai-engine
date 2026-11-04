@@ -1,0 +1,256 @@
+package api
+
+import "core:os"
+import "core:strconv"
+import "core:strings"
+import "mirai:std/base"
+import "mirai:std/serial"
+
+// The Model Context Protocol over streamable HTTP, without sessions and
+// without server-sent events: every POST /mcp carries one JSON-RPC message (or
+// a batch) and gets one JSON answer, or 202 when it is a notification. Each
+// method is a tool named like it with dots as underscores; its input schema
+// is the JSON Schema of its params. Object results also carry structured
+// content; a failed call is a tool error carrying {"error":{code,message,data}}.
+// tools/list gives the basic tools of the editor (Core: what a scene needs)
+// and the tool call, which runs any method by its name with its params, and
+// with them those of the plugins the header X-Mirai-Plugins names (* for
+// every method). An agent asks engine_describe for the schema of the rest:
+// each tool listed costs its schema in every turn of its model. tools/call
+// takes any of them by name too.
+
+MCP_VERSIONS :: [?]string{"2025-11-25","2025-06-18","2025-03-26","2024-11-05"}
+
+@(private)
+TOOLS_RESERVE :: 512
+
+// The tool that runs any method by its name: those of the plugins and of the
+// editor that tools/list does not give.
+MCP_CALL_TOOL :: "call"
+@(private)
+MCP_CALL_DESCRIPTION :: "Runs any method of the editor or of a plugin by its name (such as animation.request or panel.save) with its params. engine_describe lists the methods, and with method, plugin or prefix gives the JSON Schema of their params and result."
+@(private)
+MCP_CALL_SCHEMA :: `{"type":"object","properties":{"method":{"type":"string","description":"The name of the method, such as terrain.sculpt"},"params":{"type":"object","description":"Its params, as engine_describe gives their schema"}},"required":["method"],"additionalProperties":false}`
+
+@(private)
+mcp_dispatch :: proc(s:^Server,req:^Request,w:^serial.Writer) -> (Error,bool) {
+    switch req.method {
+    case "initialize": return mcp_initialize(s,req,w)
+    case "ping": raw(w,"{}");return {},true
+    case "tools/list": return mcp_tools_list(s,req,w)
+    case "tools/call": return mcp_tools_call(s,req,w)
+    }
+    return {METHOD_NOT_FOUND,format_text(base.arena_allocator(&s.scratch),"unknown method %q",shorten(req.method)),""},false
+}
+
+// The version of the protocol to speak: the client's when this server knows
+// it, otherwise the newest.
+mcp_version :: proc(requested:string) -> string {
+    versions:=MCP_VERSIONS
+    for version in versions {if version==requested {return version}}
+    return versions[0]
+}
+
+// list_changed: the client is told when the tools change.
+mcp_initialize_write :: proc(w:^serial.Writer,requested,name,version,instructions:string,list_changed:=false) {
+    raw(w,`{"protocolVersion":`);serial.text_write_string(w,mcp_version(requested))
+    raw(w,`,"capabilities":{"tools":{"listChanged":`);raw(w,list_changed?"true":"false")
+    raw(w,`}},"serverInfo":{"name":`);serial.text_write_string(w,name)
+    raw(w,`,"version":`);serial.text_write_string(w,version)
+    raw(w,`},"instructions":`);serial.text_write_string(w,instructions)
+    raw(w,"}")
+}
+
+@(private)
+mcp_initialize :: proc(s:^Server,req:^Request,w:^serial.Writer) -> (Error,bool) {
+    values:[1]string
+    requested:string
+    if req.has_params && object_values(base.arena_allocator(&s.scratch),req.params,{"protocolVersion"},values[:]) && values[0]!="" {
+        requested,_=string_value(base.arena_allocator(&s.scratch),values[0])
+    }
+    mcp_initialize_write(w,requested,s.name,s.version,s.instructions)
+    return {},true
+}
+
+@(private)
+mcp_output_object :: proc(s:^Server,method:^Method) -> (object:bool,ok:bool) {
+    if method.result!=serial.TYPE_NONE {return true,true}
+    if method.result_schema=="" {return false,true}
+    mark:=base.arena_mark(&s.scratch)
+    defer base.arena_rewind(&s.scratch,mark)
+    failed:=s.scratch.failed
+    allocator:=base.arena_allocator(&s.scratch)
+    values:[1]string
+    if !object_values(allocator,method.result_schema,{"type"},values[:]) || values[0]=="" {return false,s.scratch.failed==failed}
+    kind,valid:=string_value(allocator,values[0])
+    return valid && kind=="object",s.scratch.failed==failed
+}
+
+@(private)
+mcp_tools_list :: proc(s:^Server,req:^Request,w:^serial.Writer) -> (Error,bool) {
+    values:[1]string
+    start:=0
+    if req.has_params && object_values(base.arena_allocator(&s.scratch),req.params,{"cursor"},values[:]) && values[0]!="" {
+        cursor,ok:=string_value(base.arena_allocator(&s.scratch),values[0])
+        parsed,valid:=strconv.parse_int(cursor,10)
+        if !ok || !valid || parsed<0 || parsed>s.method_count {return {INVALID_PARAMS,"invalid cursor",""},false}
+        start=parsed
+    }
+    raw(w,`{"tools":[`)
+    buffer:[MAX_NAME]u8
+    next:=-1
+    listed:=0
+    for i in start..<s.method_count {
+        method:=&s.methods[i]
+        if !mcp_listed(method,s.client_plugins) || .Turn in method.flags && s.client_tag=="" {continue}
+        mark:=w.count
+        if listed>0 {raw(w,",")}
+        raw(w,`{"name":`);serial.text_write_string(w,tool_name(method.name,buffer[:]))
+        raw(w,`,"description":`);serial.text_write_string(w,method.summary)
+        raw(w,`,"inputSchema":`);method_schema_write(w,s,method,false)
+        object,valid:=mcp_output_object(s,method)
+        if !valid {s.stats.scratch_failures+=1;return {INTERNAL_ERROR,"the output schema needs more scratch memory than the server has",""},false}
+        if object {raw(w,`,"outputSchema":`);method_schema_write(w,s,method,true)}
+        raw(w,`,"annotations":{"readOnlyHint":`);raw(w,.Read_Only in method.flags?"true":"false")
+        raw(w,`,"destructiveHint":`);raw(w,.Destructive in method.flags?"true":"false")
+        raw(w,`,"idempotentHint":`);raw(w,.Idempotent in method.flags?"true":"false")
+        raw(w,`,"openWorldHint":false}}`)
+        if w.overflow>0 || w.count>len(w.data)-TOOLS_RESERVE {
+            rewind(w,mark)
+            if listed==0 {return {SERVER_ERROR,"a tool does not fit in the response buffer",""},false}
+            next=i
+            break
+        }
+        listed+=1
+    }
+    if next<0 {
+        if listed>0 {raw(w,",")}
+        raw(w,`{"name":"`);raw(w,MCP_CALL_TOOL);raw(w,`","description":`);serial.text_write_string(w,MCP_CALL_DESCRIPTION)
+        raw(w,`,"inputSchema":`);raw(w,MCP_CALL_SCHEMA);raw(w,`,"annotations":{"openWorldHint":false}}`)
+    }
+    raw(w,"]")
+    if next>=0 {
+        raw(w,`,"nextCursor":"`);serial.text_write_int(w,i64(next));raw(w,`"`)
+    }
+    raw(w,"}")
+    return {},true
+}
+
+// Whether tools/list gives the tool of method: a basic one of the editor,
+// one of a plugin that plugins (X-Mirai-Plugins) names, or any with *.
+@(private)
+mcp_listed :: proc(method:^Method,plugins:string) -> bool {
+    rest:=plugins
+    for name in strings.split_iterator(&rest,",") {
+        trimmed:=strings.trim_space(name)
+        if trimmed=="*" || method.plugin!="" && trimmed==method.plugin {return true}
+    }
+    return method.plugin=="" && .Core in method.flags
+}
+
+@(private)
+mcp_tools_call :: proc(s:^Server,req:^Request,w:^serial.Writer) -> (Error,bool) {
+    values:[2]string
+    if !req.has_params || !object_values(base.arena_allocator(&s.scratch),req.params,{"name","arguments"},values[:]) || values[0]=="" {
+        return {INVALID_PARAMS,"params must be an object with the name of a tool",""},false
+    }
+    name,named:=string_value(base.arena_allocator(&s.scratch),values[0])
+    if !named {return {INVALID_PARAMS,"name must be a string",""},false}
+    arguments:="{}"
+    if values[1]!="" {
+        if values[1][0]!='{' {return {INVALID_PARAMS,"arguments must be an object",""},false}
+        arguments=values[1]
+    }
+    // The tool call names the method in its arguments and gives it their params.
+    if name==MCP_CALL_TOOL {
+        call:[2]string
+        if !object_values(base.arena_allocator(&s.scratch),arguments,{"method","params"},call[:]) || call[0]=="" {return {INVALID_PARAMS,"call takes the name of a method in method, and its params in params",""},false}
+        method_name,valid:=string_value(base.arena_allocator(&s.scratch),call[0])
+        if !valid {return {INVALID_PARAMS,"method must be a string",""},false}
+        if call[1]!="" && call[1][0]!='{' {return {INVALID_PARAMS,"params must be an object",""},false}
+        name,arguments=method_name,call[1]!=""?call[1]:"{}"
+    }
+    method:=tool_find(s,name)
+    if method==nil {return {INVALID_PARAMS,format_text(base.arena_allocator(&s.scratch),"unknown tool or method %q; engine_describe lists the methods",shorten(name)),""},false}
+    object_schema,schema_valid:=mcp_output_object(s,method)
+    if !schema_valid {s.stats.scratch_failures+=1;return {INTERNAL_ERROR,"the output schema needs more scratch memory than the server has",""},false}
+    serial.writer_reset(&s.stage)
+    err,ok:=method_execute(s,method,arguments,&s.stage)
+    if ok && s.stage.overflow>0 {
+        s.stats.oversized+=1
+        err,ok={SERVER_ERROR,"the result does not fit in the response buffer",""},false
+    }
+    object_result:=false
+    if ok {
+        result:=string(serial.writer_bytes(&s.stage))
+        mark:=base.arena_mark(&s.scratch)
+        failed:=s.scratch.failed
+        r:serial.Text_Reader
+        serial.text_reader_init(&r,result,base.arena_allocator(&s.scratch))
+        object_result=serial.text_peek(&r)=='{'
+        valid:=serial.text_skip(&r) && serial.text_end(&r)
+        base.arena_rewind(&s.scratch,mark)
+        if s.scratch.failed!=failed {
+            s.stats.scratch_failures+=1
+            err,ok={INTERNAL_ERROR,"the result needs more scratch memory than the server has",""},false
+        } else if !valid || (object_schema && !object_result) {
+            err,ok={INTERNAL_ERROR,"the tool returned an invalid result",""},false
+        }
+    }
+    if !ok {
+        serial.writer_reset(&s.stage)
+        s.stats.errors+=1
+        raw(&s.stage,`{"error":`);write_error_object(base.arena_allocator(&s.scratch),&s.stage,err);raw(&s.stage,"}")
+    }
+    if ok && method.mcp_content {
+        raw(w,string(serial.writer_bytes(&s.stage)))
+        return {},true
+    }
+    raw(w,`{"content":[{"type":"text","text":`)
+    serial.text_write_string(w,string(serial.writer_bytes(&s.stage)))
+    raw(w,`}`)
+    if ok && s.image!="" {mcp_image_write(s,w,s.image,object_result?len(serial.writer_bytes(&s.stage)):0)}
+    raw(w,`]`)
+    if ok && object_result {raw(w,`,"structuredContent":`);raw(w,string(serial.writer_bytes(&s.stage)))}
+    raw(w,`,"isError":`);raw(w,ok?"false":"true");raw(w,"}")
+    return {},true
+}
+
+@(private)
+BASE64 :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+// The PNG at path as an image content item, encoded straight into w; a text
+// item that says where it is when it cannot be read or does not fit beside
+// the rest of the answer (kept: the bytes still to be written after it).
+@(private)
+mcp_image_write :: proc(s:^Server,w:^serial.Writer,path:string,kept:int) {
+    note :: proc(s:^Server,w:^serial.Writer,format:string,args:..any) {
+        raw(w,`,{"type":"text","text":`)
+        serial.text_write_string(w,format_text(base.arena_allocator(&s.scratch),format,..args))
+        raw(w,`}`)
+    }
+    data,error:=os.read_entire_file(path,s.allocator)
+    if error!=nil {note(s,w,"The image %s could not be read: %v",path,error);return}
+    defer delete(data,s.allocator)
+    encoded:=(len(data)+2)/3*4
+    room:=len(w.data)-w.count-kept-256
+    if encoded>room {
+        note(s,w,"The image of %d bytes does not fit in the answer (%d bytes at most); it is at %s",len(data),max(room/4*3,0),path)
+        return
+    }
+    raw(w,`,{"type":"image","data":"`)
+    out:=w.data[w.count:][:encoded]
+    table:=BASE64
+    for i:=0;i<len(data);i+=3 {
+        n:=min(len(data)-i,3)
+        v:=u32(data[i])<<16
+        if n>1 {v|=u32(data[i+1])<<8}
+        if n>2 {v|=u32(data[i+2])}
+        o:=out[i/3*4:][:4]
+        o[0],o[1]=table[v>>18&63],table[v>>12&63]
+        o[2]=n>1?table[v>>6&63]:'='
+        o[3]=n>2?table[v&63]:'='
+    }
+    w.count+=encoded
+    raw(w,`","mimeType":"image/png"}`)
+}

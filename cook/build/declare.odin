@@ -1,0 +1,618 @@
+package build
+
+import "core:fmt"
+import "core:odin/ast"
+import "core:odin/parser"
+import "core:odin/tokenizer"
+import "core:os"
+import "core:path/filepath"
+import "core:slice"
+import "core:strings"
+import "mirai:project"
+
+// A binary of the engine is built from a copy of its packages, the stage,
+// where every source file ends exporting its procedures under names of their
+// own. Whoever links against the binary compiles, instead of those sources,
+// their declarations: the same files with the types and the constants as
+// they are, the procedures that must be compiled where they are called
+// (generic, inline, with a deferred procedure) too, and the rest declared
+// foreign in the binary. Nothing of the engine is compiled again with what
+// uses it. A file is written only when its text changes: a declaration that
+// comes out the same leaves the stage and the declarations as they were, and
+// the halves of the engine follow each folder by itself.
+
+Declare_Desc :: struct {
+    root:string,       // where the packages are
+    packages:[]string, // relative to root and to the collection: core, engine/scene
+    binary:string,     // prefix of the link names
+    library:string,    // what the declarations link against: the import library, the .so, the .dylib
+    stage:string,      // the copy the binary is built from
+    decl:string,       // the declarations
+}
+
+// What the call wrote: of each folder, whether any file was written, or
+// removed. The stage is what the library is compiled from; the declarations
+// are what the halves that compile against it read.
+@(private)
+Declare_Changed :: struct {
+    stage,decl:bool,
+}
+
+@(private="file")
+Declare :: struct {
+    desc:Declare_Desc,
+    changed:Declare_Changed,
+    errors:[dynamic]string,
+}
+
+@(private="file")
+Output :: struct {
+    head,decl,exports:strings.Builder,
+    foreign_count,export_count:int,
+}
+
+@(private="file")
+File_Scope :: struct {
+    file:^ast.File,
+    src:string,
+    folder:string,     // of the source file: what relative paths are relative to
+    stage_folder:string, // of its copy: what the paths of its foreign imports are made relative to
+    decl_folder:string,  // of its declarations: what the paths of their #load are made relative to
+    link_prefix:string,
+    private_file,private_package:bool,
+}
+
+// Writes the stage and the declarations of the packages. The errors say what
+// in a source keeps it from being declared. changed: which of the two folders
+// a file was written to or removed from, so what compiles against it is built
+// again.
+declare :: proc(desc:Declare_Desc) -> (errors:[]string,changed:Declare_Changed) {
+    d:Declare
+    d.desc=desc
+    for path in desc.packages {declare_package(&d,path)}
+    return d.errors[:],d.changed
+}
+
+@(private="file")
+declare_package :: proc(d:^Declare,path:string) {
+    folder:=project.path(d.desc.root,path,allocator=context.temp_allocator)
+    collected,collected_ok:=parser.collect_package(folder)
+    if !collected_ok {
+        append(&d.errors,fmt.aprintf("%s: the package could not be read",folder))
+        return
+    }
+    for file_path in collected.files {
+        if strings.has_suffix(file_path,"_test.odin") {delete_key(&collected.files,file_path)}
+    }
+    p:=parser.default_parser()
+    p.err=proc(pos:tokenizer.Pos,format:string,args:..any) {}
+    if !parser.parse_package(collected,&p) {
+        append(&d.errors,fmt.aprintf("%s: the package does not parse; the compiler says where",folder))
+        return
+    }
+    stage:=project.path(d.desc.stage,path,allocator=context.temp_allocator)
+    decl:=project.path(d.desc.decl,path,allocator=context.temp_allocator)
+    for target in ([]string{stage,decl}) {
+        if os.make_directory_all(target)!=nil && !os.is_dir(target) {
+            append(&d.errors,fmt.aprintf("%s: the folder could not be made",target))
+            return
+        }
+    }
+    written:=make(map[string]bool,context.temp_allocator)
+    files:=make([dynamic]^ast.File,context.temp_allocator)
+    for _,file in collected.files {append(&files,file)}
+    slice.sort_by(files[:],proc(a,b:^ast.File) -> bool {return a.fullpath<b.fullpath})
+    link_prefix:=fmt.aprintf("%s.%s",d.desc.binary,strings.join(strings.split(path,"/",context.temp_allocator),".",context.temp_allocator),allocator=context.temp_allocator)
+    for file in files {
+        scope:=File_Scope{file=file,src=file.src,folder=filepath.dir(file.fullpath),stage_folder=stage,decl_folder=decl,link_prefix=link_prefix}
+        for tag in file.tags {
+            text:=strings.trim_space(tag.text)
+            if strings.has_prefix(text,"#+private") {
+                if strings.contains(text,"file") {scope.private_file=true} else {scope.private_package=true}
+            }
+        }
+        name:=filepath.base(file.fullpath)
+        written[name]=true
+        out:Output
+        strings.builder_init(&out.head,context.temp_allocator)
+        strings.builder_init(&out.decl,context.temp_allocator)
+        strings.builder_init(&out.exports,context.temp_allocator)
+        header(d,&scope,&out)
+        decls_write(d,&scope,&out,file.decls[:],"")
+        staged:=rewrite_paths(&scope,file.src,file.decls[:])
+        // After the last line, so that the lines of the source keep their numbers.
+        if out.export_count>0 {staged=strings.concatenate({staged,"\n",strings.to_string(out.exports)},context.temp_allocator)}
+        write(d,project.path(stage,name,allocator=context.temp_allocator),staged,&d.changed.stage)
+        if out.foreign_count>0 {fmt.sbprintfln(&out.head,"foreign import __mirai %q\n",relative(decl,d.desc.library))}
+        write(d,project.path(decl,name,allocator=context.temp_allocator),strings.concatenate({strings.to_string(out.head),strings.to_string(out.decl)},context.temp_allocator),&d.changed.decl)
+    }
+    // What a source no longer produces does not stay in either folder.
+    sweep(stage,written,&d.changed.stage)
+    sweep(decl,written,&d.changed.decl)
+}
+
+// Removes the files of a folder of the package that this declaration did not
+// write: a file taken out of the package goes, and what a source no longer
+// declares does not stay declared. The folder of a package can hold the
+// folders of others: only its own files are looked at. changed: a file went.
+@(private="file")
+sweep :: proc(folder:string,written:map[string]bool,changed:^bool) {
+    entries,error:=os.read_all_directory_by_path(folder,context.temp_allocator)
+    if error!=nil {return}
+    for entry in entries {
+        if entry.type==.Directory || !strings.has_suffix(entry.name,".odin") || written[entry.name] {continue}
+        if os.remove(entry.fullpath)==nil {changed^=true}
+    }
+}
+
+// The tags of the file, its package clause and its imports, in the declarations.
+@(private="file")
+header :: proc(d:^Declare,scope:^File_Scope,out:^Output) {
+    for tag in scope.file.tags {fmt.sbprintln(&out.head,strings.trim_space(tag.text))}
+    fmt.sbprintfln(&out.head,"package %s\n",scope.file.pkg_name)
+    for stmt in scope.file.decls {
+        imp,is_import:=stmt.derived.(^ast.Import_Decl)
+        if !is_import {continue}
+        fmt.sbprintln(&out.head,node_text(scope,imp))
+    }
+    fmt.sbprintln(&out.head)
+}
+
+@(private="file")
+decls_write :: proc(d:^Declare,scope:^File_Scope,out:^Output,stmts:[]^ast.Stmt,indent:string) {
+    for stmt in stmts {
+        #partial switch s in stmt.derived {
+        case ^ast.Import_Decl, ^ast.Foreign_Import_Decl, ^ast.Package_Decl:
+        case ^ast.When_Stmt:
+            when_write(d,scope,out,s,indent,false)
+        case ^ast.Foreign_Block_Decl:
+            foreign_block_write(d,scope,out,s,indent)
+        case ^ast.Value_Decl:
+            value_write(d,scope,out,s,indent)
+        case ^ast.Expr_Stmt:
+            fmt.sbprintfln(&out.decl,"%s%s",indent,rewritten_text(scope,s))
+        case:
+            append(&d.errors,fmt.aprintf("%s(%d): a declaration of a kind that cannot be declared",scope.file.fullpath,stmt.pos.line))
+        }
+    }
+}
+
+@(private="file")
+when_write :: proc(d:^Declare,scope:^File_Scope,out:^Output,s:^ast.When_Stmt,indent:string,chained:bool) {
+    cond:=node_text(scope,s.cond)
+    opening:=chained?fmt.tprintf(" else when %s {{\n",cond):fmt.tprintf("%swhen %s {{\n",indent,cond)
+    strings.write_string(&out.decl,opening)
+    strings.write_string(&out.exports,opening)
+    inner:=strings.concatenate({indent,"    "},context.temp_allocator)
+    if body,ok:=s.body.derived.(^ast.Block_Stmt);ok {decls_write(d,scope,out,body.stmts[:],inner)}
+    strings.write_string(&out.decl,fmt.tprintf("%s}",indent))
+    strings.write_string(&out.exports,fmt.tprintf("%s}",indent))
+    if s.else_stmt!=nil {
+        #partial switch e in s.else_stmt.derived {
+        case ^ast.When_Stmt:
+            when_write(d,scope,out,e,indent,true)
+            return
+        case ^ast.Block_Stmt:
+            strings.write_string(&out.decl," else {\n")
+            strings.write_string(&out.exports," else {\n")
+            decls_write(d,scope,out,e.stmts[:],inner)
+            strings.write_string(&out.decl,fmt.tprintf("%s}",indent))
+            strings.write_string(&out.exports,fmt.tprintf("%s}",indent))
+        }
+    }
+    strings.write_string(&out.decl,"\n")
+    strings.write_string(&out.exports,"\n")
+}
+
+// Procedures of C stay in the binary; the binary exports each one under its
+// own name with the calling convention of its block.
+@(private="file")
+foreign_block_write :: proc(d:^Declare,scope:^File_Scope,out:^Output,s:^ast.Foreign_Block_Decl,indent:string) {
+    convention:="c"
+    for attribute in s.attributes {
+        for elem in attribute.elems {
+            field,is_field:=elem.derived.(^ast.Field_Value)
+            if !is_field {continue}
+            if key,_:=field.field.derived.(^ast.Ident);key!=nil && key.name=="default_calling_convention" {
+                if value,is_lit:=field.value.derived.(^ast.Basic_Lit);is_lit {convention=strings.trim(value.tok.text,"\"")}
+            }
+        }
+    }
+    body,ok:=s.body.derived.(^ast.Block_Stmt)
+    if !ok {return}
+    for stmt in body.stmts {
+        decl,is_value:=stmt.derived.(^ast.Value_Decl)
+        if !is_value || len(decl.names)!=1 || len(decl.values)!=1 {continue}
+        lit,is_lit:=decl.values[0].derived.(^ast.Proc_Lit)
+        if !is_lit {continue}
+        if c_vararg(lit.type) {continue}
+        name:=ident_text(decl.names[0])
+        proc_declare(d,scope,out,decl,lit,name,convention,indent)
+    }
+}
+
+@(private="file")
+value_write :: proc(d:^Declare,scope:^File_Scope,out:^Output,decl:^ast.Value_Decl,indent:string) {
+    lit:^ast.Proc_Lit
+    if len(decl.values)==1 {lit,_=decl.values[0].derived.(^ast.Proc_Lit)}
+    private_file,private:=scope.private_file,scope.private_package
+    for attribute in decl.attributes {
+        for elem in attribute.elems {
+            key,value:=attribute_key(elem)
+            switch key {
+            case "private":
+                if value=="file" {private_file=true} else {private=true}
+            case "init","fini":
+                return
+            }
+        }
+    }
+    if lit==nil {
+        // Types, constants and groups of procedures are the same here; a
+        // variable of the package only when the rest can see it.
+        if decl.is_mutable && (private || private_file) {return}
+        fmt.sbprintfln(&out.decl,"%s%s",indent,decl_text(scope,decl))
+        return
+    }
+    // A procedure with a deferred one runs it in the scope of its caller: a
+    // call through the binary would run it on leaving the export as well.
+    if generic(lit.type) || lit.inlining==.Inline || len(lit.where_clauses)>0 || deferred(decl) {
+        fmt.sbprintfln(&out.decl,"%s%s",indent,decl_text(scope,decl))
+        return
+    }
+    if len(decl.names)!=1 {
+        append(&d.errors,fmt.aprintf("%s(%d): one procedure per declaration",scope.file.fullpath,decl.pos.line))
+        return
+    }
+    // A body copied above can call a procedure private to its file: it is
+    // declared too, under a link name of its file, which may repeat its name.
+    proc_declare(d,scope,out,decl,lit,ident_text(decl.names[0]),"",indent,private_file)
+}
+
+// The foreign declaration of a procedure, and its export in the stage.
+@(private="file")
+proc_declare :: proc(d:^Declare,scope:^File_Scope,out:^Output,decl:^ast.Value_Decl,lit:^ast.Proc_Lit,name,convention:string,indent:string,private_file:=false) {
+    link:=fmt.tprintf("%s.%s",scope.link_prefix,name)
+    if private_file {link=fmt.tprintf("%s.%s.%s",scope.link_prefix,filepath.stem(scope.file.fullpath),name)}
+    type:=lit.type
+    params,_:=params_text(scope,type,false)
+    renamed,arguments:=params_text(scope,type,true)
+    open,close:=parens(scope.src,type.pos.offset,type.end.offset)
+    if open<0 {
+        append(&d.errors,fmt.aprintf("%s(%d): the parameters of %s could not be read",scope.file.fullpath,decl.pos.line,name))
+        return
+    }
+    before:=scope.src[type.pos.offset:open+1]
+    if convention!="" && type.calling_convention==nil {before=fmt.tprintf("proc %q (",convention)}
+    else if _,is_default:=type.calling_convention.(ast.Proc_Calling_Convention_Extra);is_default && convention!="" {before=fmt.tprintf("proc %q (",convention)}
+    after:=scope.src[close:type.end.offset]
+    tags:=strings.contains(after,"#optional")?"":tags_text(lit.tags|type.tags)
+    kept:=strings.builder_make(context.temp_allocator)
+    for attribute in decl.attributes {
+        for elem in attribute.elems {
+            key,_:=attribute_key(elem)
+            switch key {
+            case "private","require_results","deprecated","warning","disabled":
+                fmt.sbprintf(&kept,",%s",node_text(scope,elem))
+            }
+        }
+    }
+    signature:=fmt.tprintf("%s%s%s%s",before,params,after,tags)
+    // Its parameters renamed: one could have the name of the procedure it calls.
+    wrapper:=fmt.tprintf("%s%s%s%s",before,renamed,after,tags)
+    fmt.sbprintfln(&out.decl,"%s@(default_calling_convention=\"odin\")",indent)
+    fmt.sbprintfln(&out.decl,"%sforeign __mirai {{ @(link_name=%q%s) %s :: %s --- }}",indent,link,strings.to_string(kept),name,signature)
+    out.foreign_count+=1
+    call:=fmt.tprintf("%s(%s)",name,arguments)
+    if type.results!=nil && !type.diverging {call=fmt.tprintf("return %s",call)}
+    fmt.sbprintfln(&out.exports,"%s@(export,link_name=%q%s) __mirai_export_%s :: %s {{%s}}",indent,link,private_file?",private=\"file\"":"",name,wrapper,call)
+    out.export_count+=1
+}
+
+// The parentheses of the parameters of a procedure type, skipping what is
+// inside strings and nested parentheses.
+@(private="file")
+parens :: proc(src:string,start,end:int) -> (open,close:int) {
+    open,close=-1,-1
+    depth:=0
+    for i:=start;i<end;i+=1 {
+        switch src[i] {
+        case '"','\'','`':
+            quote:=src[i]
+            i+=1
+            for i<end && src[i]!=quote {
+                if src[i]=='\\' && quote!='`' {i+=1}
+                i+=1
+            }
+        case '(':
+            if depth==0 && open<0 {open=i}
+            depth+=1
+        case ')':
+            depth-=1
+            if depth==0 && open>=0 {return open,i}
+        }
+    }
+    return -1,-1
+}
+
+// The parameters with a name each, and the arguments that pass them on.
+@(private="file")
+params_text :: proc(scope:^File_Scope,type:^ast.Proc_Type,rename:bool) -> (params,arguments:string) {
+    p:=strings.builder_make(context.temp_allocator)
+    a:=strings.builder_make(context.temp_allocator)
+    generated:=0
+    after_variadic:=false
+    argument :: proc(a:^strings.Builder,name,original:string,variadic,after_variadic:bool) {
+        if strings.builder_len(a^)>0 {strings.write_string(a,", ")}
+        switch {
+        case variadic:       fmt.sbprintf(a,"..%s",name)
+        case after_variadic: fmt.sbprintf(a,"%s=%s",original,name)
+        case:                strings.write_string(a,name)
+        }
+    }
+    for field,i in type.params.list {
+        if i>0 {strings.write_string(&p,", ")}
+        prefixes:=[?]struct{flag:ast.Field_Flag,text:string}{
+            {.Using,"using "},{.No_Alias,"#no_alias "},{.C_Vararg,"#c_vararg "},{.Const,"#const "},{.Any_Int,"#any_int "},
+            {.Subtype,"#subtype "},{.By_Ptr,"#by_ptr "},{.No_Broadcast,"#no_broadcast "},{.No_Capture,"#no_capture "},
+        }
+        for prefix in prefixes {
+            if prefix.flag in field.flags {strings.write_string(&p,prefix.text)}
+        }
+        if field.type==nil && field.default_value==nil {
+            // Types without names.
+            for name,j in field.names {
+                if j>0 {strings.write_string(&p,", ")}
+                text:=fmt.tprintf("__p%d",generated)
+                generated+=1
+                fmt.sbprintf(&p,"%s:%s",text,rewritten_text(scope,name))
+                argument(&a,text,text,false,after_variadic)
+            }
+            continue
+        }
+        variadic:=.Ellipsis in field.flags
+        type_text:=""
+        if field.type!=nil {
+            if _,is_ellipsis:=field.type.derived.(^ast.Ellipsis);is_ellipsis {variadic=true}
+            type_text=rewritten_text(scope,field.type)
+            if variadic && !strings.has_prefix(type_text,"..") {type_text=strings.concatenate({"..",type_text},context.temp_allocator)}
+        }
+        names:=make([dynamic]string,context.temp_allocator)
+        originals:=make([dynamic]string,context.temp_allocator)
+        for name in field.names {
+            text:=ident_text(name)
+            append(&originals,text)
+            if text=="" || text=="_" || rename {
+                text=fmt.tprintf("__p%d",generated)
+                generated+=1
+            }
+            append(&names,text)
+        }
+        if len(names)==0 {
+            append(&names,fmt.tprintf("__p%d",generated))
+            append(&originals,names[0])
+            generated+=1
+        }
+        fmt.sbprintf(&p,"%s:%s",strings.join(names[:],", ",context.temp_allocator),type_text)
+        if field.default_value!=nil {fmt.sbprintf(&p,"=%s",rewritten_text(scope,field.default_value))}
+        for name,j in names {argument(&a,name,originals[j],variadic,after_variadic)}
+        if variadic {after_variadic=true}
+    }
+    return strings.to_string(p),strings.to_string(a)
+}
+
+@(private="file")
+tags_text :: proc(tags:ast.Proc_Tags) -> string {
+    text:=""
+    if .Optional_Ok in tags {text=strings.concatenate({text," #optional_ok"},context.temp_allocator)}
+    if .Optional_Allocator_Error in tags {text=strings.concatenate({text," #optional_allocator_error"},context.temp_allocator)}
+    return text
+}
+
+@(private="file")
+deferred :: proc(decl:^ast.Value_Decl) -> bool {
+    for attribute in decl.attributes {
+        for elem in attribute.elems {
+            key,_:=attribute_key(elem)
+            if strings.has_prefix(key,"deferred_") {return true}
+        }
+    }
+    return false
+}
+
+// A procedure with a parameter of a type to be given: $T anywhere in a parameter.
+@(private="file")
+generic :: proc(type:^ast.Proc_Type) -> bool {
+    if type.generic {return true}
+    if type.params==nil {return false}
+    found:=false
+    visit :: proc(v:^ast.Visitor,node:^ast.Node) -> ^ast.Visitor {
+        if node==nil {return nil}
+        found:=cast(^bool)v.data
+        #partial switch n in node.derived {
+        case ^ast.Poly_Type: found^=true
+        case ^ast.Typeid_Type:
+            if n.specialization!=nil {found^=true}
+        }
+        return found^?nil:v
+    }
+    v:=ast.Visitor{visit=visit,data=&found}
+    for field in type.params.list {
+        for name in field.names {ast.walk(&v,name)}
+        if field.type!=nil {ast.walk(&v,field.type)}
+        if found {return true}
+    }
+    return false
+}
+
+@(private="file")
+c_vararg :: proc(type:^ast.Proc_Type) -> bool {
+    if type.params==nil {return false}
+    for field in type.params.list {
+        if .C_Vararg in field.flags {return true}
+    }
+    return false
+}
+
+@(private="file")
+attribute_key :: proc(elem:^ast.Expr) -> (key,value:string) {
+    #partial switch e in elem.derived {
+    case ^ast.Ident:
+        return e.name,""
+    case ^ast.Field_Value:
+        if k,ok:=e.field.derived.(^ast.Ident);ok {key=k.name}
+        if v,ok:=e.value.derived.(^ast.Basic_Lit);ok {value=strings.trim(v.tok.text,"\"")}
+        if v,ok:=e.value.derived.(^ast.Ident);ok {value=v.name}
+    }
+    return
+}
+
+@(private="file")
+ident_text :: proc(e:^ast.Expr) -> string {
+    if id,ok:=e.derived.(^ast.Ident);ok {return id.name}
+    return ""
+}
+
+@(private="file")
+node_text :: proc(scope:^File_Scope,node:^ast.Node) -> string {
+    return scope.src[node.pos.offset:node.end.offset]
+}
+
+// A declaration with its attributes, as written, with relative paths made
+// relative to the folder of the declarations.
+@(private="file")
+decl_text :: proc(scope:^File_Scope,decl:^ast.Value_Decl) -> string {
+    start:=decl.pos.offset
+    if len(decl.attributes)>0 {start=min(start,decl.attributes[0].pos.offset)}
+    return rewrite_range(scope,start,decl.end.offset)
+}
+
+@(private="file")
+rewritten_text :: proc(scope:^File_Scope,node:^ast.Node) -> string {
+    // The parser leaves no end on a typeid without specialization.
+    if t,is_typeid:=node.derived.(^ast.Typeid_Type);is_typeid && t.specialization==nil {return "typeid"}
+    return rewrite_range(scope,node.pos.offset,node.end.offset)
+}
+
+// The text between two offsets with the paths of #load and its kin made
+// relative to the folder of the declarations: the shared cache of the engine
+// copies them into other checkouts.
+@(private="file")
+rewrite_range :: proc(scope:^File_Scope,start,end:int) -> string {
+    text:=scope.src[start:end]
+    b:=strings.builder_make(context.temp_allocator)
+    rest:=text
+    for {
+        at:=directive_path(rest)
+        if at.start<0 {break}
+        strings.write_string(&b,rest[:at.start])
+        strings.write_string(&b,declared_path(scope,rest[at.start:at.end]))
+        rest=rest[at.end:]
+    }
+    strings.write_string(&b,rest)
+    return strings.to_string(b)
+}
+
+// The copy of a source for the stage: the same lines, with the paths of
+// #load and of foreign imports absolute.
+@(private="file")
+rewrite_paths :: proc(scope:^File_Scope,src:string,decls:[]^ast.Stmt) -> string {
+    edits:=make([dynamic][3]int,context.temp_allocator) // start, end, index of replacement
+    replacements:=make([dynamic]string,context.temp_allocator)
+    collect_foreign :: proc(stmts:[]^ast.Stmt,edits:^[dynamic][3]int,replacements:^[dynamic]string,scope:^File_Scope) {
+        for stmt in stmts {
+            #partial switch s in stmt.derived {
+            case ^ast.Foreign_Import_Decl:
+                for path in s.fullpaths {
+                    lit,ok:=path.derived.(^ast.Basic_Lit)
+                    if !ok {continue}
+                    value:=strings.trim(lit.tok.text,"\"`")
+                    if strings.contains(value,":") || filepath.is_abs(value) {continue}
+                    append(edits,[3]int{lit.pos.offset,lit.end.offset,len(replacements)})
+                    joined,_:=filepath.join({scope.folder,value},context.temp_allocator)
+                    append(replacements,fmt.tprintf("%q",relative(scope.stage_folder,joined)))
+                }
+            case ^ast.When_Stmt:
+                if body,ok:=s.body.derived.(^ast.Block_Stmt);ok {collect_foreign(body.stmts[:],edits,replacements,scope)}
+                if s.else_stmt!=nil {
+                    #partial switch e in s.else_stmt.derived {
+                    case ^ast.Block_Stmt: collect_foreign(e.stmts[:],edits,replacements,scope)
+                    case ^ast.When_Stmt: collect_foreign({e},edits,replacements,scope)
+                    }
+                }
+            }
+        }
+    }
+    collect_foreign(decls,&edits,&replacements,scope)
+    rest:=0
+    for {
+        at:=directive_path(src[rest:])
+        if at.start<0 {break}
+        append(&edits,[3]int{rest+at.start,rest+at.end,len(replacements)})
+        append(&replacements,absolute_path(scope,src[rest+at.start:rest+at.end]))
+        rest+=at.end
+    }
+    if len(edits)==0 {return src}
+    slice.sort_by(edits[:],proc(a,b:[3]int) -> bool {return a[0]<b[0]})
+    b:=strings.builder_make(context.temp_allocator)
+    at:=0
+    for edit in edits {
+        strings.write_string(&b,src[at:edit[0]])
+        strings.write_string(&b,replacements[edit[2]])
+        at=edit[1]
+    }
+    strings.write_string(&b,src[at:])
+    return strings.to_string(b)
+}
+
+// The string literal right after the next #load, #load_hash or #load_directory.
+@(private="file")
+directive_path :: proc(text:string) -> (at:struct{start,end:int}) {
+    at={-1,-1}
+    search:=0
+    for {
+        found:=strings.index(text[search:],"#load")
+        if found<0 {return}
+        open:=strings.index_byte(text[search+found:],'(')
+        if open<0 {return}
+        quote:=search+found+open+1
+        for quote<len(text) && (text[quote]==' ' || text[quote]=='\t') {quote+=1}
+        if quote<len(text) && text[quote]=='"' {
+            close:=strings.index_byte(text[quote+1:],'"')
+            if close<0 {return}
+            return {quote,quote+1+close+1}
+        }
+        search=quote
+    }
+}
+
+@(private="file")
+absolute_path :: proc(scope:^File_Scope,literal:string) -> string {
+    value:=literal[1:len(literal)-1]
+    if strings.contains(value,":") || filepath.is_abs(value) {return literal}
+    joined,_:=filepath.join({scope.folder,value},context.temp_allocator)
+    return fmt.tprintf("%q",slashes(joined,context.temp_allocator))
+}
+
+@(private="file")
+declared_path :: proc(scope:^File_Scope,literal:string) -> string {
+    value:=literal[1:len(literal)-1]
+    if strings.contains(value,":") || filepath.is_abs(value) {return literal}
+    joined,_:=filepath.join({scope.folder,value},context.temp_allocator)
+    return fmt.tprintf("%q",relative(scope.decl_folder,joined))
+}
+
+// A path as seen from a folder, with forward slashes: foreign imports take no absolute ones.
+@(private="file")
+relative :: proc(folder,target:string) -> string {
+    rel,error:=filepath.rel(folder,target,context.temp_allocator)
+    if error!=nil {return slashes(target,context.temp_allocator)}
+    return slashes(rel,context.temp_allocator)
+}
+
+@(private="file")
+write :: proc(d:^Declare,path,text:string,changed:^bool) {
+    written,error:=write_changed(path,text)
+    if error!=nil {append(&d.errors,fmt.aprintf("%s: could not be written",path));return}
+    if written {changed^=true}
+}

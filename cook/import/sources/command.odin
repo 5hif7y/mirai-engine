@@ -1,0 +1,246 @@
+package sources
+
+import "base:runtime"
+import "core:fmt"
+import "core:io"
+import "core:strconv"
+import "core:strings"
+import "core:time"
+import "mirai:asset"
+import importer "mirai:cook/import"
+import "mirai:std/base"
+import "mirai:std/jobs"
+
+// The command mirai import, which the import program of the engine runs: it
+// turns a model (OBJ, glTF, GLB, USD, FBX), an image, a sound (WAV, Ogg Vorbis), a
+// font (TrueType, OpenType), a CSV of texts or a manifest of prompts
+// (<name>.prompts.json) into assets with import_source, as the editor does: a
+// model also gets the prefab of its hierarchy.
+// A model or an image is imported with the settings kept next to it in
+// <file>.import, changed by the options given; the result is written back
+// there, so importing again without options gives the same assets. --no-save
+// leaves that file as it is. An asset whose file already is the one the
+// import gives is kept as it is, unless --rebuild. Importing a source again
+// keeps the ids and files of what an earlier import of it wrote under --root
+// (or --out); --into <id> names that import by its prefab, texture or sound
+// when the source was moved or renamed. Only models and images have settings.
+// The report goes to output, one asset per line: id, kind, bytes and path, and
+// under it, indented, what the asset holds; then the settings file and the
+// warnings. A failure goes to errors as "mirai import: <file>: <reason>".
+// --profile adds the seconds each zone of the import took, summed over the
+// threads that cooked it and on the thread that imports, and the time no zone
+// of that thread covers.
+// The import cooks on every core.
+// Exit codes: 0 done, 1 failed, 2 misuse.
+
+@(private="file")
+IMPORT_USAGE :: "Usage: mirai import <file> --out <folder> [--max-texture N] [--uncompressed|--blocks] [--root <folder>] [--into <id>] [--srgb|--normal|--normal-green-down|--data] [--alpha-coverage C] [--lods auto|none] [--max-triangles N] [--collision none|hull|pieces|mesh] [--force-collision] [--hulls N] [--parts auto|all|none] [--rig source|humanoid|fox|horse|bird|dragon|kaiju|shark|snake|spider] [--rig-crotch M] [--rig-neck M] [--rebuild] [--no-save] [--profile] [--dev|--release]"
+
+command :: proc(args:[]string,output,errors:io.Writer) -> int {
+    file,out:string
+    options:importer.Import_Options
+    profiled:bool
+    // What the options change of the settings the source has.
+    Change :: enum {Max_Texture,Textures,Image,Alpha_Coverage,Lods,Max_Triangles,Collision,Force_Collision,Hulls,Parts,Rig,Rig_Crotch,Rig_Neck}
+    given:importer.Import_Settings
+    changed:bit_set[Change]
+    at:=0
+    value :: proc(args:[]string,at:^int) -> (string,bool) {
+        at^+=1
+        if at^>=len(args) {return "",false}
+        return args[at^],true
+    }
+    for ;at<len(args);at+=1 {
+        ok:=true
+        switch args[at] {
+        case "--out": out,ok=value(args,&at)
+        case "--root": options.root,ok=value(args,&at)
+        case "--into":
+            text:string
+            if text,ok=value(args,&at);ok {
+                parsed:bool
+                if options.into,parsed=base.asset_id_parse(text);!parsed || options.into=={} {fmt.wprintln(errors,"mirai import: --into needs the 32-hex-digit id of the prefab, texture or sound written by the import being updated");return 2}
+            }
+        case "--max-texture":
+            text:string
+            text,ok=value(args,&at)
+            if ok {
+                size,parsed:=strconv.parse_int(text)
+                if !parsed || size<=0 || size>asset.TEXTURE_MAX_SIZE {fmt.wprintfln(errors,"mirai import: --max-texture needs an integer from 1 to %d",asset.TEXTURE_MAX_SIZE);return 2}
+                given.max_texture_size=size
+                changed+={.Max_Texture}
+            }
+        case "--hulls":
+            text:string
+            text,ok=value(args,&at)
+            if ok {
+                count,parsed:=strconv.parse_int(text)
+                if !parsed || count<1 || count>64 {fmt.wprintln(errors,"mirai import: --hulls needs an integer from 1 to 64");return 2}
+                given.collision_hulls=count
+                changed+={.Hulls}
+            }
+        case "--max-triangles":
+            text:string
+            text,ok=value(args,&at)
+            if ok {
+                count,parsed:=strconv.parse_int(text)
+                if !parsed || count<0 {fmt.wprintln(errors,"mirai import: --max-triangles needs an integer: the most triangles of each mesh, or 0 for those of the source");return 2}
+                given.max_triangles=count
+                changed+={.Max_Triangles}
+            }
+        case "--alpha-coverage":
+            text:string
+            text,ok=value(args,&at)
+            if ok {
+                cutoff,parsed:=strconv.parse_f64(text)
+                if !parsed || !(cutoff>=0 && cutoff<=1) {fmt.wprintln(errors,"mirai import: --alpha-coverage needs the cutoff of the masked material, from 0 (none) to 1");return 2}
+                given.alpha_coverage=f32(cutoff)
+                changed+={.Alpha_Coverage}
+            }
+        case "--force-collision": given.force_collision=true;changed+={.Force_Collision}
+        case "--no-save": options.no_save=true
+        case "--profile": profiled=true
+        case "--rebuild": options.rebuild=true
+        case "--uncompressed": given.textures=.Uncompressed;changed+={.Textures}
+        case "--blocks": given.textures=.Blocks;changed+={.Textures}
+        case "--srgb","--normal","--normal-green-down","--data":
+            if .Image in changed {fmt.wprintln(errors,"mirai import: an image is one of --srgb, --normal, --normal-green-down or --data; pass only one");return 2}
+            switch args[at] {
+            case "--srgb": given.image=.Color
+            case "--normal": given.image=.Normal
+            case "--normal-green-down": given.image=.Normal_Green_Down
+            case: given.image=.Data
+            }
+            changed+={.Image}
+        case "--lods":
+            text:string
+            text,ok=value(args,&at)
+            switch text {
+            case "auto": given.lods=.Auto
+            case "none": given.lods=.None
+            case: ok=false
+            }
+            changed+={.Lods}
+        case "--collision":
+            text:string
+            text,ok=value(args,&at)
+            switch text {
+            case "none":   given.collision=.None
+            case "hull":   given.collision=.Hull
+            case "pieces": given.collision=.Pieces
+            case "mesh":   given.collision=.Mesh
+            case: ok=false
+            }
+            changed+={.Collision}
+        case "--parts":
+            text:string
+            text,ok=value(args,&at)
+            switch text {
+            case "auto": given.parts=.Auto
+            case "all":  given.parts=.All
+            case "none": given.parts=.None
+            case: ok=false
+            }
+            changed+={.Parts}
+        case "--rig":
+            text:string
+            text,ok=value(args,&at)
+            if ok {given.rig,ok=importer.rig_from_name(text)}
+            changed+={.Rig}
+        case "--rig-crotch","--rig-neck":
+            flag:=args[at]
+            text:string
+            text,ok=value(args,&at)
+            if ok {
+                height,parsed:=strconv.parse_f64(text)
+                if !parsed || !(height>=0) || height-height!=0 {fmt.wprintfln(errors,"mirai import: %s needs a height in meters in the model, or 0 for the one the fit finds",flag);return 2}
+                if flag=="--rig-crotch" {given.rig_crotch=f32(height);changed+={.Rig_Crotch}} else {given.rig_neck=f32(height);changed+={.Rig_Neck}}
+            }
+        case:
+            if strings.has_prefix(args[at],"--") || file!="" {fmt.wprintln(errors,IMPORT_USAGE);return 2}
+            file=args[at]
+        }
+        if !ok {fmt.wprintln(errors,IMPORT_USAGE);return 2}
+    }
+    js:jobs.Job_System
+    if !jobs.system_init(&js,{threads=jobs.THREADS_AUTO,allocator=runtime.heap_allocator()}) {
+        fmt.wprintln(errors,"mirai import: the threads to cook on could not be started")
+        return 1
+    }
+    defer jobs.system_destroy(&js)
+    options.worker={system=&js,worker=jobs.OWNER}
+    kind:=source_kind(file)
+    if file=="" || out=="" {fmt.wprintln(errors,IMPORT_USAGE);return 2}
+    if changed&{.Image,.Alpha_Coverage}!={} && kind!=.Image {fmt.wprintln(errors,"mirai import: --srgb, --normal, --normal-green-down, --data and --alpha-coverage apply only to images");return 2}
+    if changed&{.Lods,.Max_Triangles,.Collision,.Force_Collision,.Hulls,.Parts,.Rig,.Rig_Crotch,.Rig_Neck}!={} && kind!=.Model {fmt.wprintln(errors,"mirai import: --lods, --max-triangles, --collision, --force-collision, --hulls, --parts and the --rig options apply only to models");return 2}
+
+    if kind==.Model || kind==.Image {
+        stored,_,settings_error:=importer.settings_load(file)
+        if settings_error.code!=.None {
+            fmt.wprintfln(errors,"mirai import: %s: %s",file,settings_error.message)
+            return 1
+        }
+        options.settings,options.ignore_stored=stored,true
+        if .Max_Texture in changed {options.max_texture_size=given.max_texture_size}
+        if .Textures in changed {options.textures=given.textures}
+        if .Image in changed {options.image=given.image}
+        if .Alpha_Coverage in changed {options.alpha_coverage=given.alpha_coverage}
+        if .Lods in changed {options.lods=given.lods}
+        if .Max_Triangles in changed {options.max_triangles=given.max_triangles}
+        if .Collision in changed {options.collision=given.collision}
+        if .Force_Collision in changed {options.force_collision=given.force_collision}
+        if .Hulls in changed {options.collision_hulls=given.collision_hulls}
+        if .Parts in changed {options.parts=given.parts}
+        if .Rig in changed {options.rig=given.rig}
+        if .Rig_Crotch in changed {options.rig_crotch=given.rig_crotch}
+        if .Rig_Neck in changed {options.rig_neck=given.rig_neck}
+        // The heights tell the fit of a person where the body is.
+        if options.rig!=.Humanoid {
+            if changed&{.Rig_Crotch,.Rig_Neck}!={} {fmt.wprintln(errors,"mirai import: --rig-crotch and --rig-neck go with --rig humanoid");return 2}
+            options.rig_crotch,options.rig_neck=0,0
+        }
+    }
+    profile:base.Profile
+    started:=time.tick_now()
+    if profiled && !importer.profile_begin(&profile,&options) {fmt.wprintln(errors,"mirai import: no memory for --profile");return 1}
+    defer if profiled {profile_print(&profile,started,output);base.profile_destroy(&profile)}
+    report,error:=import_source(file,out,options)
+    if error.code!=.None {
+        fmt.wprintfln(errors,"mirai import: %s: %s",file,error.message)
+        return 1
+    }
+    defer importer.report_destroy(&report)
+    written_print(output,report.assets[:])
+    if report.saved!="" {fmt.wprintfln(output,"settings %s",report.saved)}
+    for warning in report.warnings {fmt.wprintfln(output,"warning: %s",warning)}
+    return 0
+}
+
+// The zones of a profiled import (importer.profile_totals), each with its
+// seconds summed over the threads and those on the thread that imports, and
+// the wall time no zone of that thread covers.
+@(private="file")
+profile_print :: proc(profile:^base.Profile,started:time.Tick,output:io.Writer) {
+    seconds:=time.duration_seconds(time.tick_since(started))
+    totals,lost:=importer.profile_totals(profile,context.temp_allocator)
+    fmt.wprintln(output,"profile (seconds summed over the threads, then on the thread that imports; a zone counts inside those that hold it):")
+    for t in totals {fmt.wprintfln(output,"  %s%-24s %10.3f s %10.3f s %7d",strings.repeat("  ",t.depth,context.temp_allocator),t.name,t.seconds,t.owner,t.count)}
+    fmt.wprintfln(output,"  %-24s %10.3f s","(no zone)",importer.profile_unzoned(totals,seconds))
+    fmt.wprintfln(output,"  %-24s %10.3f s","(total)",seconds)
+    if lost>0 {fmt.wprintfln(output,"  %d zones were lost: the rings hold %d each",lost,importer.PROFILE_ZONES)}
+}
+
+// One line per asset written (id, kind, bytes and path) with what it holds
+// under it, and how many there are.
+@(private="file")
+written_print :: proc(output:io.Writer,assets:[]importer.Written) {
+    buffer:[32]u8
+    kept:=0
+    for written in assets {
+        info,_:=asset.kind_info(written.kind)
+        fmt.wprintfln(output,"%s %-8s %d %s",base.asset_id_format(written.id,buffer[:]),info.name,written.bytes,written.path)
+        if written.detail!="" {fmt.wprintfln(output,"  %s",written.detail)}
+        if written.kept {kept+=1}
+    }
+    if kept>0 {fmt.wprintfln(output,"%d assets, %d were already up to date",len(assets),kept)} else {fmt.wprintfln(output,"%d assets",len(assets))}
+}

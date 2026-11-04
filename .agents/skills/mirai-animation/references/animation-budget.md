@@ -1,0 +1,61 @@
+# Presentation rate and numeric jobs
+
+## Animation_Budget
+
+`Animation_Budget` goes on the rig that has `Animation` (its meshes with `Pose_Source` read that
+policy): `period` is the minimum of render frames between palette updates and `significance` its
+priority; when disabled, the defaults apply. `Animation_Budget_Config` is the project configuration:
+`max_palette_updates` at 0 leaves all palettes eligible and, otherwise, limits how many meshes are
+updated per frame (each mesh may have other joints and another space); `job_grain` is how many jobs
+a range takes and `parallel` uses the application's scheduler.
+
+## Selection
+
+- The priority combines age, period and significance, with the entity index for ties; the growing
+  age prevents a lower priority from being left unpresented.
+- New, reloaded, rebound or Edit-evaluated palettes are forced even if the limit has already been
+  consumed.
+- A palette that does not meet the period or is left outside the limit keeps its previous output;
+  the external placement of the mesh keeps being updated.
+- `Budget_Runtime` (world state, copyable for Play and snapshots) stores the last update per slot
+  and generation, the selection and the `evaluated` and `throttled` statistics.
+- `budget_select` receives candidates, frame and configuration: it rejects invalid periods or
+  significances and repeated slots in linear time; a frame that goes backwards resets the ages; it
+  sorts by priority only when the limit excludes eligible palettes. Stable frames reuse the buffers
+  that `budget_prepare` sizes.
+- It only reduces the presentation rate: clocks, curves, events, actions, root motion, grounding,
+  constraints and sockets are evaluated on every fixed tick. The full palette is computed; bones are
+  not removed or LODs chosen.
+
+## Parallel execution
+
+`animation_skin` prepares assets, meshes and GPU on the owner thread, builds one `Pose_Palette_Work`
+per palette (parents, previous and current poses, joints, mesh space and exclusive buffers, without
+names or reference pose) and calls `pose_palette_batch`.
+
+- The same path serves with zero workers, with `parallel=false` or with the scheduler; without
+  chosen palettes there are no jobs and with up to `job_grain` it computes on the owner thread.
+- Each job interpolates TRS, composes the global pose with `pose_world` (validating parents and TRS
+  in the same pass) and converts the joints to skin matrices.
+- `Palette_Workspace` keeps the memory ranges already checked: each call compares address, length
+  and access of the buffers and only sorts and checks exclusivity when something changed or the
+  previous check failed. Every overlap where some access writes is rejected, also in budget subsets.
+- Workers do not load assets, do not allocate, do not access the world and do not write the GPU;
+  each job publishes only its buffers and `ok`, and an invalid preparation clears all the `ok`
+  first. After the barrier of [std/jobs](../../mirai-std/references/jobs.md), the owner thread
+  uploads the valid palettes and publishes the draws.
+- An invalid input or upload does not publish that draw and is a problem of the entity
+  (`animation.skin_*`); an out-of-range policy turns the budget off that frame and is
+  `animation.budget_policy` of the rig.
+- Capacity changes or reloads may allocate; the stable path reuses jobs, scratch and palettes.
+
+## Verification
+
+- `budget_test.odin` (`plugins/animation/runtime`): period, priority, limit, forced update, frame
+  going backwards, sparse slots, copies without allocations, identical poses and palettes with zero
+  and two workers, rejection of aliases and invalid inputs, and workspace intact on a growth
+  failure.
+- `world_poses_validate_topology_values_and_aliases_without_a_reference_skeleton` (`std/anim`):
+  size, topology, TRS, overflow and aliases of the public composition, including `pose_world`.
+- `skeletal_instances_use_independent_dense_poses_and_eighth_influence`: preparation, batch, upload
+  and readback with independent poses, with [graphics validation](../../mirai-rendering/SKILL.md).

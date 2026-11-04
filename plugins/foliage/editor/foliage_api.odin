@@ -1,0 +1,350 @@
+package foliage_editor
+
+import "core:math"
+import "core:math/linalg"
+import "core:strings"
+import "mirai:core"
+import "mirai:editor"
+import "mirai:editor/api"
+import "mirai:std/base"
+import mm "mirai:std/math"
+import "mirai:std/serial"
+import foliage "plugins:foliage/runtime"
+
+// The methods of the foliage for agents and scripts: what the panel does,
+// in the edited world, each a step of undo kept unsaved as a stroke of the
+// tool is. foliage.paint does what one stroke of the brush does from at to
+// to: Paint fills to the density of each type, under its rules, Erase leaves
+// erase_density of it, Reapply gives the instances the values of their type
+// again, and Generate turns on the generator of the cells.
+
+@(storage)
+Foliage_Api :: struct {provider:editor.Api_Provider}
+
+FOLIAGE_API_DEFAULT :: Foliage_Api{provider={register=foliage_api_register}}
+
+Create_Params :: struct {
+    at:[3]f32 `mirai:"optional,label=Where its entity stands; omitted: under the target of the view"`,
+}
+
+Type_Add_Params :: struct {
+    id:base.Entity_Id `mirai:"label=The entity of the Foliage"`,
+    mesh:base.Asset_Id `mirai:"label=The .mesh it shows"`,
+}
+
+Type_Set_Params :: struct {
+    id:base.Entity_Id `mirai:"label=The entity of the Foliage"`,
+    type:u32 `mirai:"label=The id of the type as foliage.query lists them"`,
+    name:[32]u8 `mirai:"text,optional"`,
+    mesh:base.Asset_Id `mirai:"optional,label=Another mesh: its instances stay"`,
+    density:f32 `mirai:"optional,min=0,unit=1/m2,label=Instances per square metre the generator and Paint place"`,
+    scale:[2]f32 `mirai:"optional,label=Across x and z: lowest and highest"`,
+    height:[2]f32 `mirai:"optional,label=Along y times the scale across: lowest and highest"`,
+    yaw:f32 `mirai:"optional,label=Degrees of a turn at random"`,
+    tilt:f32 `mirai:"optional,label=Degrees of a lean at random"`,
+    align:f32 `mirai:"optional,min=0,max=1,label=How much it leans with the ground"`,
+    offset:[2]f32 `mirai:"optional,label=Metres it sinks (below 0) or rises: lowest and highest"`,
+    rule:bool `mirai:"optional,label=It stands only where slope and ground_height and layers take it"`,
+    slope:[2]f32 `mirai:"optional,label=Degrees from horizontal of its rule"`,
+    ground_height:[2]f32 `mirai:"optional,label=Metres of the ground of its rule in the space of the Foliage"`,
+    layers:u32 `mirai:"optional,max=15,label=Bits of the terrain layers of its rule; 0 any"`,
+    weight:f32 `mirai:"optional,min=0,max=1,label=Of those layers together at least"`,
+    fade_distance:f32 `mirai:"optional,min=0,unit=m"`,
+    cull_distance:f32 `mirai:"optional,min=0,unit=m"`,
+    wind:f32 `mirai:"optional,min=0"`,
+    casts_shadow:bool `mirai:"optional"`,
+}
+
+Type_Remove_Params :: struct {
+    id:base.Entity_Id `mirai:"label=The entity of the Foliage"`,
+    type:u32 `mirai:"label=The id of the type: it goes with its instances"`,
+}
+
+Paint_Params :: struct {
+    id:base.Entity_Id `mirai:"label=The entity of the Foliage"`,
+    mode:[16]u8 `mirai:"text,label=paint or erase or reapply or generate or ungenerate"`,
+    at:[3]f32 `mirai:"label=Where the brush touches in the world: the surface under it"`,
+    to:[3]f32 `mirai:"optional,label=Where the stroke goes on to touching every half radius"`,
+    radius:f32 `mirai:"optional,min=0.1,max=500,unit=m"`,
+    types:[8]u32 `mirai:"optional,label=The ids of the types it paints or erases or reapplies; omitted: every type"`,
+    density:f32 `mirai:"optional,min=0.01,max=1,label=Of paint: of the density of each type"`,
+    erase_density:f32 `mirai:"optional,min=0,max=1,label=Of erase: of the density of each type it leaves"`,
+    ground_only:bool `mirai:"optional,label=Of paint: only on the ground of the foliage (a terrain)"`,
+}
+
+Place_Params :: struct {
+    id:base.Entity_Id `mirai:"label=The entity of the Foliage"`,
+    type:u32 `mirai:"label=The id of the type"`,
+    at:[3]f32 `mirai:"label=Where it stands in the world: on the surface under it"`,
+}
+
+Query_Params :: struct {
+    id:base.Entity_Id `mirai:"label=The entity of the Foliage"`,
+    min:[3]f32 `mirai:"optional,label=A corner of the box of the world it lists; without min and max: only the types and their counts"`,
+    max:[3]f32 `mirai:"optional"`,
+    limit:u32 `mirai:"optional,min=1,max=4096,label=Instances listed at most"`,
+}
+
+@(private)
+foliage_api_register :: proc(s:^editor.Session) {
+    paint_defaults:=Paint_Params{radius=3,density=1}
+    query_defaults:=Query_Params{limit=256}
+    editor.api_method_register(s,{name="foliage.create",summary="Makes a Foliage in the edited scene, with a .foliage of no types in memory until it is saved; one step of undo takes it away.",params=Create_Params,params_info=type_info_of(Create_Params),result_schema=`{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`,run=api_create})
+    editor.api_method_register(s,{name="foliage.type_add",summary="Adds a type of foliage that shows a mesh, as one step of undo; its id names it in the other methods.",params=Type_Add_Params,params_info=type_info_of(Type_Add_Params),result_schema=`{"type":"object","properties":{"type":{"type":"integer"}},"required":["type"]}`,run=api_type_add})
+    editor.api_method_register(s,{name="foliage.type_set",summary="Changes the values of a type of foliage it is given, as one step of undo; the others stay: its mesh, how dense, large, turned and leaned it is, its offset, its rule of slope, height and terrain layers, its distances, wind and shadow.",params=Type_Set_Params,params_info=type_info_of(Type_Set_Params),result_schema=`{"type":"object","properties":{"revision":{"type":"integer"}},"required":["revision"]}`,run=api_type_set})
+    editor.api_method_register(s,{name="foliage.type_remove",summary="Takes a type of foliage out with its instances, as one step of undo.",params=Type_Remove_Params,params_info=type_info_of(Type_Remove_Params),flags={.Destructive},result_schema=`{"type":"object","properties":{"revision":{"type":"integer"}},"required":["revision"]}`,run=api_type_remove})
+    editor.api_method_register(s,{name="foliage.paint",summary="One stroke of the foliage brush from at to to (or at alone), as one step of undo: paint fills the ring to the density of each type under its rules, erase leaves erase_density of it, reapply gives the instances the scale, turn and offset of their type again, generate and ungenerate turn the generator of the cells under the ring on or off.",params=Paint_Params,params_info=type_info_of(Paint_Params),defaults=&paint_defaults,result_schema=`{"type":"object","properties":{"changed":{"type":"boolean"},"revision":{"type":"integer"}},"required":["changed","revision"]}`,run=api_paint})
+    editor.api_method_register(s,{name="foliage.place",summary="Puts one instance of a type on the surface under a point, with the scale, turn and offset of its type at random, as one step of undo.",params=Place_Params,params_info=type_info_of(Place_Params),result_schema=`{"type":"object","properties":{"revision":{"type":"integer"}},"required":["revision"]}`,run=api_place})
+    editor.api_method_register(s,{name="foliage.query",summary="The types of a Foliage with how many instances each shows, and the instances inside a box of the world: type, where they are, their scale and whether they are manual or generated.",params=Query_Params,params_info=type_info_of(Query_Params),defaults=&query_defaults,flags={.Read_Only},result_schema=`{"type":"object","properties":{"types":{"type":"array"},"instances":{"type":"array"},"more":{"type":"boolean"}},"required":["types"]}`,run=api_query})
+}
+
+// The tool and the edited world with the source of a Foliage ready to edit.
+@(private)
+api_foliage :: proc(s:^editor.Session,call:^api.Call,id:base.Entity_Id) -> (tool:^Foliage_Tool,world:core.World_Ref,e:core.Entity,owner:mm.Transform,ground:^foliage.Ground_Owner,ok:bool) {
+    if editor.playing(s) {api.call_fail(call,api.INVALID_PARAMS,"Foliage is edited in the edited scene: stop Play or Simulate first");return}
+    tool=core.world_storage_of(core.world_ref(s.editor_world,s.info,.Editor),Foliage_Tool)
+    world=editor.edited_world(s)
+    table:=core.world_table_of(world,foliage.Foliage);worlds:=core.world_table_of(world,core.World_Transform)
+    if tool==nil || table==nil || worlds==nil {api.call_fail(call,api.INVALID_PARAMS,"The project has no foliage: activate the plugin foliage in project.mirai");return}
+    tool_ready(tool)
+    if tool.stroke.active || tool.gizmo.drag.active {api.call_fail(call,api.INVALID_PARAMS,"A stroke of the foliage tool is held in the viewport: let it go first");return}
+    e=editor.api_entity(world,id)
+    if e==core.NONE || !core.has(core.read(table),e) {api.call_failf(call,api.INVALID_PARAMS,"%x is not an entity with a Foliage: scene.inspect lists them",id);return}
+    if !edit_prepare(tool,s.app,core.read(table),e) {api.call_failf(call,api.INVALID_PARAMS,"The source of foliage %x could not be read: engine.diagnostics says why",id);return}
+    placed,has_place:=core.get(core.read(worlds),e)
+    if !has_place {api.call_fail(call,api.INVALID_PARAMS,"The Foliage has no place in the world yet");return}
+    owner=placed.transform
+    if grounds:=core.world_storage_of(world,foliage.Foliage_Ground);grounds!=nil {ground=foliage.ground_owner(grounds,e)}
+    ok=true
+    return
+}
+
+@(private)
+revision_write :: proc(call:^api.Call,tool:^Foliage_Tool,changed:=true,with_changed:=false) {
+    w:=call.out
+    serial.text_write_raw(w,"{")
+    api.write_uint(w,"revision",u64(tool.edit.revision),true)
+    if with_changed {api.write_bool(w,"changed",changed)}
+    serial.text_write_raw(w,"}")
+}
+
+@(private)
+api_create :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Create_Params)
+    if editor.playing(s) {api.call_fail(call,api.INVALID_PARAMS,"Foliage is made in the edited scene: stop Play or Simulate first");return}
+    tool:=core.world_storage_of(core.world_ref(s.editor_world,s.info,.Editor),Foliage_Tool)
+    if tool==nil {api.call_fail(call,api.INVALID_PARAMS,"The project has no foliage: activate the plugin foliage in project.mirai");return}
+    tool_ready(tool)
+    s.toast_length=0
+    world:=editor.edited_world(s)
+    e:=foliage_create(s,tool,world,s.app,p.at,editor.tool_call_given(call,"at"))
+    if e==core.NONE {editor.tool_call_fail(s,call,"The foliage could not be made");return}
+    core.world_settle(world)
+    w:=call.out
+    serial.text_write_raw(w,"{")
+    api.write_key(w,"id",true);api.write_id(w,editor.api_entity_id(world,e))
+    serial.text_write_raw(w,"}")
+}
+
+@(private)
+api_type_add :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Type_Add_Params)
+    tool,world,_,_,_,ok:=api_foliage(s,call,p.id)
+    if !ok {return}
+    s.toast_length=0
+    if !type_add(s,tool,world,s.app,p.mesh) {editor.tool_call_fail(s,call,"The type could not be added");return}
+    w:=call.out
+    serial.text_write_raw(w,"{")
+    api.write_uint(w,"type",u64(tool.type),true)
+    serial.text_write_raw(w,"}")
+}
+
+@(private)
+api_type_set :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Type_Set_Params)
+    tool,world,_,_,_,ok:=api_foliage(s,call,p.id)
+    if !ok {return}
+    source:=&tool.edit.source
+    t,_:=foliage.source_type(source,p.type)
+    if t==nil {api.call_failf(call,api.INVALID_PARAMS,"The foliage has no type %d: foliage.query lists them",p.type);return}
+    edit_baseline(tool)
+    before:=t^
+    if name:=base.text_get(p.name[:]);name!="" {base.text_set(t.name[:],name)}
+    if p.mesh!={} {t.mesh,t.prefab,t.materials=p.mesh,{},{}}
+    if editor.tool_call_given(call,"density") {t.density=p.density}
+    if editor.tool_call_given(call,"scale") {t.scale={min(p.scale.x,p.scale.y),max(p.scale.x,p.scale.y)}}
+    if editor.tool_call_given(call,"height") {t.height={min(p.height.x,p.height.y),max(p.height.x,p.height.y)}}
+    if editor.tool_call_given(call,"yaw") {t.yaw=math.to_radians(p.yaw)}
+    if editor.tool_call_given(call,"tilt") {t.tilt=math.to_radians(p.tilt)}
+    if editor.tool_call_given(call,"align") {t.align=p.align}
+    if editor.tool_call_given(call,"offset") {t.offset={min(p.offset.x,p.offset.y),max(p.offset.x,p.offset.y)}}
+    if editor.tool_call_given(call,"rule") {t.rule.enabled=p.rule}
+    if editor.tool_call_given(call,"slope") {t.rule.slope={math.to_radians(min(p.slope.x,p.slope.y)),math.to_radians(max(p.slope.x,p.slope.y))}}
+    if editor.tool_call_given(call,"ground_height") {t.rule.height={min(p.ground_height.x,p.ground_height.y),max(p.ground_height.x,p.ground_height.y)}}
+    if editor.tool_call_given(call,"layers") {t.rule.layers=p.layers}
+    if editor.tool_call_given(call,"weight") {t.rule.weight=p.weight}
+    if editor.tool_call_given(call,"fade_distance") {t.fade_distance=p.fade_distance}
+    if editor.tool_call_given(call,"cull_distance") {t.cull_distance=p.cull_distance}
+    if editor.tool_call_given(call,"wind") {t.wind=p.wind}
+    if editor.tool_call_given(call,"casts_shadow") {t.casts_shadow=p.casts_shadow}
+    if !foliage.source_valid(source) {t^=before;api.call_fail(call,api.INVALID_PARAMS,"The type is out of range: densities and distances at least 0, slopes from 0 to 90 degrees, align and weight from 0 to 1, layers bits of the first four");return}
+    if t^==before {revision_write(call,tool);return}
+    tool.held_dirty=false
+    s.toast_length=0
+    if !edit_commit(s,tool,world,s.app,"Foliage type") {editor.tool_call_fail(s,call,"The type could not be kept");return}
+    revision_write(call,tool)
+}
+
+@(private)
+api_type_remove :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Type_Remove_Params)
+    tool,world,_,_,_,ok:=api_foliage(s,call,p.id)
+    if !ok {return}
+    if t,_:=foliage.source_type(&tool.edit.source,p.type);t==nil {api.call_failf(call,api.INVALID_PARAMS,"The foliage has no type %d: foliage.query lists them",p.type);return}
+    s.toast_length=0
+    if !types_remove(s,tool,world,s.app,{p.type}) {editor.tool_call_fail(s,call,"The type could not be taken out");return}
+    revision_write(call,tool)
+}
+
+@(private)
+api_paint :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Paint_Params)
+    mode:Foliage_Mode
+    generate:=true
+    switch strings.to_lower(base.text_get(p.mode[:]),context.temp_allocator) {
+    case "paint":      mode=.Paint
+    case "erase":      mode=.Erase
+    case "reapply":    mode=.Reapply
+    case "generate":   mode=.Generate
+    case "ungenerate": mode,generate=.Generate,false
+    case: api.call_fail(call,api.INVALID_PARAMS,"mode is paint, erase, reapply, generate or ungenerate");return
+    }
+    tool,world,_,owner,ground,ok:=api_foliage(s,call,p.id)
+    if !ok {return}
+    source:=&tool.edit.source
+    // What the brush of the tool holds goes back to it after the stroke.
+    held_prefs,held_painted,held_stroke:=tool.prefs,make([dynamic]u32,0,len(tool.painted),context.temp_allocator),tool.stroke
+    append(&held_painted,..tool.painted[:])
+    defer {
+        tool.prefs=held_prefs
+        clear(&tool.painted);append(&tool.painted,..held_painted[:])
+        tool.stroke=held_stroke
+        clear(&tool.reapplied)
+    }
+    clear(&tool.painted)
+    listed,_:=api.params_array_count(call,"types")
+    for id in p.types[:clamp(listed,0,len(p.types))] {
+        if t,_:=foliage.source_type(source,id);t==nil {api.call_failf(call,api.INVALID_PARAMS,"The foliage has no type %d: foliage.query lists them",id);return}
+        append(&tool.painted,id)
+    }
+    if len(tool.painted)==0 {for t in source.types {append(&tool.painted,t.id)}}
+    if len(tool.painted)==0 && mode!=.Generate {api.call_fail(call,api.INVALID_PARAMS,"The foliage has no type: foliage.type_add adds one");return}
+    tool.radius,tool.paint_density,tool.erase_density,tool.ground_only=clamp(p.radius,RADIUS_MIN,RADIUS_MAX),clamp(p.density,0.01,1),clamp(p.erase_density,0,1),p.ground_only
+    tool.stroke={active=true,mode=mode,generate=generate}
+    to_local,inverted:=mm.transform_inverse_matrix(owner)
+    if !inverted {api.call_fail(call,api.INVALID_PARAMS,"The transform of the Foliage cannot be inverted");return}
+    edit_baseline(tool)
+    from,to:=p.at,p.to!={}?p.to:p.at
+    step:=to-from
+    count:=clamp(int(math.ceil(linalg.length(step)/(tool.radius*STROKE_SPACING))),1,4096)
+    changed:=false
+    for i in 0..=count {
+        point:=from+step*(f32(i)/f32(count))
+        if p.to=={} && i>0 {break}
+        // The surface under the point, from above it.
+        hit:=editor.pick_ray(s,world,mm.Ray{point+{0,tool.radius*4+1000,0},{0,-1,0}},tool.radius*8+2000)
+        at,normal:=point,[3]f32{0,1,0}
+        if hit.entity!=core.NONE {at,normal=hit.position,hit.normal} else if mode==.Paint {continue}
+        changed|=brush_touch(s,tool,world,owner,to_local,ground,at,normal)
+    }
+    if !changed {revision_write(call,tool,false,true);return}
+    labels:=[Foliage_Mode]string{.Paint="Paint foliage",.Erase="Erase foliage",.Select="",.Place="",.Reapply="Reapply foliage",.Generate="Generate foliage"}
+    s.toast_length=0
+    if !edit_commit(s,tool,world,s.app,labels[mode]) {editor.tool_call_fail(s,call,"The stroke could not be kept");return}
+    revision_write(call,tool,true,true)
+}
+
+@(private)
+api_place :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Place_Params)
+    tool,world,_,owner,ground,ok:=api_foliage(s,call,p.id)
+    if !ok {return}
+    source:=&tool.edit.source
+    t,_:=foliage.source_type(source,p.type)
+    if t==nil {api.call_failf(call,api.INVALID_PARAMS,"The foliage has no type %d: foliage.query lists them",p.type);return}
+    to_local,inverted:=mm.transform_inverse_matrix(owner)
+    if !inverted {api.call_fail(call,api.INVALID_PARAMS,"The transform of the Foliage cannot be inverted");return}
+    hit:=editor.pick_ray(s,world,mm.Ray{p.at+{0,1000,0},{0,-1,0}},4000)
+    at,normal:=p.at,[3]f32{0,1,0}
+    if hit.entity!=core.NONE {at,normal=hit.position,hit.normal}
+    edit_baseline(tool)
+    tool.random+=1
+    random:=mm.rng_make(base.hash_u64(tool.random),u64(t.id)+1)
+    up:=linalg.normalize0(mm.quat_rotate(conj(owner.rotation),normal))
+    paint_instance(source,t,mm.mat4_point(to_local,at),up,&random,ground)
+    s.toast_length=0
+    if !edit_commit(s,tool,world,s.app,"Place foliage instance") {editor.tool_call_fail(s,call,"The instance could not be kept");return}
+    revision_write(call,tool)
+}
+
+@(private)
+api_query :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Query_Params)
+    tool,_,_,owner,ground,ok:=api_foliage(s,call,p.id)
+    if !ok {return}
+    source:=&tool.edit.source
+    w:=call.out
+    serial.text_write_raw(w,"{")
+    api.write_uint(w,"revision",u64(tool.edit.revision),true)
+    // The counts by type of every cell: each built once.
+    counts:=make([]u32,len(source.types),context.temp_allocator)
+    listing:=p.min!={} || p.max!={}
+    low,high:=linalg.min(p.min,p.max),linalg.max(p.min,p.max)
+    listed:=0
+    more:=false
+    instances:=make([dynamic]foliage.Placed,context.temp_allocator)
+    manual:=make([dynamic]bool,context.temp_allocator)
+    for &cell in source.cells {
+        foliage.cell_build(source,&cell,ground_of(ground,cell.coord),&tool.work)
+        for placed in tool.work.placed {
+            for t,i in source.types {if t.id==placed.type {counts[i]+=1}}
+            if !listing {continue}
+            at:=mm.transform_point(owner,placed.position)
+            if at.x<low.x || at.y<low.y || at.z<low.z || at.x>high.x || at.y>high.y || at.z>high.z {continue}
+            if listed>=int(p.limit) {more=true;continue}
+            moved:=placed
+            moved.position=at
+            append(&instances,moved);append(&manual,placed.id&foliage.MANUAL!=0)
+            listed+=1
+        }
+    }
+    api.write_key(w,"types");serial.text_write_raw(w,"[")
+    for &t,i in source.types {
+        if i>0 {serial.text_write_raw(w,",")}
+        serial.text_write_raw(w,"{")
+        api.write_uint(w,"type",u64(t.id),true)
+        api.write_text(w,"name",type_name(&t))
+        buffer:[40]u8
+        api.write_key(w,"mesh");serial.text_write_string(w,base.asset_id_format(t.mesh,buffer[:]))
+        api.write_uint(w,"instances",u64(counts[i]))
+        api.write_key(w,"density");api.write_number(w,t.density)
+        api.write_bool(w,"rule",t.rule.enabled)
+        serial.text_write_raw(w,"}")
+    }
+    serial.text_write_raw(w,"]")
+    if listing {
+        api.write_key(w,"instances");serial.text_write_raw(w,"[")
+        for placed,i in instances {
+            if i>0 {serial.text_write_raw(w,",")}
+            serial.text_write_raw(w,"{")
+            api.write_uint(w,"type",u64(placed.type),true)
+            api.write_key(w,"position");serial.text_write_raw(w,"[");api.write_number(w,placed.position.x);serial.text_write_raw(w,",");api.write_number(w,placed.position.y);serial.text_write_raw(w,",");api.write_number(w,placed.position.z);serial.text_write_raw(w,"]")
+            api.write_key(w,"scale");serial.text_write_raw(w,"[");api.write_number(w,placed.scale[0]);serial.text_write_raw(w,",");api.write_number(w,placed.scale[1]);serial.text_write_raw(w,"]")
+            api.write_bool(w,"manual",manual[i])
+            serial.text_write_raw(w,"}")
+        }
+        serial.text_write_raw(w,"]")
+        api.write_bool(w,"more",more)
+    }
+    serial.text_write_raw(w,"}")
+}

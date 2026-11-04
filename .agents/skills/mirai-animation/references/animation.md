@@ -1,0 +1,429 @@
+# Animation
+
+`animation` is an optional plugin with Runtime and Editor; it is activated in `project.mirai` and
+imported as `anim "plugins:animation/runtime"`. Math:
+[`std/anim`](../../mirai-std/references/anim.md); bind:
+[assets](../../mirai-assets/references/formats.md); imported hierarchy:
+[imports](../../mirai-imports/references/imports.md#skinned-meshes). The code plays clips,
+drives locomotion by motion matching (`.match`), composes poses with stateless graphs (`.agraph`)
+and plays actions and clips on top at the game's request; there is no state machine ([what replaces
+it](#what-replaces-the-state-machine)). The [authoring by API](animation-authoring.md) edits
+everything with names and history.
+
+## Components and shared data
+
+Components (`@(component)` of `plugins/animation/runtime`):
+
+- **`Animation`**: clip, `.match` or graph, parameters by name, layers and playback; alternative
+  library, mirroring, root motion, live retarget and profiles of actions and motion.
+  **`Animation_Progress`** stores where its clip is ([storages](#storages)).
+- **`Pose_Source`**: another mesh shares the evaluated pose of a rig.
+- **`Pose_Modifiers`**: activates a shared `.pose` profile on its rig.
+- **`Bone_Attachment`**: on each equipped object, references a socket of the skeleton.
+- **`Keyframe_Path`** ([sequences](animation-sequence.md)), **`Animation_Budget`**
+  ([budget](animation-budget.md)) and **`Morph_Weights`** ([morphs](animation-morphs.md)).
+- **`Animation_Target`**: internal identity of an imported rigid destination, hidden in the
+  inspector; the visible name of the entity may change without losing it.
+- **`Skin_Part`**: a bone of the skinned mesh, with what hangs from it, is a part in those layers. A
+  camera that does not draw them, or that leaves them out of its player's body (`own_hidden`), draws
+  it collapsed onto the bone; the other views, the shadow and the reflections draw it whole. It is
+  the head of a single-mesh character seen from its eyes ([own
+  body](../../mirai-gameplay/references/control.md#following-cameras)).
+
+Rigs:
+
+- A rig is the entity with `Mesh_Renderer` whose mesh references a `.skeleton`, without
+  `Pose_Source`; it does not need `Animation` for a procedural pose. Each rig has its own pose even
+  if it shares mesh, skeleton, clips and profile.
+- The skin (weights, joints and inverse binds of the `.mesh`) is a static link; `Pose_Source`
+  references a dynamic pose and stores neither weights nor bones. The prefab creates no entities per
+  bone.
+- The list of rigs is reviewed when meshes, `Pose_Source` or the asset registry change; its revision
+  changes only if the entities or their skeletons changed. An unrelated reload does not rebuild
+  constraints or reset springs.
+
+Shared assets:
+
+- Skeletons, skins and profiles (`.pose`, `.match`, `.blend`, `.agraph`, `.motion`, `.action`) are
+  read through the registry with `host.assets_file`, like the `.anim`: an unsaved asset is seen like
+  one on disk.
+- Each cache looks at the registry only when `assets_stamp` advances and rereads the file whose
+  registry entry changed.
+
+Bones and profiles:
+
+- `Bone_Ref` accepts a canonical path or a unique short name; an invalid or ambiguous reference does
+  not select the root. `animation_bone_bind` gives a `Bone_Handle` that a new revision of the rig
+  invalidates.
+- A `Bone_Ref` that starts with `@` names a part of the
+  [body](../../mirai-std/references/anim-body.md#body-map-bodyodin) that the `.skeleton` stores
+  (`@hand_l`, `@knee_r`), not a bone: the same profile, graph or action serves skeletons with other
+  names. In a mask or an `over` it also names a region (`@upper_body`, `@arm_l`), which wins over
+  the part of the same name (`@head`). It is resolved when binding the rig: correcting the body with
+  `skeleton.body.set` binds it again. A skeleton without a body, or without that part, gives the
+  consumer's problem with how to give it the body.
+- The `.pose` profile (`Pose_Profile`; `mirai asset` inspects it) has typed tables of IK, Look,
+  limits, contacts, [grounding](animation-grounding.md), retarget and the operations of
+  [rigs](animation-rigs.md). It is shared between characters and creates no components per
+  operation; the per-entity routing fields are transient. The last bone of an IK keeps what its
+  `hold` says: its rotation in the world (a foot), relative to the joint (a hand in line with its
+  forearm) or that of the target; Look with `use_up` turns the `up` axis of the bone toward
+  `world_up`.
+- A target is a [`Spatial_Target`](animation-rigs.md#spatial-targets). No operation gives
+  physical balance or self-collision of the character.
+
+Targets and controls:
+
+- `modifier_goal` changes the target of an operation of an instance through `Modifier_Requests`;
+  `modifier_control` regulates an independent influence multiplier, with a smoothstep fade from the
+  current influence. They are chosen by name or slot
+  ([rigs](animation-rigs.md#requests-and-diagnostics)).
+- A control keeps targets, poles, hits, strengths and contact. Deactivating fades to zero and then
+  turns the solver off (grounding releases its supports); zero weight with `enabled` keeps the state
+  and the input pose; repeating the same control does not restart the fade.
+- Controls and targets persist per operation (and effector) while the operation exists, and the bind
+  applies them again even if their fade has ended.
+- The queues reject non-finite values and excess capacity. Stable requests and fades do not
+  allocate, do not resolve bones again and do not walk the controls of other rigs.
+- An OOM when loading or reloading profiles or skeletons keeps the previous runtime, does not
+  publish empty tables and retries.
+
+Sockets:
+
+- `Skeleton_Socket` (name, bone and local TRS) lives in the `.skeleton`; each equipped object
+  carries its `Bone_Attachment` and its instance offset is composed after the shared one. Imports
+  create sockets for rigid objects attached to bones.
+
+## Locomotion by motion matching
+
+The locomotion of a character is a `.match` in `Animation.asset`; there is no state machine or
+locomotion blend space.
+
+`.match` (`Match_Profile`):
+
+- Clips of an `.anim` library ([multiple sources](#multiple-sources)), each with the locomotion
+  modes it serves (bit `m` for mode `m`: the values of physics' `Locomotion_Mode`) and, if it starts
+  a mode (jump, landing), the `entry` mark. An entry clip does not loop.
+- The feature database (`std/anim/matching.odin`: feet, hips and trajectory at 1/3, 2/3 and 1 s in
+  the frame of the character, normalized per type) is built at load, the first time a rig of that
+  skeleton asks for it, per library and skeleton, and lives in `Graph_Assets`. `memory` is its cap:
+  a larger database is not built and is the problem `animation.match_memory`.
+- The search is linear and SIMD on a small database; past `MATCH_LINEAR_ROWS` rows the database
+  stores bounds per runs of rows and the search skips those that cannot improve. It chooses by
+  itself.
+
+Per tick:
+
+- `match_goal` says the mode, the velocity of the body, the desired one with its acceleration and
+  braking and where it turns. With physics, the automatic plugin `animation_physics` says it for
+  each `Character` with `Animation` (the `Character` is the only writer of the mode; animation keeps
+  no copy) and asks for the warping of `Animation.motion` while it walks: the game writes no
+  locomotion code. Without physics, the game calls `match_goal` with what moves its rig.
+- Every `interval` (0: every tick) it searches the lowest-cost row among the clips of the mode; a
+  clip that travels is compared with the trajectory scaled by the rate at which it would play
+  (`min_rate`..`max_rate`), so a few clips cover the velocities between theirs. It jumps only if it
+  saves `bias` over continuing; a clip without a loop that ends, or that enters its last trajectory
+  window, is left without that option, because its still pose would win all the searches. With
+  `stationary_speed`, a body that starts or stops while its loop does not move as it does searches
+  in that tick, without waiting for the interval or the bias. Only a loop follows the speed of the
+  body with its rate; a clip that plays once (a jump, a landing) keeps its own.
+- Entering a mode that has entry clips searches only among their starts; without them, among the
+  clips of the mode. An entry clip does not take part in the continuous search, except to keep
+  playing it.
+- Every jump enters through inertialization of `blend` seconds: pose and velocity are captured and
+  only the target is evaluated, with decaying offsets. The capture is of the boundary before the new
+  advance, before the component layers; a tick with zero dt leaves it pending.
+- `animation_match` says which clip plays, its rate, its mode, whether `match_play` forced it and
+  how many searches and jumps it made.
+
+`match_play` plays a library clip at the game's request (vault, hit, death) as a clip of a mode,
+with inertialization of `fade`:
+
+- It enters at the start, at the time of the clip that is playing (`Keep_Time`) or at the phase of
+  its markers (`Match_Phase`).
+- It returns the rig to the matching at `phase` of its duration (1: at the end; a clip without a
+  loop retains its last pose until the matching chooses another) or when crossing its `marker`, and
+  also if the body leaves its mode.
+- One of lower `priority` than the one playing is rejected with the problem `animation.match_busy`;
+  with `wait`, one that arrives during a fade starts when that fade ends, unless another replaces it
+  before. It does not stay pending beyond that fade.
+- `Animation_Events.plays` receives Entered (with the one that interrupted), Exited (with the one
+  that interrupts it, or 0 if it returns to the matching) and Finished (once, when its clip reaches
+  the end).
+
+## Composition graphs and additive spaces
+
+`.agraph` (`Graph_Profile`): composition of poses, without states.
+
+- A source `.anim` library, nodes in dependency order and parameters with range and default; their
+  capacities are runtime constants. `output` is the output.
+- Nodes `Clip`, `Blend_Space`, `Blend`, `Layer` and `Additive`; `mirror` [mirrors](#mirroring) a
+  source. Composites reference earlier nodes, admit nesting and sharing subgraphs and allow no
+  cycles. The program compiles the output into instructions and groups of leaves.
+- `Blend` interpolates both whole poses, with the reference for absent channels; `Layer` replaces
+  the channels that the right one contributes; `Additive` applies over the left the delta of the
+  whole right subcomposition between its current time and `reference` (seconds). The root of
+  Layer/Additive comes from the left.
+- `over` limits a branch or a region of the body; a named mask gives weights per bone, with optional
+  extension to descendants, or per region. The masks of sources blend against the bind; those of
+  Blend regulate the root by the weight of that bone.
+- Float/Vector curves have policy `Override`, `Additive` or `Ignore` and keep their slots.
+
+`.blend`: aim offset or additive space, only as the `right` of an `Additive` node (never the output
+of a graph or `Animation.asset`, which is the problem `animation.additive_space`).
+
+- Each axis has a name and a finite range; the authoring points use those units and are normalized
+  per axis. 1D interpolates two neighbors and 2D a triangle (`blend_space_prepare`); outside the
+  hull it is projected to the edge. Duplicate points, degenerate geometry and invalid axes are
+  rejected. Buffers: [std/anim](../../mirai-std/references/anim.md).
+- The value with the name of each axis (`animation_parameter`) gives X and Y; `blend_sample` queries
+  weights from code.
+
+Clocks (only Clip/Blend_Space, by `sync_mode`):
+
+- `Independent` advances each leaf; `Markers` keeps the phase between compatible markers; `Weighted`
+  advances normalized phase with the weighted duration of its sources; `Fixed` uses `sync_duration`.
+  Weighted and Fixed use normalized phase even if there are markers.
+- `sync_group` names a shared clock, declared in all its sources with a consistent mode (and the
+  same duration in Fixed); without a name, each source has its own. Adding a source or changing
+  leader keeps the phase of the group.
+
+Parameters:
+
+- `animation_parameter` stores a finite value by the hash of the name of a parameter or axis, up to
+  `GRAPH_PARAMETERS` names; those not configured take their default. An undeclared name
+  (`Unknown_Parameter`) or an out-of-range value (`Invalid_Parameter`) stop the evaluation of that
+  tick, like any program error.
+- Clocks, matching and inertialization belong to the player and are copied with the world; the
+  definition, its geometry and the matching database belong to the shared asset.
+
+Program buffers:
+
+- Each player has an output; when binding or reloading it reserves for the plan of the graph output
+  (one clip in a `.match`), and the ticks reuse it. World copies have their own buffers.
+- A failed reservation keeps the previous output and retries on the next tick.
+
+## What replaces the state machine
+
+What used to be a state or a transition has its owner:
+
+| Before | Now |
+| --- | --- |
+| Locomotion states (idle, walk, run, fall, swim) | Modes of the `.match`, read from physics |
+| Transition by velocity or by ground | The matching search; a mode searches its entry clips |
+| Jump or landing state | `entry` clip of the mode (falling, walking) |
+| State of a whole-body action (vault, death, emote) | `match_play`: exit, priority and events |
+| Layer of an action (wave, reload, upper-body hit) | Action (`action_fire`), sections, windows |
+| Locomotion blend space (velocity, direction) | `.match` clips; the rate covers in-between speeds |
+| Aim offset, breathing, lean | `.blend` under an `Additive` of an `.agraph` |
+| State trigger or event | `action_fire` or `match_play`, and their events |
+| Waiting for an animation to finish | Finished or Exited of `match_play`, or Completed |
+| Game logic by states (AI, menus) | Game data and its functions; AI, in `std/ai` |
+
+## Playback, outputs and order
+
+`Animation` plays `.anim`, `.match` or `.agraph` and optionally references `retarget`, `motion` and
+`actions` profiles.
+
+- `library` replaces the library of a `.match` or `.agraph` with another `.anim` with clips of the
+  same names: a program serves characters with their own clips, and layers, actions and motion use
+  it. An explicit `animation` does not change and over a direct `.anim` it is not evaluated.
+  Changing it restarts the program; an absent clip is `Missing_Clip`.
+- Over `.anim`, an empty clip chooses the first. The defaults are `ANIMATION_DEFAULT`.
+- Layer 0 is the base; layers 1–3 are blended on top (Override/Additive, with their own reference
+  and curves), also over programs. `over` limits a branch and `sync` follows the phase of the base.
+- Layers and parameters are fields of the player: there are no components per source or per action.
+
+### Multiple sources
+
+A program blends clips of several `.anim`: the `animation` of a sample, of a Clip node, of an
+action, of a window or of a distance of `motion` names the `.anim` of its clip; empty takes that of
+its definition or `library`.
+
+- The `.anim` of the program is the main source and its clips keep their name; `source_clip_name`
+  names that of another source in the library that joins them. Two clips that coincide after joining
+  give `Invalid_Asset`.
+- `Source_Assets` prepares one library per set of sources, shared by entities and worlds. A tick
+  without asset changes reuses the plan without reading them; it is joined again when the file or
+  the generation of a source changes. Without memory or with invalid sources the published library
+  stays.
+- A marker carries the `.anim` of its clip in `animation`. `animation_playing_content` gives the
+  library that an entity plays; `source_clip_source` and `source_clip_label`, the `.anim` and the
+  name of one of its clips.
+
+### Storages
+
+- `Playback` (world storage): clocks, fades, program and dense pose buffers; curves and root delta
+  per player. It is derived: clearing the world (loading a scene or a save) starts it over, like the
+  other animation storages.
+- `Animation_Progress` is written only by `animation_sample` while the game runs: a stored save
+  keeps the time of the clip and, when loaded, an entity without state in `Playback` asks for
+  `animation_seek` there.
+- The runtimes of modifiers, constraints, grounding, sequences, actions, motion and budget are
+  copied for Play and rollback.
+- Definitions of skeletons, profiles and programs live in application caches, like `Skin_Runtime`;
+  `Skin_Instances` stores the GPU meshes that each world deforms and `animation_skin_release`
+  releases them when that world is freed.
+
+Order in `fixed`:
+
+- `animation_sample` (`apply`): prepares profiles and requests, samples programs, clips, actions,
+  layers and overrides, and extracts and adapts root motion, before physics (`simulate`).
+- The controller consumes `animation_root_delta` between the two through requests to physics.
+- `animation_advance` (`react`): takes updated targets and applies retarget, root removal, pose
+  adaptation, grounding, contacts, IK/look-at, rigs and limits; then consumes the final physical
+  poses and updates attachments. It uses the current physical placement of the actor and keeps the
+  external root: physics remains the only writer of body transforms.
+
+Root motion:
+
+- `Animation.root_motion` is None, Extract or In_Place; the clip stores the bone and channels of its
+  root. `animation_root_delta` gives the translation and rotation of the tick; In_Place also leaves
+  those channels of the bone at the reference, clip by clip as the fader blends them (`Pose_Lock`):
+  a clip with root motion that fades out under one without it does not carry the root along, and
+  the one without it keeps its own.
+- The sources that contribute a root must coincide in bone and channels: otherwise,
+  `Incompatible_Root` rejects the evaluation. Loops, reversal and fades use the extraction of
+  `std/anim`; inertialization corrects the delta with the decaying offset. A seek gives no
+  displacement.
+- Target windows, warping and advance by distance: [motion](animation-motion.md).
+
+Queries and events:
+
+- `animation_curve` and `animation_vector` query a curve by name after programs and layers, with
+  defaults in contributions without a track.
+- `Animation_Events` brings the markers with weight, source, group, `.anim` and `fraction` (where in
+  the advance of the tick it was crossed). Dominant emits the greatest contribution, Weighted
+  filters by `event_threshold` and Always leaves all the positive ones; zero weight does not emit.
+  Synchronized sources emit through the leader.
+- `animation_progress`, `animation_seek`, `animation_pose` (local override) and
+  `animation_bone_transform` (finished global pose). Actions: [actions](animation-actions.md).
+
+World poses:
+
+- `animation_sample_pose` copies into a caller buffer the world sample of the tick, before physics
+  and constraints; it returns count and revision even if capacity is missing.
+- `animation_pose_final` enqueues a world pose for the end of the tick: after adaptation, grounding,
+  IK, rigs and limits, before sockets. The weight blends the original pose with the requested one
+  only once and the result passes to local under the already-updated parent, in hierarchy order
+  (translating parent and child with the same weight keeps their distance). Zero weight ignores the
+  request and the last request of each bone wins. An expired handle or a bone that the rig does not
+  have are the problems `animation.final_pose_binding` and `animation.final_pose_bone`.
+- `animation_requests_reserve` reserves the queues at load.
+  [Ragdoll](../../mirai-plugins/references/ragdoll.md) uses it.
+
+Editor and skinning:
+
+- `preview` advances the animation with the frame time; turning it off returns to the start.
+  `animation_evaluate` runs with `core.world_run` the `fixed` steps of `anim` and `core` (sampling,
+  advance, morphs and transforms), without gameplay. A fixture that builds its `World_Info` by hand
+  gives its `steps` and its `order`, like `pose_bake_test.odin`.
+- Load, bind and configuration changes are transactions; stable ticks reuse memory. Writes respect
+  `core.free` and the owner of the transform.
+- `animation_skin` interpolates the last two local poses and recomposes the palette, which it reuses
+  if pose, mesh and parent did not change; it creates, updates and releases the meshes deformed by
+  `engine/render`. With `Skin_Part`, the deformed copy is created with the part and each palette
+  collapses its joints onto the bone: changing the bone creates the copy again, changing its layers
+  does not.
+- A rig whose palette leaves each vertex at its bind (`palette_at_bind`) is drawn with the world's
+  shared mesh: a still character or one without animation copies no geometry or BLAS. The copy is
+  created the first time the palette leaves the bind and stays until the rig goes away; with morphs,
+  from the start. A copy larger than what one frame uploads goes
+  [over several frames](../../mirai-rendering/references/scene.md#geometry-over-several-frames): the
+  entity is not drawn (no shadow, rays or outline) until it went up whole and appears already posed,
+  without `Hidden` or anything the game does.
+- Shared bind geometry; palette, output, history and BLAS per deformed instance, with the
+  [GPU contract](../../mirai-rendering/references/scene.md#gpu-skinning) of all the passes.
+  `Draw_Offset` moves the drawing without touching the simulation. Frequency and parallelism:
+  [budget](animation-budget.md).
+
+## Offline and live retarget
+
+- Offline, `animation_editor.retarget_bake` writes an `.anim` for the destination skeleton from
+  validated views and a `Pose_Profile`, by bones or semantic chains
+  ([bake](animation-rigs.md#bake)). The `.anim` stays editable; the [resident
+  storage](../../mirai-std/references/anim-storage.md) prepares reduced keys at load.
+- Live, `Animation.source` and `Animation.retarget` name the source rig and its `.pose` profile. The
+  correspondences are prepared when the bind, source or profile changes, and the sampled pose of the
+  source is read before its constraints.
+- `Paths` requires exact paths, with an automatic map at most; the Bone pairs prevail and the chains
+  are applied afterwards, with different names and topologies and the lengths of the destination.
+  Bones without a correspondence keep the reference; the external root stays outside the map.
+
+## Mirroring
+
+- `Animation.mirror` mirrors the whole pose of the rig after layers and actions, with its root
+  delta; `Graph_Node.mirror` mirrors a Clip/Blend_Space source before its mask, with its root
+  motion. They compose: a mirrored source under a mirrored component returns to its side.
+- It requires a rig with a `.skeleton`; without it, the program publishes `Unsupported_Mirror` and
+  the entity the problem `animation.mirror`.
+- When loading the `.skeleton` each bone is paired with the one on the other side through
+  [`mirror_name`](../../mirai-std/references/anim.md#mirroring-mirrorodin) (`thigh_l`, `hand.L`,
+  `LeftArm`, `Bip01 L Thigh`); without a side, or with an absent, ambiguous or non-mutual pair, with
+  itself. `animation.inspect` part `Rig` reports the pair.
+- The bind deduces the lateral plane and the axis correction of each pair from the reference pose
+  and reserves its buffers: mirroring in a tick does not allocate. A reference that does not allow
+  it leaves the rig without mirroring.
+- Motion warping reads the reflected root motion of a mirrored clock; markers and curves do not
+  change side.
+
+## Problems
+
+What the plugin cannot do in a tick is a problem of the entity in
+[`core.Problems`](../../mirai-core/references/core.md#problems), with an `animation.*` code and a
+message that says how to fix it; `engine.diagnostics` lists them and `animation.inspect`
+(`diagnostics`) and `animation.preview` bring those of the instance.
+
+- Assets that cannot be read (`Animation.asset`, `library`, `actions`, `motion`, `retarget`, the
+  profile, the skeleton or the mesh of a rig), with the path and the cause: `animation.asset`,
+  `program_asset`, `actions_asset`, `skeleton`, `skin_mesh`...
+- Data that does not apply: a clip, a layer, a bone, a socket or a parameter that do not exist
+  (`animation.clip`, `layer_clip`, `layer_bone`, `pose_bone`, `attachment_socket`,
+  `program_parameter`, `match_clip`), a `.blend` as `Animation.asset` (`additive_space`), a matching
+  database that is not built (`match_database`, `match_memory`), operations of a profile that are
+  not bound or not resolved (`rig_*`, `constraint_*`, `grounding_*`, `retarget_*`, `motion_*`,
+  `morph_*`) and rejected requests (`action_*`, `modifier_*`, `distance`, `match_busy`,
+  `match_goal`).
+- Lost markers or events (`markers_lost`, `play_events`, `action_events`), values that do not fit in
+  the pose (`animation.pose_full`, with what `std/anim` counted in `Pose.failed`) and lack of memory
+  (`animation.memory`: the entity keeps its last pose and retries).
+- `Playback.stats.skipped` counts writes skipped because another component owns the transform: it is
+  a statistic, not a failure.
+
+## Verification
+
+`plugins/animation/runtime`; repeat with `--release` when changing state or memory.
+
+- `graph_control_test.odin`: state queries and events, requests with cutoff, names, copies,
+  parameters by name, alternative library and mirroring with root motion.
+- `program_features_test.odin`: nested compositions, named clocks, masks and transition entries;
+  velocity continuity with inertialization and additive layers; copies and null allocators.
+- `program_buffers_test.odin`: program buffers, OOM, copies and retirement.
+- `matching_walks_mirai_avatar_with_its_feet_planted_without_pose_jumps_and_follows_the_stick`
+  (`matching_test.odin`, with the demo assets): Mirai through its `.match` on the same route; foot
+  sliding, pose jumps, response and cost per tick. In `std/anim`:
+  `match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_for` and
+  `match_trajectory_follows_a_walk_that_accelerates_brakes_and_turns_at_its_rates`.
+- `regression_test.odin`, `graph_test.odin`, `program_test.odin`: affected earlier paths.
+- By name:
+  - `transition_entries_restart_continue_and_match_phase_with_expected_pose_and_root_motion`
+  - `graph_branch_layers_keep_their_masks_through_repeated_state_transitions_without_allocations`
+  - `graph_phase_end_and_marker_exits_follow_the_incoming_state_clock_during_fades_and_world_copies`
+  - `direct_clip_weights_preserve_zero_full_and_partial_trs_without_allocations`
+    (`runtime_test.odin`)
+- Body parts and regions (`skeleton_test.odin`):
+  - `body_labels_name_the_parts_and_regions_the_skeleton_keeps`
+  - `layers_play_over_a_region_of_the_body_without_stable_allocations`
+  - `body_labels_of_a_skeleton_without_body_say_how_to_give_it_one`
+  - `skeleton_bone_find_takes_a_path_a_unique_name_or_a_part_of_the_body`
+- Retarget (`constraints_test.odin`, `skeleton_test.odin`): dense rigs, exact correspondences,
+  overrides, external root, proportions, rebind and asset identities without stable allocations.
+  - `retargeting_ignores_actor_wrapper_placement_and_keeps_the_destination_actor_transform`
+  - `retarget_constraints_read_frozen_source_pose_and_preserve_target_lengths`
+  - `live_retarget_profile_changes_compare_full_asset_ids_and_preserve_source_identity`
+  - `retarget_paths_*`
+- Rigs, actions, motion, budget, grounding, authoring and storage: their references.
+- `rigs_at_the_bind_pose_share_their_mesh_until_a_pose_leaves_it` (`skin_bind_test.odin`, GPU): rigs
+  at the bind without copies and the copy of the one that is posed.
+- CPU tests do not vouch for the visual integration: compile and run the project; GPU skinning
+  requires graphics validation.

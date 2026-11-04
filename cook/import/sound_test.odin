@@ -1,0 +1,171 @@
+package importer
+
+import "core:fmt"
+import "core:math"
+import "core:mem"
+import "core:os"
+import "core:strings"
+import "core:testing"
+import "core:time"
+import "mirai:asset"
+import audio "mirai:audio"
+import "mirai:std/serial"
+
+@(private="file") SINE_OGG :: #load("../../audio/testdata/sine_mono.ogg")           // 0.5 s of 440 Hz at 44.1 kHz, amplitude 0.5
+@(private="file") THREE_OGG :: #load("../../audio/testdata/three_channels.ogg")
+@(private="file") TONE_OGG :: #load("../../audio/testdata/tone_long.ogg")           // 2 s of 330 Hz at 32 kHz, mono
+
+// A 16 bit WAV file of interleaved samples.
+@(private="file")
+wav_bytes :: proc(samples:[]i16,channels,rate:int,allocator:=context.allocator) -> []u8 {
+    file:=make([]u8,44+len(samples)*2,allocator)
+    put :: proc(file:[]u8,at:int,value:u32,size:int) {for i in 0..<size {file[at+i]=u8(value>>uint(8*i))}}
+    copy(file,"RIFF");put(file,4,u32(len(file)-8),4);copy(file[8:],"WAVEfmt ")
+    put(file,16,16,4);put(file,20,1,2);put(file,22,u32(channels),2);put(file,24,u32(rate),4);put(file,28,u32(rate*channels*2),4)
+    put(file,32,u32(channels*2),2);put(file,34,16,2)
+    copy(file[36:],"data");put(file,40,u32(len(samples)*2),4)
+    for sample,i in samples {put(file,44+i*2,u32(u16(sample)),2)}
+    return file
+}
+
+@(private="file")
+sound_open :: proc(t:^testing.T,path:string,types:^asset.Types,a:^asset.Asset) -> (view:asset.Sound_View,ok:bool) {
+    if !testing.expect_value(t,asset.asset_load(a,path),asset.Error.None) {return}
+    error:asset.Error
+    view,error=asset.sound_view(a,types)
+    return view,testing.expect_value(t,error,asset.Error.None)
+}
+
+@(test)
+a_wav_and_an_ogg_become_sounds_decoded_or_streamed_by_their_length :: proc(t:^testing.T) {
+    defer free_all(context.temp_allocator)
+    folder:=temp_folder("sound")
+    defer os.remove_all(folder)
+    out:=fmt.tprintf("%s/out",folder)
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+
+    samples:=make([]i16,2*4410);defer delete(samples)
+    for &sample,i in samples {sample=i16(12000*math.sin(f32(i/2)*2*math.PI*440/44100))*(i%2==0?1:-1)}
+    samples[0],samples[1]=32767,-32768
+    wav:=wav_bytes(samples,2,44100);defer delete(wav)
+    path:=fmt.tprintf("%s/Step Left.wav",folder)
+    _=os.write_entire_file(path,wav)
+
+    report,error:=import_sound(path,out)
+    testing.expect_value(t,error.code,Error_Code.None)
+    testing.expect_value(t,len(report.assets),1)
+    if len(report.assets)==1 {
+        written:=report.assets[0]
+        testing.expect(t,written.kind==asset.KIND_SOUND && written.id!={} && strings.has_suffix(written.path,"/Step Left.sound") && written.bytes>len(samples)*2)
+        a:asset.Asset
+        if view,ok:=sound_open(t,written.path,&types,&a);ok {
+            testing.expect(t,view.info^==asset.Sound_Info{2,44100,4410,.PCM16,{}})
+            testing.expect(t,mem.compare(mem.slice_to_bytes(view.samples),mem.slice_to_bytes(samples))==0,"16 bit samples arrive as they were")
+            testing.expect(t,view.source!=nil && serial.text_field(view.source.importer[:])==IMPORTER_NAME && view.source.source_size==u64(len(wav)))
+        }
+        asset.asset_close(&a)
+    }
+    // Imported again it is the same asset; told to stream, it keeps its file.
+    again,again_error:=import_sound(path,out,{storage=.Stream})
+    testing.expect_value(t,again_error.code,Error_Code.None)
+    if len(again.assets)==1 && len(report.assets)==1 {
+        testing.expect(t,again.assets[0].id==report.assets[0].id && again.assets[0].path==report.assets[0].path)
+        a:asset.Asset
+        if view,ok:=sound_open(t,again.assets[0].path,&types,&a);ok {
+            testing.expect(t,view.info^==asset.Sound_Info{2,44100,4410,.File,{.Stream}} && mem.compare(view.file,wav)==0)
+        }
+        asset.asset_close(&a)
+    }
+    report_destroy(&report);report_destroy(&again)
+
+    // Half a second of Vorbis: decoded when short, streamed from a quarter of a second on.
+    ogg:=fmt.tprintf("%s/sine.ogg",folder)
+    _=os.write_entire_file(ogg,SINE_OGG)
+    report,error=import_sound(ogg,out)
+    testing.expect_value(t,error.code,Error_Code.None)
+    if len(report.assets)==1 {
+        a:asset.Asset
+        if view,ok:=sound_open(t,report.assets[0].path,&types,&a);ok {
+            testing.expect(t,view.info.encoding==.PCM16 && view.info.channels==1 && view.info.sample_rate==44100 && abs(int(view.info.frames)-22050)<=64)
+            peak:i16
+            for sample in view.samples {peak=max(peak,abs(sample))}
+            testing.expect(t,abs(int(peak)-16384)<700,"The decoded samples keep their level")
+        }
+        asset.asset_close(&a)
+    }
+    report_destroy(&report)
+    report,error=import_sound(ogg,out,{stream_seconds=0.25})
+    testing.expect_value(t,error.code,Error_Code.None)
+    if len(report.assets)==1 {
+        a:asset.Asset
+        if view,ok:=sound_open(t,report.assets[0].path,&types,&a);ok {
+            testing.expect(t,view.info.encoding==.File && .Stream in view.info.flags && mem.compare(view.file,SINE_OGG)==0)
+        }
+        asset.asset_close(&a)
+    }
+    report_destroy(&report)
+
+    // What is not a sound that plays leaves no file.
+    refuse :: proc(t:^testing.T,folder,name:string,bytes:[]u8,code:Error_Code) {
+        path:=fmt.tprintf("%s/%s",folder,name)
+        if bytes!=nil {_=os.write_entire_file(path,bytes)}
+        report,error:=import_sound(path,fmt.tprintf("%s/refused",folder))
+        testing.expect_value(t,error.code,code)
+        testing.expect(t,len(report.assets)==0 && !os.exists(fmt.tprintf("%s/refused",folder)),name)
+    }
+    refuse(t,folder,"noise.wav",{1,2,3,4,5,6,7,8,9,10,11,12,13,14},.Malformed)
+    refuse(t,folder,"surround.ogg",THREE_OGG,.Unsupported)
+    refuse(t,folder,"cut.wav",wav[:44],.Malformed)
+    refuse(t,folder,"none.ogg",nil,.Not_Found)
+}
+
+// What loading a sound costs by how it is stored, and what it holds in memory.
+@(test)
+bench_loading_a_sound_decoded_against_decoding_its_file :: proc(t:^testing.T) {
+    if !BENCH {return}
+    ROUNDS :: 20
+    best :: proc(body:proc(data:rawptr),data:rawptr) -> f64 {
+        low:=time.Duration(max(i64))
+        for _ in 0..<ROUNDS {
+            start:=time.tick_now()
+            body(data)
+            low=min(low,time.tick_since(start))
+        }
+        return time.duration_microseconds(low)
+    }
+    State :: struct {mixer:^audio.Mixer,samples:[]i16,scratch:[]f32,file:[]u8,channels,rate:int}
+    pcm,_:=audio.decode(TONE_OGG,context.allocator)
+    defer audio.pcm_destroy(&pcm)
+    seconds:=f64(len(pcm.samples))/f64(pcm.sample_rate)
+    mixer,_:=audio.mixer_create({})
+    defer audio.mixer_destroy(mixer)
+    s:=State{mixer=mixer,samples=make([]i16,len(pcm.samples)),scratch=make([]f32,len(pcm.samples)),file=TONE_OGG,channels=pcm.channels,rate=pcm.sample_rate}
+    defer {delete(s.samples);delete(s.scratch)}
+    for sample,i in pcm.samples {s.samples[i]=i16(sample*32767)}
+    decoded:=best(proc(data:rawptr) {
+        s:=cast(^State)data
+        for sample,i in s.samples {s.scratch[i]=f32(sample)*(1.0/32768)}
+        sound,_:=audio.sound_create(s.mixer,s.scratch,s.channels,s.rate)
+        audio.sound_destroy(s.mixer,sound)
+        audio.mixer_render(s.mixer,s.scratch[:512])
+        audio.mixer_update(s.mixer)
+    },&s)
+    vorbis:=best(proc(data:rawptr) {
+        s:=cast(^State)data
+        sound,_:=audio.sound_load(s.mixer,s.file)
+        audio.sound_destroy(s.mixer,sound)
+        audio.mixer_render(s.mixer,s.scratch[:512])
+        audio.mixer_update(s.mixer)
+    },&s)
+    stream:=best(proc(data:rawptr) {
+        s:=cast(^State)data
+        sound,_:=audio.sound_stream(s.mixer,s.file)
+        audio.sound_destroy(s.mixer,sound)
+        audio.mixer_render(s.mixer,s.scratch[:512])
+        audio.mixer_update(s.mixer)
+    },&s)
+    fmt.printfln("sound of %.2f s, %d Hz, %d channel(s): ogg %d bytes, pcm16 %d bytes, f32 in the mixer %d bytes",seconds,pcm.sample_rate,pcm.channels,len(TONE_OGG),len(s.samples)*2,len(pcm.samples)*4)
+    fmt.printfln("load decoded (pcm16 to f32, copy into the mixer): %.1f us, %.1f us per second of sound",decoded,decoded/seconds)
+    fmt.printfln("load by decoding the Vorbis file whole:           %.1f us, %.1f us per second of sound",vorbis,vorbis/seconds)
+    fmt.printfln("open as a stream (decoder only):                  %.1f us",stream)
+}

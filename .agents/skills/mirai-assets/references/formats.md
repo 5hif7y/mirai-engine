@@ -1,0 +1,211 @@
+# Asset formats and API
+
+Container, typed tables, asset types, registry and text. By topic:
+
+- [std/serial](serial.md): streams, LZ4, schemas, migration, paths and JSON.
+- [Asset types in detail](kinds.md): mesh, skeleton, texture, material, fracture, animation, sound
+  and interface.
+- [Scene and prefab](scenes.md): the `asset.Scene` document and prefab instances.
+- [`mirai asset` tool](cli.md).
+
+## Container
+
+Little endian (`asset/container.odin`): a fixed header (magic `MIRA`, type fourcc, container and
+type version, flags, id, `owner`, the `content_hash` of everything that follows), a directory of
+chunks (tag, compression `None` or `LZ4`, alignment, offset and sizes) and the chunks, each at a
+multiple of its alignment.
+
+- **The header id is an asset's only identity**: nothing derives it from its path, name or source,
+  and a moved or renamed asset remains the same.
+- `owner` is the asset this one is a part of (the prefab of the import that made it); zero for one
+  of its own. `Document.owner` and the `owner` of each importable `*_Desc` write it;
+  `header_owner_set` and `file_owner_set` change it without touching the content or `content_hash`.
+- `header_read` validates only the header (what a scan uses). `blob_open` validates the whole file:
+  exact size, each chunk inside the file and aligned, uncompressed size reachable by an LZ4 block of
+  that size and a total memory limit (`DEFAULT_MEMORY_LIMIT`).
+- `blob_build` stores LZ4 only when it shrinks the chunk.
+
+## Typed tables
+
+An asset is a set of **tables**; a table is a set of **columns** of equal length; a column keeps
+the images of values of one type of the file's schema. The chunks, in this order: `DEPS` (ids it
+names, sorted and without repeats), `STRS` (names), `SCHM` (the `std/serial` schema), `TDIR`
+(directory of tables and columns), the record columns (`RECS`, and `IMPT` that of the `Import`
+table) and finally the `BULK` ones.
+
+- Table flags: `Single` (one row, read without an index), `Bulk` (heavy data for direct use; the
+  tools summarize them), `Import` (provenance).
+- An unnamed column is the row itself and is the only one in its table.
+- `key` is the column that identifies the rows; `ref` says that the values of a column (unsigned
+  integers) are rows of another table.
+- Names: without dots, brackets, `@`, `=`, quotes, spaces or controls.
+- More than one row requires some column with size: the number of rows never exceeds the data that
+  backs them.
+
+### Reading: `Asset`
+
+- `asset_rows(&a,&types,"table","column",T,default)` returns `[]T`: **the file itself** if the
+  column is uncompressed, aligned and with `T`'s layout; otherwise, a decompressed or migrated copy
+  that belongs to the `Asset`. `asset_row` is the row of a one-row table.
+- `asset_load_front` reads everything but the bulk columns, which stay in the file to be read by
+  range (`blob_chunk`); it does not check the hash and reaching a bulk one gives `Truncated`. A
+  terrain's pages use it.
+- `asset_column_*` read against another schema (that of the world's components).
+
+### Building and editing: `Document`
+
+Owner of everything it contains; `asset/document.odin` builds by tables, columns and rows.
+
+- Writing (`document_write`/`document_save`) validates (`document_check`), derives dependencies and
+  is a function of the content only: reading and writing again gives the same bytes.
+- Adding a table or column checks the reservation of the name, the data and the destination array
+  before publishing it. On out of memory it returns `Out_Of_Memory` and index `-1`, frees what was
+  reserved and keeps existing tables and rows; it can be retried. An empty name produced by a
+  failed reservation is not interpreted as an unnamed column.
+- Paths and values: `document_locate`, `document_get`, `document_set` ([syntax](cli.md#paths));
+  text: `document_text_write`/`document_text_read`; differences: `document_diff`.
+
+`asset.Types` contains the schema of the program's types, their hashes and layouts.
+
+- `types_index(&types,T)` adds a type the first time; it returns `ok=true` only when its hash,
+  transient field and layout tables are also ready.
+- `Types.error` distinguishes `Invalid` from `Out_Of_Memory`; a later call retries completing the
+  tables even if the schema already knows the type.
+- `document_from_asset` and text reading reject an incomplete hash update.
+
+## Asset types
+
+`asset.KINDS` gives extension, fourcc, name and version of each engine type; their tables are in
+their `asset/<type>.odin` and `mirai asset info` shows them. Contract of each: [kinds.md](kinds.md);
+scenes and prefabs: [scenes.md](scenes.md). The plugins' types are declared and validated by their
+plugin without adding them to the core: `.pose`, `.blend` and `.agraph`
+([animation](../../mirai-animation/references/animation.md)),
+[`.foliage`](../../mirai-plugins/references/foliage.md#format),
+[`.terrain`](../../mirai-plugins/references/terrain.md) and
+[`.physics_cache`](../../mirai-plugins/references/physics-cache.md).
+
+- **`.mesh`** (`MESH`): `mesh` (`Mesh_Info`); `clusters` bulk (`Cluster`); `levels`
+  (`Mesh_Level`); `vertices` bulk with columns `vertex` (`Cluster_Vertex`), `uv1`, `color`, `skin`
+  (`Skin_Vertex`) and `surface` (`Surface_Vertex`, of a far mesh, `Has_Surface`, always with
+  `color`); `triangles` bulk (`u32`, `u8` indices four at a time); `slots` (`Material_Slot`);
+  `joints` (the mesh's bind to the skeleton); `morphs` with `morph_deltas`; `colliders` with
+  `collision_points` and `collision_indices`.
+- **`.skeleton`** (`SKEL`): `skeleton` (`Skeleton_Info`), `bones` (`Skeleton_Bone`), `sockets`
+  (`Skeleton_Socket`).
+- **`.tex`** (`TEX `): `texture` (`Texture_Info`, with `layers` defaulting to 1), `mips`
+  (`Texture_Mip`, with all the layers of each level), `texels` bulk.
+- **`.mat`** (`MAT `): `material` (`Material_Info`), `imported` (`Material_Info`, of an imported
+  material: what the source gave), `parameters`, `overlays`, `hidden`.
+- **`.scene`, `.prefab`** (`SCEN`, `PRFB`): `entities`, a table per component, `scene`,
+  `instances`, `members`, `overrides` and `off` (turned-off components).
+- **`.anim`** (`ANIM`): `clips` (`Animation_Clip`), `tracks` (`Animation_Track`), `keys`
+  (`anim.Keyframe`), `markers` (`Animation_Marker`).
+- **`.pose`** (`POSE`): constraint tables of the [animation
+  plugin](../../mirai-animation/references/animation.md): `ik`, `look`, `limits`, `contacts`,
+  `grounding`, `retarget`.
+- **`.blend`** (`BLND`): `blend` (`Blend_Info`), `samples` (`Blend_Sample`), `segments`,
+  `triangles`; defined and validated by the animation plugin.
+- **`.agraph`** (`AGRF`): `graph` (`Graph_Info`), `parameters`, `events`, `nodes`, `states`,
+  `transitions`; defined and validated by the animation plugin.
+- **`.sound`** (`SND `): `sound` (`Sound_Info`) and one of two bulk tables: `samples` (`i16`) or
+  `file` (`u8`).
+- **`.sound_set`** (`SSET`): `sound_set` (`Sound_Set_Info`).
+- **`.ui`** (`UI  `): `nodes`, `styles`, `variants`, `components`, `component_nodes`, `overrides`,
+  `images`, `anims`, `tracks`, `keys`, `parts`, `anim_sets` (the records of `ui.Tree_Data`).
+- **`.records`** (`RCDS`): `records` (`Records_Info`), `rows` with `id`, `name` and `value` (the
+  code's type, with the file's schema), `texts` (`Records_Text`) and `text` bulk
+  ([records](kinds.md#records)).
+- **`.particle`** (`PART`, of the [`vfx`](../../mirai-plugins/references/vfx.md#format) plugin):
+  `particle` (`Particle_Info`), `parameters` (`Particle_Parameter`), `hidden` (`Particle_Field`).
+- **`.fracture`** (`FRAC`): `fracture` (`Fracture_Info`), `pieces`, `connections`, `clusters`,
+  `vertices` (`Vertex`) and `indices` local to each piece.
+- **`.foliage`** (`FOLI`): `foliage` (`Foliage_Info`), `types`, `cells`, and LZ4 bulk `manual` and
+  `overrides`; defined and validated by the
+  [foliage](../../mirai-plugins/references/foliage.md#format) plugin.
+- **`.physics_cache`** (`PCAC`): format of the
+  [physics_cache](../../mirai-plugins/references/physics-cache.md) plugin (unique geometry, tracks,
+  frames and poses).
+
+Any can have the `import` table (`Import_Info`: source, name of what was taken from it, position,
+size and hash of what was read, importer, its version and that of its format, and the settings
+hash); the asset then carries the `Cooked` flag (`import_put`). That record is the [import
+cache](../../mirai-imports/references/imports.md#import-cache) and the only thing that
+says where an asset came from. `import_peek(path,&types)` reads the header and the `Import_Info`
+from the
+front of the file (header, directory and chunks up to `IMPT`, before the bulk ones), without loading
+meshes or textures: the search for an import's outputs uses it.
+
+### Versions
+
+One rule for all types, of the engine and of plugins:
+
+- A type reads the `kind_version` it writes and no other: each `*_view` (and a plugin's read)
+  starts with `kind_check(&a,KIND,VERSION)`, which gives `Invalid` for another type and `Version`
+  for another version.
+- **A new table or column with a default does not change the version.** A file that lacks it reads
+  the default: `asset_rows`/`asset_row` with `default` (`MATERIAL_DEFAULTS`) or a table that may be
+  missing (`table_rows`), like `skin` in `vertices`. A longer array neither: the read migrates the
+  table by its schema and keeps the elements that fit (`serial.Migration`).
+- **A change in what a stored value means raises the version**, and no read path remains for old
+  files. `version_message` says which asset it is, its type and its version and, if it was
+  imported, the `mirai import` that rebuilds it in its folder with the root where its source is.
+  `mirai asset verify` and the `asset_errors` of `engine.diagnostics` show it.
+
+## Registry
+
+`asset.Registry` (`asset/registry.odin`, with the behavior of each operation in its comments) knows
+which file of a folder has which id, of what type and what it depends on. A scan reads only the
+start of each file, skips names that start with a dot and files being written, and keeps what it
+saw in a cache: a file whose size and date did not change is not opened again, not even in another
+run. The editor has the cache in the project's `.mirai/cache/registry`; the player, cooking and
+`mirai asset` do not use it.
+
+- `registry_refresh` updates only the paths it is given, without walking the folder: the editor
+  uses it with what it writes (save, import) and the watcher with what it sees change
+  ([host](../../mirai-core/references/host.md#failures-unloading-and-watching)).
+- `Registry.revision` advances before a scan, a refresh or a load replace files and paths, even if
+  the operation fails. The rows and their borrowed strings are valid until then: whoever caches them
+  checks the revision, even if the address and count of `files` repeat. It belongs to the registry,
+  not to the GPU resource counter of `host.Assets`.
+- With a cache, `Registry.removed` gathers the ids that no file is anymore, also those deleted with
+  the program closed. Whoever keeps something per asset (the
+  [previews](../../mirai-editor/references/panels.md#previews)) reads them and empties it.
+- `registry_dependents` comes from an inverse index built with each change: how many use an asset is
+  its length, without walking the files (`asset.list` reports it as `used_by`).
+- **Mounts.** `registry_mount` adds a folder under a prefix (a plugin's assets, in
+  `plugins/<name>`). A prefix that starts with a dot belongs to the program's assets (the editor's,
+  in `.editor`): they are found by id and by path, but a project's lists omit them
+  (`registry_listed`). Whoever opens a file by its registry path resolves it with
+  `registry_file_path`.
+- **In-memory files** (`registry_memory.odin`): what an editor changed and did not write. While a
+  path is in memory, its registry entry is what that content says and `registry_read` gives its
+  bytes; a scan or a refresh keep it, the cache and the index do not store it, and
+  `registry_memory_write` writes it and forgets it. A file outside the folders (a program's `.slang`
+  source) can also be in memory (`registry_outside`), without being a registry file: whoever reads
+  it asks the memory and, without it, the disk.
+- **Packed index.** `registry_save` writes what the registry has and `registry_load` reads it
+  without looking at the folder.
+  [Cooking](../../mirai-projects/references/build.md#asset-cooking) leaves it as `.index`
+  (`REGISTRY_INDEX`) and `host.assets_init` uses it instead of scanning: the folder is then what
+  its index says (`Assets.indexed`) and `assets_scan` does not look at it again; an unreadable one
+  is ignored and scanned. Whoever opens a file still checks its hash, id and type.
+- **Repeated ids.** Several files with one id are copies made outside the editor of one of them.
+  With `Registry.resolve_duplicates` (the registry of `host.assets_init`), the oldest is the
+  original (`file_newer`) and each copy receives, in the registry's memory, an id of its own derived
+  from the one it had and from its path, so it is the same on each scan until saved; it stops being
+  part of another asset and an output of an import. An unedited copy follows its file; one that was
+  already in memory with the repeated id is an edit and keeps it. A tool that only reads
+  (`mirai asset ls`, cooking) does not activate it and sees the pair in `r.duplicates`.
+
+## Text
+
+`document_text_write` produces the JSON that `mirai asset dump` prints and `unpack` saves:
+`mirai_asset`, the header (`kind`, `kind_version`, `id`, `owner` only on a part of another asset,
+`flags`), `dependencies`, the optional `schema` and the `tables`, each with its columns and `data`.
+
+- One row per line. With a single unnamed column the row is the value; otherwise, an object with one
+  value per column.
+- `"schema"` is written with `Text_Options.schema`. `Bulk` tables carry no `"data"`: with
+  `bulk=.Files` each column names its file.
+- `document_text_read` rebuilds the document (with a `Bulk_Loader` for the files) and reports
+  `Text_Problem {code, rule, offset}`.

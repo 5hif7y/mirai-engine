@@ -1,0 +1,80 @@
+# Scene and prefab
+
+Tables (`asset/scene.odin`): `entities` (id, parent, sibling order and name), one per component
+type with the component's name, `scene` (`Scene_Info`), those of instances if there are prefabs,
+`off`. The other tables are kept as they are.
+
+- `entities`: columns `id` (`Entity_Id`, the key), `parent` (`Entity_Id`, 0 without a parent),
+  `order` (`u32`, order among siblings) and `name` (`[64]u8`, text).
+- One table per component type, with the component's name (`name_hash` identifies it): column
+  `entity` (`u32`, row of `entities`, increasing) and column `value` (the data; size zero for a
+  tag). With the same layout it is loaded by block copy.
+- `scene` (`Scene_Info`: prefab root, id counter, last instance) and, if there are prefabs,
+  `instances`, `members` and `overrides`.
+- `off`, if some component is turned off by itself: a `Component_Off {entity, component}` (the
+  entity's Id and the component's `name_hash`) for each one. Without the table, everything is on;
+  turning off a whole entity is its `Disabled` component.
+- What governs a whole scene (its sky, its sun, its rules) are components of its entities. A
+  one-row table (`Single`) with a single `value` column is a scene setting from an earlier version
+  of the format: nothing reads it and saving the document discards it (`scene_lone_value`).
+- The other tables are kept as they are.
+
+`asset.Scene` is the editable document, independent of the data world:
+
+- `Scene.stamp` is the hash of the content of the file it was read from or last written to (0:
+  none).
+- If the file stores a component with another layout, `scene_get` migrates on reading and
+  `scene_set` writes in the file's layout.
+- Removing a component or an entity forgets that it was off; `engine/scene` loads the off ones off
+  and saves them as they are in the world.
+- `scene_view` is the copy-free read for loading: it validates rows in range and ordered;
+  `scene_view_check` also checks unique ids, existing parents and no cycles.
+
+## Prefab instances
+
+The document stores each entity with its effective values, so a scene loads without its prefabs.
+An instance (`asset/prefab.odin`) records where its entities come from (one `Member` per entity),
+what it fixed on its own (its `Override`s) and against which file of its prefab it was updated
+(`stamp`, the prefab's `Scene.stamp`; 0: unknown).
+
+- `scene_instantiate` copies the prefab's entities with new ids, points their internal references
+  to the copies and empties those that pointed outside.
+- An override fixes something of a member; the fixed value is the one the entity has in its table.
+  `Field` fixes the part of the component that the path names (`""` is all; fixing a part replaces
+  the overrides of what it contains); `Added` and `Removed`, its presence; `Turned`, whether it is
+  off. `component` 0 with path `"name"` is the entity's name.
+- `Child` (`component` 0, no path) is an entity the instance put under a member, with what hangs
+  from it; it is not a member, and the instances placed among them belong to the document. It is
+  the only hierarchy change of an instance: a member neither changes place nor is missing, and is
+  turned off with `Disabled` (an `Added`) to leave it out.
+- `scene_instance_update`: the members follow the prefab (additions, removals, parent, order, name
+  and components) except what an override names, and the `stamp` becomes the prefab's. The parent,
+  the order and the root's placement (`INSTANCE_PLACEMENT`) belong to the instance; a member whose
+  origin is no longer in the prefab is removed with what the instance added under it.
+  - Marking compares leaf by leaf with the base (`value_leaves`, `overrides_mark`) and following
+    copies what is marked onto the new base (`override_keep`), in `asset/overrides.odin`; the
+    layers of an [imported material](kinds.md#what-was-imported-and-what-was-changed) use the same
+    functions.
+- Prefabs inside a prefab arrive as instances of their own with `outer` equal to the instance that
+  brought them. Overrides made in the document belong to the instance placed in it: the outermost
+  level wins. Only those placed in the document (`outer` 0) are updated, unlinked or removed; on
+  unlinking, the inner ones stay placed in it.
+- The editor's Apply and Revert of an added entity: `scene_child_apply` writes it into the prefab
+  with what hangs from it (instances placed among them included) and makes it a member;
+  `scene_child_revert` deletes it with what hangs from it.
+
+## Resolution against the current prefab
+
+An instance placed in a document is stale when its `stamp` is not the hash of the content of its
+prefab's file, or when that prefab brings a stale one.
+
+- `Prefab_Resolver` reads each prefab once through `Prefab_Files`, which opens them for as long as
+  needed: `Registry_Prefabs` reads them from a registry; `engine/scene`, from `host`'s cache.
+- `resolver_check` looks only at the `instances` table, without copying the document; `Checking` is
+  a prefab that contains itself. An instance of a missing prefab stays as it is.
+- `scene_resolve` updates each stale placed instance; each one's stamp is that of its prefab's file
+  even if that prefab was resolved in memory: until it is saved, each resolution repeats it.
+- It is used by `engine/scene` on loading
+  ([running scenes](../../mirai-gameplay/references/libraries.md#scene)), cooking
+  ([cooking](../../mirai-projects/references/build.md#asset-cooking)) and the editor on
+  reading a prefab ([prefabs](../../mirai-editor/references/prefabs.md)).

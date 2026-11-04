@@ -1,0 +1,13 @@
+* text=auto eol=lf
+*.scene binary
+*.prefab binary
+*.mat binary
+*.mesh binary
+*.tex binary
+*.anim binary
+*.ui binary
+*.phys binary
+*.font binary
+*.strings binary
+*.prompts binary
+*.cmd text eol=crlf

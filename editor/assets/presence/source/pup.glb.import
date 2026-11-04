@@ -1,0 +1,15 @@
+{
+  "max_texture_size": 512,
+  "textures": "Blocks",
+  "image": "Data",
+  "alpha_coverage": 0,
+  "lods": "Auto",
+  "max_triangles": 60000,
+  "collision": "None",
+  "force_collision": false,
+  "collision_hulls": 0,
+  "parts": "All",
+  "rig": "Source",
+  "rig_crotch": 0,
+  "rig_neck": 0
+}

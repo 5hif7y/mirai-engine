@@ -1,0 +1,201 @@
+---
+name: mirai-rendering
+description: Modify, diagnose and measure Mirai rendering, GI, shaders, RHI and GPU resources.
+  Use for lighting, reflections, glass, shadows, particles, culling, temporality, selection
+  outline, UI and world panels, debug lines, renderer extensions, shader generation and
+  Metal/Vulkan backends.
+---
+
+# Mirai rendering and RHI
+
+## Map
+
+- GPU contract, resources, bindings and presentation (`rhi/`) →
+  [rhi](references/rhi.md#rhi-contract); device validation and its errors →
+  [device](references/rhi.md#device); device loss (`device_failure`, `device_lose`, waits with a
+  limit) → [loss](references/rhi.md#device-loss), and what the application and the editor do →
+  [host](../mirai-core/references/host.md#gpu-that-stops-working)
+- Shader generation (`cook/shaders/`, `mirai shaders`, `mirai setup slang`) →
+  [shaders](references/shaders.md#shader-toolchain)
+- Programs and extensions of a project, reload in `host` →
+  [shaders](references/shaders.md#project-generation); unsaved sources of an editor
+  (`Options.overlay`) → [in-memory sources](references/shaders.md#in-memory-sources)
+- Renderer, scene entry, pools and vertices (`render/`) →
+  [scene](references/scene.md#scene-and-instances)
+- `scene_move`, `scene_update`, `materials_set` →
+  [partial changes](references/scene.md#partial-scene-changes)
+- Visual copies and replacements → [visual instances](references/scene.md#visual-instances)
+- Instance batches (`batch_set`, `Batch_Desc`, `Batch_Instance`), their cull, their rays and the
+  instance index of a batch → [batches](references/scene.md#instance-batches)
+- Meshes and textures one at a time, geometry publication →
+  [scene](references/scene.md#meshes-and-textures-one-at-a-time); geometry that uploads over several
+  frames (`mesh_add_over_frames`, `mesh_uploading`) →
+  [several frames](references/scene.md#geometry-over-several-frames)
+- GPU skinning → [skinning](references/scene.md#gpu-skinning)
+- `Frame_Desc`, split screen, output and capture → [views](references/views.md#frame-and-views)
+- Cameras, layers, texture and nested views → [views](references/views.md#cameras-and-layers)
+- Render pipelines and their stages → [pipelines](references/views.md#render-pipelines)
+- Frame generation (passes after `Output`, `Generated`, the UI over both images) →
+  [generation](references/views.md#frame-generation); presenting them paced from a thread
+  (`swapchain_set_paced`, `present_stats`) → [rhi](references/rhi.md#paced-presentation)
+- Extension API for plugins (stages, world buffers, counters, hooks, batches, deformable and
+  skinned meshes) → [extensions](references/views.md#extension-stages); plugins that use it:
+  [render plugins](../mirai-plugins/references/render-plugins.md) and
+  [particles](../mirai-plugins/references/vfx.md)
+- Order of the passes, what each one reads and writes →
+  [frame graph](references/frame-graph.md#frame-graph)
+- Editor and game outlines (`Outline`), reference grid, `renderer_stats` →
+  [frame graph](references/frame-graph.md#outlines)
+- Particles → the [`vfx`](../mirai-plugins/references/vfx.md#gpu) plugin
+- Volumetric fog, its medium beyond the grid and its variable density → the
+  [`fog`](../mirai-plugins/references/render-plugins.md#fog) plugin
+- Screen UI, world panels, debug lines →
+  [UI](references/ui.md#ui-world-panels-and-debug-lines); panels and particles in textures, depth
+  read at a pixel, ray against a mesh → [offscreen UI](references/ui.md#offscreen-ui)
+- Materials, textures, BRDF, previews and thumbnails →
+  [materials](references/materials.md#material-row); Surface programs in raster and rays (material
+  points, `points.odin`, `program_stages.odin`, deferred glass filters, pipelines on the renderer
+  thread) → [programs](references/materials.md#surface-programs-in-rays-and-raster); texture levels
+  by distance, `textures_pending` → [residency](references/materials.md#residency-by-distance)
+- OpenPBR layers (coat, fuzz, anisotropy, diffuse transmission, unlit), tangents and normal maps →
+  [layers](references/materials.md#layers-openpbr),
+  [normal maps](references/materials.md#normal-maps-and-specular-antialiasing)
+- Traced reflections and glass → [reflections](references/materials.md#traced-reflections),
+  [glass](references/materials.md#glass); which rays see the glass detail and which its medium
+  color → [medium filter](references/materials.md#medium-filter)
+- Local lights, shadows, colored shadows → [lights](references/lights.md#local-lights)
+- GI, BVH, probe volume, sky →
+  [GI](references/gi.md#lighting-techniques-and-optimization); contact occlusion, small instances
+  outside the volume → [contact](references/gi.md#contact-occlusion)
+- Atmosphere (`Sky.atmosphere`, `air.slang`, `render/air.odin`), its tables, the sunlight crossing
+  the air (`sun_light`) and aerial perspective → [atmosphere](references/gi.md#atmosphere)
+- Light of each world, `scene_world`, warm-up, light scale change →
+  [GI](references/gi.md#light-of-each-world)
+- Indirect reference and scenes that measure GI →
+  [reference](references/gi.md#indirect-reference),
+  [measuring](references/verification.md#measuring-gi)
+- Physical units of lights, sky and emission, light scale, exposure (EV100, auto, manual) →
+  [display](references/display.md#units); display transform (ACES 2.0, 3D LUT, HDR) →
+  [display](references/display.md#display-transform)
+- Scene resolution, pixel budget (`render_megapixels`) →
+  [resolution](references/settings.md#scene-resolution)
+- `render.Settings` → [settings](references/settings.md#settings); inspection modes of a view
+  (`View_Inspection`, `Debug_View`) → [modes](references/settings.md#inspection-modes)
+- GPU test environment, exact images, regenerating shaders, measuring →
+  [verification](references/verification.md#gpu-environment)
+- Accepting a change of light, GI, materials, exposure or cost: `mirai render check` →
+  [render check](references/verification.md#render-check)
+
+## Workflow
+
+1. Locate the contract in the Map. Before changing a pass, check in the frame graph what it reads
+   and writes and which histories it uses.
+2. When adding or changing a stage, keep its `stage_contract` equal to what it reads and writes and
+   mark optional only what the stage replaces when missing. A stage that a pipeline can omit leaves
+   in the `Pass` a value that the following ones can use (`view_begin`).
+3. Shaders: edit the Slang source; `mirai check`, `test` and `build` regenerate the outputs, which
+   git does not store.
+4. What only some games use enters through the extension API (`render/extend.odin`, exposed by
+   `engine/render`), added together with its first consumer.
+5. A change in one backend is replicated in the other with the same signature. Metal is checked
+   with `mirai check rhi -target:darwin_arm64`; its execution, only on a Mac.
+6. Update the affected reference in `references/`.
+
+## Invariants
+
+- The shader language is Slang: a single source, SPIR-V for Vulkan and MSL for Metal generated from
+  that SPIR-V with SPIRV-Cross.
+- The graphics API is the own `rhi` over Vulkan and Metal; wgpu is not used.
+- Each shader stage compiles in its own `slangc` process, even if other stages have the same
+  defines.
+- A shadow technique costs no more than tracing one ray per 2×2 block.
+- Every view is exposed one EV above its meter (`EXPOSURE_BIAS`), as Unreal's default bias; the
+  ACES 2.0 calibration is not touched.
+- `render` does not see native handles: backend differences stay in `rhi`, with a single
+  implementation of each pass for Vulkan and Metal. A plugin's runtime imports neither `render`
+  nor `rhi`.
+- A GPU loss neither aborts nor hangs: `rhi` stores it typed (`device_failure`) from the first
+  point that reports it, and everything that submits or waits returns at once; no Vulkan wait
+  exceeds `GPU_WAIT_LIMIT_NS`.
+- Device and renderer receive allocator and capacities in their `*_Desc`. The generated shader
+  tables are `@(rodata)`.
+- On Vulkan, calls go through the device tables (`d.dvk`, `d.ivk`, `c.device.dvk`), never through
+  the `vendor:vulkan` pointers.
+- A stable frame neither allocates memory nor creates GPU resources. What exceeds a capacity is
+  discarded and counted (`rhi.device_stats`, `render.Stats`).
+- The renderer draws relative to an origin that jumps: on the CPU a world place passes to it only
+  with `origin_point` and the other functions of `render/origin.odin` (which `engine/render`
+  exposes); in a shader, what the origin adds to a world place comes only from `origin.slang`, and
+  a place is projected only with `view_clip`.
+- Split screen shares scene, pipelines and probes; each view keeps targets, matrices and histories.
+  The screen UI is composed once; panels and lines, in each view.
+- Visual copies use `copy_owner`/`copy_variant` and `uniform_color` without changing the object ID
+  or adding geometry or materials.
+- Batch instances enter through the same cull, G-buffer and tracing as the scene ones; a shader
+  reads an instance by index only with `scene_instance`.
+- A geometry regeneration registers an immutable version and withdraws the previous one, with free
+  ranges and dirty ranges of the common pools, without compacting other geometry.
+- Local descriptor changes go through `scene_update`; `scene_set` is left for structural changes.
+- Geometry publication is a common immediate transaction with reused staging, without
+  `buffer_upload` or waits per pool; its cost counts in `cpu_prepare_ms`.
+- What is drawn over the finished image enters through `Frame_Desc` and does not change what a
+  frame that does not use it records.
+- The skinning palette already includes the inverse bind: the renderer does not apply it again.
+- Every light enters in render units in a single place ([units](references/display.md#units)): no
+  shader adds constant light or reads an intensity without converting.
+- The light that arrives around a point is composed only with `indirect_compose`. The sun's at a
+  place (a surface, the fog and its distant slices) comes only from `sun_light` (`scene.slang`),
+  which makes it cross the air of an atmosphere.
+- The indirect samples nothing per frame: the probes always trace the same directions, contact
+  occlusion a fixed pattern per pixel and the shadows fixed points of each light. What the scene
+  does not change gives the same every frame; there is no on-screen history of the indirect or
+  bounce factor, and the scene changes are marked by `Scene_State.changes`
+  ([GI](references/gi.md#temporal-and-denoising)).
+- Another world, or the same one replaced by another scene, is announced with `scene_world` before
+  its `scene_set`; a lone `scene_set` is only an edit.
+- No engine stage evaluates a Surface program except its own (`//! per surface program`): raster
+  uses the program's pipeline (`program_graphics`) and rays ask for it through the material points
+  (`points.slang`); the traversal evaluates only the alpha of programs with coverage. A frame does
+  not wait for a pipeline to be created: it draws the program as its row until it has it.
+- The passes read the G-buffer only with `include/gbuffer.slang`. A material's layers are prepared
+  only with `shading_layers`, and direct and indirect light compose them the same.
+- A scene's image reaches the display only through the display LUT (`display_encode`); previews,
+  thumbnails and the UI studio, only through Khronos PBR Neutral (`preview_encode`). No shader
+  applies another tone curve.
+
+## Verification
+
+- **A change of light, GI, materials, exposure or render cost is accepted only with
+  `mirai render check demo` without regressions against `main` and without load warnings**
+  ([check](references/verification.md#render-check)), besides the reference metrics of `gi_test`;
+  `--quality` is enough when the change cannot move the cost.
+  Fixtures are not enough to assert quality or cost.
+- GI is also judged in motion: the blotches of the flying views of the check (`main_wall`
+  sideways), not only the still stability and the trail.
+- Test only the affected packages (`rhi`, `rhi/tests`, `render`, `engine/render`, `cook/shaders`)
+  with `MIRAI_VALIDATION=1` (Vulkan) or `MTL_DEBUG_LAYER=1` (Metal). No GPU test may report
+  validation errors; a new one takes the shared device
+  ([GPU environment](references/verification.md#gpu-environment)).
+- A change that must preserve the image is checked with `MIRAI_GOLDEN=write:<dir>` before and
+  `MIRAI_GOLDEN=compare:<dir>` after, on the same machine.
+- After regenerating shaders, the diff contains only the outputs of the touched sources, the
+  manifest, the catalog and the table fingerprint.
+- Device loss: `rhi_a_lost_device_fails_every_submission_and_wait_at_once` and
+  `rhi_a_lost_immediate_list_reports_the_loss` (`rhi/tests`),
+  `a_lost_gpu_leaves_the_frames_running_without_drawing` (`host`); in a session, `engine.gpu_lose`.
+  Metal, on a Mac: the same ones of `rhi/tests` with `MTL_DEBUG_LAYER=1`.
+- Extensions: scenes of the render plugins. Benchmarks: only when touching a hot path.
+- Frame generation: `a_window_that_generates_frames_presents_two_images_a_frame` (`host`, with a
+  window), `present_interval_follows_the_frames_and_not_the_thread` (`rhi`) and the tests of
+  `plugins/fsr/runtime`; in an editor with a window (`mirai edit`: a headless session does not
+  present), `presentation` of `profile.capture` with and without `frame_generation` and
+  `editor.capture` with `ui` and `generated` against the same view without generation.
+- Surface programs: the focal tests of
+  [programs](references/materials.md#program-limits) (`render`), and `generate_test.odin` and
+  `programs_test.odin` of `cook/shaders` for the per-program stages and the coverage; in a session,
+  `material.program.edit` with `material.preview.capture` and `editor.capture`.
+- Texture residency: the tests of `render/texture_residency_test.odin` (CPU) and, with GPU,
+  `a_texture_holds_the_levels_its_distance_asks_for` of `host`; in the editor, `textures` of
+  `engine.status` (memory, pending) when bringing the camera close.
+- Environment, cases with their own conditions and measurement:
+  [verification](references/verification.md).

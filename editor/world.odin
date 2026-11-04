@@ -1,0 +1,719 @@
+package editor
+
+import "base:runtime"
+import "core:fmt"
+import "core:math/linalg"
+import "core:mem"
+import "core:reflect"
+import "core:strconv"
+import "core:strings"
+import "mirai:core"
+import eaudio "mirai:engine/audio"
+import evolume "mirai:engine/volume"
+import ecamera "mirai:engine/camera"
+import erender "mirai:engine/render"
+import "mirai:std/base"
+import mm "mirai:std/math"
+import "mirai:ui"
+
+// Edits of the World shown, each one a step of undo unless a gesture is
+// open. They work on any World through its tables, and on the components of
+// the engine that every scene entity has: Id, Name, Transform and Parent.
+
+// What the Create panel and the API make: recipes of components, not kinds.
+Preset :: enum u8 {Empty,Cube,Sphere,Cylinder,Cone,Capsule,Plane,Prism,Pyramid,Point_Light,Spot_Light,Sun,Camera,Rect_Light,Isometric_Camera,Top_Down_Camera,Side_Camera,First_Person_Camera,Third_Person_Camera,Aim_Camera,Sound,Reverb_Zone}
+
+Preset_Card :: struct {
+    label:string,
+    icon:ui.Icon,
+    color:ui.Color,
+    lift:f32, // m above what it is placed on, for what has no body
+}
+
+MESH_COLOR :: ui.Color{140,180,240,255}
+PREFAB_COLOR :: ui.Color{120,200,255,255} // a linked prefab: its icon and the name of its root
+GROUP_COLOR :: ui.Color{175,165,230,255}
+CAMERA_COLOR :: ui.Color{150,200,255,255}
+CAMERA_ICON :: ui.Icon(u8(ui.Icon.User)+u8(User_Icon.Camera))
+LIGHT_COLOR :: ui.Color{255,214,140,255}
+SOUND_COLOR :: ui.Color{150,140,240,255}
+
+PRESETS :: [Preset]Preset_Card{
+    .Empty={"Group",.Group,GROUP_COLOR,0},
+    .Cube={"Cube",.Cube,MESH_COLOR,0},
+    .Sphere={"Sphere",.Sphere,MESH_COLOR,0},
+    .Cylinder={"Cylinder",.Cylinder,MESH_COLOR,0},
+    .Cone={"Cone",.Cone,MESH_COLOR,0},
+    .Capsule={"Capsule",.Cylinder,MESH_COLOR,0},
+    .Plane={"Plane",.Plane,MESH_COLOR,0},
+    .Prism={"Prism",.Prism,MESH_COLOR,0},
+    .Pyramid={"Pyramid",.Pyramid,MESH_COLOR,0},
+    .Point_Light={"Point light",.Light,LIGHT_COLOR,1.5},
+    .Spot_Light={"Spot light",.Spot,LIGHT_COLOR,3},
+    .Sun={"Sun",.Sun,LIGHT_COLOR,2},
+    .Rect_Light={"Rectangle light",.Area_Light,LIGHT_COLOR,1.5},
+    .Camera={"Camera",CAMERA_ICON,CAMERA_COLOR,1.6},
+    .Isometric_Camera={"Isometric",CAMERA_ICON,CAMERA_COLOR,1.6},
+    .Top_Down_Camera={"Top-down",CAMERA_ICON,CAMERA_COLOR,1.6},
+    .Side_Camera={"Side view",CAMERA_ICON,CAMERA_COLOR,1.6},
+    .First_Person_Camera={"First person",CAMERA_ICON,CAMERA_COLOR,1.6},
+    .Third_Person_Camera={"Third person",CAMERA_ICON,CAMERA_COLOR,1.6},
+    .Aim_Camera={"Aim",CAMERA_ICON,CAMERA_COLOR,1.6},
+    .Sound={"Sound",.Sound,SOUND_COLOR,1},
+    .Reverb_Zone={"Reverb zone",.Collider,SOUND_COLOR,3},
+}
+
+// The mode of engine/camera a camera preset follows the player in.
+@(private)
+preset_camera_mode :: proc "contextless" (preset:Preset) -> (ecamera.Camera_Preset,bool) {
+    #partial switch preset {
+    case .Isometric_Camera:    return .Isometric,true
+    case .Top_Down_Camera:     return .Top_Down,true
+    case .Side_Camera:         return .Side,true
+    case .First_Person_Camera: return .First_Person,true
+    case .Third_Person_Camera: return .Third_Person,true
+    case .Aim_Camera:          return .Aim,true
+    }
+    return {},false
+}
+
+SHAPE_ICONS :: [erender.Shape]ui.Icon{.None=.Mesh,.Cube=.Cube,.Sphere=.Sphere,.Cylinder=.Cylinder,.Cone=.Cone,.Capsule=.Cylinder,.Plane=.Plane,.Prism=.Prism,.Pyramid=.Pyramid}
+
+Create_Desc :: struct {
+    preset:Preset,
+    card:int,              // its place in cards(), for the card of a plugin; 0: the preset
+    name:string,           // the name of the preset when empty; a number follows a name that is taken
+    named:bool,            // name is taken as it is, even when another entity has it
+    parent:core.Entity,
+    transform:core.Transform, // the identity when zero
+}
+
+// ---------------------------------------------------------------- reading
+
+entity_alive :: proc(w:core.World_Ref,e:core.Entity) -> bool {return core.alive(core.world_entities(w),e)}
+
+entity_name :: proc(w:core.World_Ref,e:core.Entity) -> string {
+    names:=core.world_table_of(w,core.Name)
+    if names==nil {return ""}
+    return core.name_get(core.read(names),e)
+}
+
+// The name of an entity, or one made of its index when it has none.
+entity_label :: proc(w:core.World_Ref,e:core.Entity,allocator:=context.temp_allocator) -> string {
+    if name:=entity_name(w,e);name!="" {return name}
+    return fmt.aprintf("Entity %d",core.entity_index(e),allocator=allocator)
+}
+
+entity_parent :: proc(w:core.World_Ref,e:core.Entity) -> core.Entity {
+    parents:=core.world_table_of(w,core.Parent)
+    if parents==nil {return core.NONE}
+    if parent,ok:=core.get(core.read(parents),e);ok {return parent.entity}
+    return core.NONE
+}
+
+// The tree of Parent at the last settle, to go down it.
+entity_hierarchy :: proc(w:core.World_Ref) -> core.Ref(core.Hierarchy) {
+    return core.ref(core.world_storage_of(w,core.Hierarchy))
+}
+
+entity_children :: proc(w:core.World_Ref,e:core.Entity,allocator:=context.temp_allocator) -> []core.Entity {
+    return core.children(entity_hierarchy(w),e,allocator)
+}
+
+// True when ancestor is e or holds it.
+entity_under :: proc(w:core.World_Ref,e,ancestor:core.Entity) -> bool {
+    parents:=core.world_table_of(w,core.Parent)
+    if parents==nil {return e==ancestor && e!=core.NONE}
+    return core.is_under(core.read(parents),e,ancestor)
+}
+
+entity_local :: proc(w:core.World_Ref,e:core.Entity) -> mm.Transform {
+    transforms:=core.world_table_of(w,core.Transform)
+    if transforms==nil {return mm.TRANSFORM_IDENTITY}
+    if t,ok:=core.get(core.read(transforms),e);ok {return core.to_math(t)}
+    return mm.TRANSFORM_IDENTITY
+}
+
+// Where an entity is in the world now, from the locals: what an edit of this frame moved too.
+entity_world :: proc(w:core.World_Ref,e:core.Entity) -> mm.Transform {
+    transforms:=core.world_table_of(w,core.Transform)
+    parents:=core.world_table_of(w,core.Parent)
+    if transforms==nil || parents==nil {return mm.TRANSFORM_IDENTITY}
+    world,_:=core.world_of(core.read(transforms),core.read(parents),e)
+    return world
+}
+
+entity_parent_world :: proc(w:core.World_Ref,e:core.Entity) -> mm.Transform {
+    parent:=entity_parent(w,e)
+    if parent==core.NONE {return mm.TRANSFORM_IDENTITY}
+    return entity_world(w,parent)
+}
+
+// Whether an entity has the component, on or off: the editor shows and edits both.
+entity_has :: proc(w:core.World_Ref,e:core.Entity,$T:typeid) -> bool {
+    t:=core.world_table_of(w,T)
+    return t!=nil && core.raw_row(core.raw(t),e)>=0
+}
+
+// The component of an entity, on or off.
+entity_get :: proc(w:core.World_Ref,e:core.Entity,$T:typeid) -> (value:T,ok:bool) {
+    t:=core.world_table_of(w,T)
+    if t==nil {return}
+    if row:=core.raw_row(core.raw(t),e);row>=0 {return t.values[row],true}
+    return
+}
+
+// Hidden by itself or by an ancestor.
+entity_hidden :: proc(w:core.World_Ref,e:core.Entity) -> bool {
+    hidden:=core.world_table_of(w,erender.Hidden)
+    if hidden==nil || core.raw_count(core.raw(hidden))==0 {return false}
+    at:=e
+    for _ in 0..<256 {
+        if at==core.NONE {return false}
+        if core.raw_row(core.raw(hidden),at)>=0 {return true}
+        at=entity_parent(w,at)
+    }
+    return false
+}
+
+// The icon of what the components of an entity make of it: that of the card
+// of a plugin whose component it has, before those of the engine.
+entity_icon :: proc(s:^Session,w:core.World_Ref,e:core.Entity) -> (icon:ui.Icon,color:ui.Color) {
+    if link,linked:=prefab_link_of(s,api_entity_id(w,e));linked && link.root {return .Prefab,PREFAB_COLOR}
+    if card,found:=card_of_entity(s,w,e);found {return card.icon,card.color}
+    icons:=SHAPE_ICONS
+    if mesh,ok:=entity_get(w,e,erender.Mesh_Renderer);ok {return mesh.mesh!={}?.Mesh:icons[mesh.shape],MESH_COLOR}
+    light :: proc(icon:ui.Icon,color:[3]f32) -> (ui.Icon,ui.Color) {
+        lift:=color*0.6+0.4
+        return icon,ui.rgb_color({clamp(lift.x,0,1),clamp(lift.y,0,1),clamp(lift.z,0,1)})
+    }
+    if point,ok:=entity_get(w,e,erender.Point_Light);ok {return light(.Light,point.color)}
+    if spot,ok:=entity_get(w,e,erender.Spot_Light);ok {return light(.Spot,spot.color)}
+    if sun,ok:=entity_get(w,e,erender.Sun);ok {return light(.Sun,sun.color)}
+    if rect,ok:=entity_get(w,e,erender.Rect_Light);ok {return light(.Area_Light,rect.color)}
+    if entity_has(w,e,erender.Camera) {return CAMERA_ICON,CAMERA_COLOR}
+    if entity_has(w,e,eaudio.Audio_Source) {return .Sound,SOUND_COLOR}
+    if entity_has(w,e,eaudio.Audio_Reverb) {return .Collider,SOUND_COLOR}
+    return .Group,GROUP_COLOR
+}
+
+// ---------------------------------------------------------------- ids and names
+
+// The name itself when no entity has it; otherwise "name N" with the first
+// N free, counting from the number the name ends in.
+name_free :: proc(w:core.World_Ref,name:string,allocator:=context.temp_allocator) -> string {
+    names:=core.world_table_of(w,core.Name)
+    stem:=strings.trim_space(name)
+    if stem=="" {stem="Entity"}
+    first:=1
+    if space:=strings.last_index_byte(stem,' ');space>0 {
+        if n,numeric:=strconv.parse_int(stem[space+1:],10);numeric && n>0 {stem,first=stem[:space],n}
+    }
+    count:=names!=nil?len(names.values):0
+    // Each name takes at most one number: one of these is free.
+    taken:=make([]bool,count+1,context.temp_allocator)
+    for i in 0..<count {
+        text:=base.text_get(names.values[i].text[:])
+        n:=0
+        if text==stem {
+            n=1
+        } else if len(text)>len(stem)+1 && strings.has_prefix(text,stem) && text[len(stem)]==' ' {
+            n,_=strconv.parse_int(text[len(stem)+1:],10)
+        }
+        if n>=first && n-first<len(taken) {taken[n-first]=true}
+    }
+    n:=first
+    for n-first<count && taken[n-first] {n+=1}
+    if n==1 {return strings.clone(stem,allocator)}
+    return fmt.aprintf("%s %d",stem,n,allocator=allocator)
+}
+
+// The order an entity takes after the children a parent has.
+@(private)
+order_next :: proc(w:core.World_Ref,parent:core.Entity) -> i32 {
+    parents:=core.world_table_of(w,core.Parent)
+    if parents==nil || parent==core.NONE {return 0}
+    last,ok:=core.get(core.read(parents),core.last_child(entity_hierarchy(w),parent))
+    return ok?max(last.order+1,0):0
+}
+
+// ---------------------------------------------------------------- edits
+
+// Creates an entity of a preset with Id, Name and Transform, under parent
+// when it is given. Its components appear when the function ends.
+entity_create :: proc(s:^Session,desc:Create_Desc) -> core.Entity {
+    if watching(s) {return core.NONE}
+    // While a section is edited in its world, what is added without a parent goes inside it.
+    if parent:=desc.parent!=core.NONE?desc.parent:section_editing(s);section_target_refused(s,parent) {return core.NONE}
+    index:=max(desc.card,int(desc.preset))
+    all:=cards(s)
+    if index>=len(all) {return core.NONE}
+    opened,edit_ready:=edit_open(s,fmt.tprintf("Add %s",all[index].label))
+    if !edit_ready {return core.NONE}
+    defer edit_close(s,opened)
+    return entity_make(s,shown_world(s),desc)
+}
+
+// entity_create without a step of undo.
+@(private)
+entity_make :: proc(s:^Session,w:core.World_Ref,desc:Create_Desc) -> core.Entity {
+    desc:=desc
+    if desc.transform=={} {desc.transform=core.TRANSFORM_IDENTITY}
+    if index:=max(desc.card,int(desc.preset));index<len(Preset) && desc.transform.rotation==1 {desc.transform.rotation=preset_rotation(Preset(index))}
+    root:=document_root(s,w)
+    if root==core.NONE && w.data==s.edit_world {root=section_editing(s)}
+    if root!=core.NONE && desc.parent==core.NONE && !playing(s) {
+        transform:=desc.transform=={}?core.TRANSFORM_IDENTITY:desc.transform
+        local,ok:=mm.transform_relative(core.to_math(transform),entity_world(w,root))
+        if !ok {return core.NONE}
+        desc.parent,desc.transform=root,core.from_math(local)
+    }
+    es:=core.world_entities(w)
+    all:=cards(s)
+    index:=max(desc.card,int(desc.preset))
+    if index>=len(all) {return core.NONE}
+    card:=all[index]
+    e:=core.create(es)
+    transform:=desc.transform
+    if transform=={} {transform=core.TRANSFORM_IDENTITY}
+    if card.scale!={} {transform.scale*=card.scale}
+    if t:=core.world_table_of(w,core.Transform);t!=nil {core.add(t,e,transform)}
+    if t:=core.world_table_of(w,core.Id);t!=nil {core.add(t,e,core.Id{core.id_new(es,&s.id_state)})}
+    if t:=core.world_table_of(w,core.Name);t!=nil {
+        name:=desc.named?desc.name:name_free(w,desc.name!=""?desc.name:card.label)
+        core.add(t,e,core.name_make(name))
+    }
+    if desc.parent!=core.NONE && core.alive(es,desc.parent) {
+        if t:=core.world_table_of(w,core.Parent);t!=nil {core.add(t,e,core.Parent{desc.parent,order_next(w,desc.parent)})}
+    }
+    if card.make!=nil {card.make(s,w,e)} else {preset_components(w,e,Preset(index))}
+    return e
+}
+
+@(private)
+preset_components :: proc(w:core.World_Ref,e:core.Entity,preset:Preset) {
+    if shape:=preset_shape(preset);shape!=.None {
+        if t:=core.world_table_of(w,erender.Mesh_Renderer);t!=nil {core.add(t,e,erender.Mesh_Renderer{shape=shape})}
+        return
+    }
+    #partial switch preset {
+    case .Point_Light: if t:=core.world_table_of(w,erender.Point_Light);t!=nil {core.add(t,e,erender.POINT_LIGHT_DEFAULT)}
+    case .Spot_Light:  if t:=core.world_table_of(w,erender.Spot_Light);t!=nil {core.add(t,e,erender.SPOT_LIGHT_DEFAULT)}
+    case .Rect_Light:  if t:=core.world_table_of(w,erender.Rect_Light);t!=nil {core.add(t,e,erender.RECT_LIGHT_DEFAULT)}
+    case .Sun:         if t:=core.world_table_of(w,erender.Sun);t!=nil {core.add(t,e,erender.SUN_DEFAULT)}
+    case .Camera:      if t:=core.world_table_of(w,erender.Camera);t!=nil {core.add(t,e,erender.CAMERA_DEFAULT)}
+    case .Isometric_Camera,.Top_Down_Camera,.Side_Camera,.First_Person_Camera,.Third_Person_Camera,.Aim_Camera:
+        mode,_:=preset_camera_mode(preset)
+        setup:=ecamera.camera_preset(mode)
+        if t:=core.world_table_of(w,erender.Camera);t!=nil {
+            camera:=erender.CAMERA_DEFAULT
+            ecamera.camera_lens_set(&camera,setup.lens)
+            core.add(t,e,camera)
+        }
+        if t:=core.world_table_of(w,ecamera.Camera_Follow);t!=nil {core.add(t,e,setup.follow)}
+        if preset==.Aim_Camera {
+            if t:=core.world_table_of(w,ecamera.Camera_Activation);t!=nil {core.add(t,e,ecamera.CAMERA_ACTIVATION_DEFAULT)}
+        }
+    case .Sound:       sound_components(w,e,{})
+    case .Reverb_Zone:
+        if t:=core.world_table_of(w,eaudio.Audio_Reverb);t!=nil {core.add(t,e,eaudio.AUDIO_REVERB_DEFAULT)}
+        if t:=core.world_table_of(w,evolume.Volume);t!=nil {core.add(t,e,evolume.Volume{shape=.Box,extents={5,3,5},blend=1})}
+    }
+}
+
+// A sound placed in the scene: a spatial source in a loop that the room
+// reverberates and walls hide.
+sound_components :: proc(w:core.World_Ref,e:core.Entity,sound:base.Asset_Id) {
+    if t:=core.world_table_of(w,eaudio.Audio_Source);t!=nil {
+        source:=eaudio.AUDIO_SOURCE_DEFAULT
+        source.sound,source.loop,source.spatial,source.reverb=sound,true,true,1
+        core.add(t,e,source)
+    }
+    if t:=core.world_table_of(w,eaudio.Audio_Occlusion);t!=nil {core.add(t,e,eaudio.AUDIO_OCCLUSION_DEFAULT)}
+}
+
+// How a preset turns what it makes when no rotation is given: a sun shines
+// from the morning of SUN_DIRECTION and a spot down. Lights shine toward -Z.
+preset_rotation :: proc(preset:Preset) -> mm.Quat {
+    #partial switch preset {
+    case .Sun:        return mm.quat_between([3]f32{0,0,1},linalg.normalize(erender.SUN_DIRECTION))
+    case .Spot_Light: return mm.quat_between([3]f32{0,0,-1},[3]f32{0,-1,0})
+    }
+    return 1
+}
+
+// The primitive a preset shows; None for one without a body.
+preset_shape :: proc "contextless" (preset:Preset) -> erender.Shape {
+    #partial switch preset {
+    case .Cube:     return .Cube
+    case .Sphere:   return .Sphere
+    case .Cylinder: return .Cylinder
+    case .Cone:     return .Cone
+    case .Capsule:  return .Capsule
+    case .Plane:    return .Plane
+    case .Prism:    return .Prism
+    case .Pyramid:  return .Pyramid
+    }
+    return .None
+}
+
+// Destroys entities and everything under them.
+entities_delete :: proc(s:^Session,entities:[]core.Entity) {
+    if watching(s) || edit_held(s,..entities) || section_refused(s,..section_alone(s,entities)) {return}
+    w:=shown_world(s)
+    if len(entities)==0 {return}
+    opened,edit_ready:=edit_open(s,"Delete")
+    if !edit_ready {return}
+    defer edit_close(s,opened)
+    links:=prefab_links(s)
+    kept:=false
+    for e in entities {
+        // What a section holds goes with its reference, which is among them.
+        if section_locked(s,w,e) {continue}
+        if prefab_member_locked_in(s,links,w,e) {kept=true;continue}
+        if e==document_root(s,w) {continue}
+        core.world_destroy_tree(w,e)
+    }
+    if kept {notify(s,"A member of a prefab instance stays: turn it off, or unlink the instance")}
+    for e in entities {
+        if e==document_root(s,w) || prefab_member_locked_in(s,links,w,e) {continue}
+        for i:=len(s.selection.entities)-1;i>=0;i-=1 {
+            if entity_under(w,s.selection.entities[i],e) {ordered_remove(&s.selection.entities,i)}
+        }
+    }
+    s.selection.serial+=1
+}
+
+// Copies entities with everything under them, next to their originals:
+// what a scene saves of each, with references inside a copy pointing to the
+// copy. Returns the copies of the entities given, in their order.
+entities_duplicate :: proc(s:^Session,entities:[]core.Entity,label:="Duplicate",allocator:=context.temp_allocator) -> []core.Entity {
+    if watching(s) || section_refused(s,..entities) {return nil}
+    w:=shown_world(s)
+    es:=core.world_entities(w)
+    if len(entities)==0 {return nil}
+    if root:=document_root(s,w);root!=core.NONE {
+        for e in entities {
+            if e==root {
+                _,ok:=mm.transform_relative(entity_world(w,root),entity_world(w,root))
+                if !ok {return nil}
+            }
+        }
+    }
+    opened,edit_ready:=edit_open(s,label)
+    if !edit_ready {return nil}
+    defer edit_close(s,opened)
+    sources:=make([dynamic]core.Entity,context.temp_allocator)
+    roots:=make([dynamic]int,context.temp_allocator)
+    gather :: proc(w:core.World_Ref,e:core.Entity,out:^[dynamic]core.Entity) {
+        append(out,e)
+        for child in entity_children(w,e) {if entity_author(w,child)==child {gather(w,child,out)}}
+    }
+    for e in entities {
+        if !core.alive(es,e) {continue}
+        append(&roots,len(sources))
+        gather(w,e,&sources)
+    }
+    copies:=make([]core.Entity,len(sources),context.temp_allocator)
+    for &c in copies {c=core.create(es)}
+    find :: proc(sources:[]core.Entity,e:core.Entity) -> int {
+        for source,i in sources {
+            if source==e {return i}
+        }
+        return -1
+    }
+    is_root :: proc(roots:[]int,at:int) -> bool {
+        for r in roots {
+            if r==at {return true}
+        }
+        return false
+    }
+    for &t in w.info.tables {
+        if t.place!=.World || !type_saved(t.info) {continue}
+        table:=core.world_table_at(w,&t)
+        info:=t.info
+        offsets:=entity_offsets(t.info)
+        transient:=transient_ranges(t.info)
+        buffer:=make([]u8,max(info.size,1),context.temp_allocator)
+        for source,at in sources {
+            value:=core.raw_find(table,t.info,source)
+            if value==nil {continue}
+            if info.size>0 {mem.copy(raw_data(buffer),value,info.size)}
+            for r in transient {
+                if r[1]>0 {mem.zero(&buffer[r[0]],r[1])}
+            }
+            for offset in offsets {
+                field:=cast(^core.Entity)&buffer[offset]
+                if found:=find(sources[:],field^);found>=0 {field^=copies[found]}
+            }
+            switch t.type {
+            case core.Id:
+                (cast(^core.Id)raw_data(buffer)).value=core.id_new(core.world_entities(w),&s.id_state)
+            case core.Name:
+                if is_root(roots[:],at) {
+                    name:=cast(^core.Name)raw_data(buffer)
+                    name^=core.name_make(name_free(w,base.text_get(name.text[:])))
+                }
+            case core.Parent:
+                if is_root(roots[:],at) {
+                    parent:=cast(^core.Parent)raw_data(buffer)
+                    parent.order=order_next(w,parent.entity)
+                }
+            }
+            core.raw_add(table,t.info,copies[at],raw_data(buffer))
+        }
+    }
+    if len(sources)>0 {
+        core.world_settle(w)
+        if root:=document_root(s,w);root!=core.NONE {
+            for at in roots {
+                if entity_parent(w,copies[at])==core.NONE {entity_reparent(s,copies[at],root)}
+            }
+            core.world_settle(w)
+        }
+        prefab_copied(s,sources[:],copies)
+    }
+    result:=make([]core.Entity,len(roots),allocator)
+    for r,i in roots {result[i]=copies[r]}
+    return result
+}
+
+entity_rename :: proc(s:^Session,e:core.Entity,name:string) -> bool {
+    if watching(s) || edit_held(s,e) || section_refused(s,e) {return false}
+    w:=shown_world(s)
+    names:=core.world_table_of(w,core.Name)
+    text:=strings.trim_space(name)
+    if names==nil || text=="" || !entity_alive(w,e) {return false}
+    opened,edit_ready:=edit_open(s,"Rename")
+    if !edit_ready {return false}
+    defer edit_close(s,opened)
+    if row:=core.get(names,e);row!=nil {
+        row^=core.name_make(text)
+    } else {
+        core.add(names,e,core.name_make(text))
+    }
+    return true
+}
+
+// Moves an entity under another, NONE for the root, keeping where it is in
+// the world. False when the parent is the entity or under it, or a parent
+// without size on an axis cannot hold it there.
+entity_reparent :: proc(s:^Session,e,parent:core.Entity) -> bool {
+    if watching(s) || edit_held(s,e) {return false}
+    w:=shown_world(s)
+    parent:=parent
+    if root:=document_root(s,w);root!=core.NONE && !playing(s) {
+        if e==root {return parent==core.NONE}
+        if parent==core.NONE {parent=root}
+    }
+    parents:=core.world_table_of(w,core.Parent)
+    transforms:=core.world_table_of(w,core.Transform)
+    if parents==nil || !entity_alive(w,e) || parent!=core.NONE && (!entity_alive(w,parent) || entity_under(w,parent,e)) {return false}
+    if entity_parent(w,e)==parent {return true}
+    if section_refused(s,e) || section_target_refused(s,parent) || prefab_member_locked(s,e) {return false}
+    local:=mm.TRANSFORM_IDENTITY
+    if transforms!=nil {local=core.local_under(core.read(transforms),core.read(parents),parent,entity_world(w,e)) or_return}
+    opened,edit_ready:=edit_open(s,"Parent")
+    if !edit_ready {return false}
+    defer edit_close(s,opened)
+    if transforms!=nil {
+        if row:=core.get(transforms,e);row!=nil {row^=core.from_math(local)}
+    }
+    if parent==core.NONE {core.remove(parents,e)} else {core.add(parents,e,core.Parent{parent,order_next(w,parent)})}
+    return true
+}
+
+// Places an entity among the children of its parent: order says where.
+entity_order_set :: proc(s:^Session,e:core.Entity,order:i32) {
+    if watching(s) || edit_held(s,e) || section_refused(s,e) {return}
+    w:=shown_world(s)
+    parents:=core.world_table_of(w,core.Parent)
+    if parents==nil {return}
+    current,placed:=core.get(core.read(parents),e)
+    if !placed || current.order==order {return}
+    opened,edit_ready:=edit_open(s,"Order")
+    if !edit_ready {return}
+    defer edit_close(s,opened)
+    if row:=core.get(parents,e);row!=nil {row.order=order}
+}
+
+entity_hidden_set :: proc(s:^Session,e:core.Entity,hidden:bool) {
+    if watching(s) || edit_held(s,e) || section_refused(s,e) {return}
+    w:=shown_world(s)
+    table:=core.world_table_of(w,erender.Hidden)
+    if table==nil || entity_has(w,e,erender.Hidden)==hidden {return}
+    opened,edit_ready:=edit_open(s,hidden?"Hide":"Show")
+    if !edit_ready {return}
+    defer edit_close(s,opened)
+    if hidden {core.add(table,e,erender.Hidden{})} else {core.remove(table,e)}
+}
+
+// Writes the Transform of an entity. While a Play runs, a row another
+// component owns (a body) is left to it.
+transform_set :: proc(s:^Session,e:core.Entity,t:mm.Transform) -> bool {
+    if watching(s) || edit_held(s,e) || section_refused(s,e) {return false}
+    w:=shown_world(s)
+    transforms:=core.world_table_of(w,core.Transform)
+    if transforms==nil {return false}
+    opened,edit_ready:=edit_open(s,"Transform")
+    if !edit_ready {return false}
+    defer edit_close(s,opened)
+    row:=s.mode==.Edit?core.get(transforms,e):core.free(transforms,e)
+    if row==nil {return false}
+    row^=core.from_math(t)
+    return true
+}
+
+// The table of a component of the World shown, by its name as scenes and the API name it.
+component_table :: proc(s:^Session,name:string) -> ^core.Table_Info {
+    _,info:=core.world_table_named(shown_world(s),name)
+    return info
+}
+
+// Gives an entity a component, or replaces its value: value nil gives the
+// one it starts with (component_default).
+component_add :: proc(s:^Session,e:core.Entity,t:^core.Table_Info,value:rawptr=nil) {
+    if watching(s) || edit_held(s,e) || section_refused(s,e) {return}
+    w:=shown_world(s)
+    if t==nil || t.place!=.World || !entity_alive(w,e) {return}
+    opened,edit_ready:=edit_open(s,fmt.tprintf("Add %s",readable(t.name)))
+    if !edit_ready {return}
+    defer edit_close(s,opened)
+    source:=value
+    if source==nil {
+        buffer:=make([]u8,max(t.info.size,1),context.temp_allocator)
+        if t.default!=nil {t.default(raw_data(buffer))} else {component_default(t.type,buffer)}
+        source=raw_data(buffer)
+    }
+    core.raw_add(core.world_table_at(w,t),t.info,e,source)
+    component_companions(s,e,t)
+}
+
+component_remove :: proc(s:^Session,e:core.Entity,t:^core.Table_Info) {
+    if watching(s) || edit_held(s,e) || section_refused(s,e) {return}
+    w:=shown_world(s)
+    if t==nil || t.place!=.World {return}
+    opened,edit_ready:=edit_open(s,fmt.tprintf("Remove %s",readable(t.name)))
+    if !edit_ready {return}
+    defer edit_close(s,opened)
+    core.raw_remove(core.world_table_at(w,t),e)
+}
+
+// Turns a component of an entity off by itself, or on: it keeps its values.
+component_turn :: proc(s:^Session,e:core.Entity,t:^core.Table_Info,off:bool) {
+    if watching(s) || edit_held(s,e) || section_refused(s,e) {return}
+    w:=shown_world(s)
+    if t==nil || t.place!=.World {return}
+    table:=core.world_table_at(w,t)
+    _,turned_off,found:=core.raw_state(table,e)
+    if !found || table.base || turned_off==off {return}
+    opened,edit_ready:=edit_open(s,fmt.tprintf("Turn %s %s",readable(t.name),off?"off":"on"))
+    if !edit_ready {return}
+    defer edit_close(s,opened)
+    if off {core.raw_disable(table,e)} else {core.raw_enable(table,e)}
+}
+
+// Turns an entity and everything under it off, or on (core.Disabled).
+entity_enabled_set :: proc(s:^Session,e:core.Entity,enabled:bool) {
+    if watching(s) || edit_held(s,e) || section_refused(s,e) {return}
+    w:=shown_world(s)
+    table:=core.world_table_of(w,core.Disabled)
+    if table==nil || entity_has(w,e,core.Disabled)!=enabled {return}
+    opened,edit_ready:=edit_open(s,enabled?"Enable":"Disable")
+    if !edit_ready {return}
+    defer edit_close(s,opened)
+    if enabled {core.remove(table,e)} else {core.add(table,e,core.Disabled{})}
+}
+
+// Writes bytes at an offset of the component of every entity given that has
+// it. The step is the gesture that is open, or one of its own.
+field_write :: proc(s:^Session,t:^core.Table_Info,entities:[]core.Entity,offset:int,bytes:[]u8) -> bool {
+    if watching(s) || edit_held(s,..entities) || section_refused(s,..entities) {return false}
+    w:=shown_world(s)
+    if t==nil || offset<0 || offset+len(bytes)>t.info.size {return false}
+    table:=core.world_table_at(w,t)
+    opened,edit_ready:=edit_open(s,readable(t.name))
+    if !edit_ready {return false}
+    defer edit_close(s,opened)
+    written:=false
+    for e in entities {
+        if t.type==core.Transform && s.mode!=.Edit && core.owner(cast(^core.Table(core.Transform))table,e)!=0 {continue}
+        value:=core.raw_get(table,t.info,e)
+        if value==nil {continue}
+        mem.copy(rawptr(uintptr(value)+uintptr(offset)),raw_data(bytes),len(bytes))
+        written=true
+    }
+    return written
+}
+
+// The value a component starts with when the editor adds it.
+component_default :: proc(type:typeid,out:[]u8) {
+    put :: proc(out:[]u8,value:$T) {
+        value:=value
+        if len(out)>=size_of(T) {mem.copy(raw_data(out),&value,size_of(T))}
+    }
+    mem.zero_slice(out)
+    switch type {
+    case core.Transform:          put(out,core.TRANSFORM_IDENTITY)
+    case erender.Mesh_Renderer:     put(out,erender.Mesh_Renderer{shape=.Cube})
+    case erender.Tint:            put(out,erender.TINT_DEFAULT)
+    case erender.Camera:          put(out,erender.CAMERA_DEFAULT)
+    case erender.Exposure:        put(out,erender.EXPOSURE_DEFAULT)
+    case erender.Draw_Offset:     put(out,erender.Draw_Offset{rotation=1})
+    }
+}
+
+// Offsets of the Entity fields of a type, nested ones included.
+entity_offsets :: proc(type:^runtime.Type_Info,allocator:=context.temp_allocator) -> []uintptr {
+    out:=make([dynamic]uintptr,allocator)
+    walk :: proc(info:^runtime.Type_Info,at:uintptr,out:^[dynamic]uintptr) {
+        if info.id==core.Entity {append(out,at);return}
+        #partial switch v in runtime.type_info_base(info).variant {
+        case runtime.Type_Info_Struct:
+            for i in 0..<int(v.field_count) {walk(v.types[i],at+v.offsets[i],out)}
+        case runtime.Type_Info_Array:
+            for i in 0..<v.count {walk(v.elem,at+uintptr(i*v.elem_size),out)}
+        }
+    }
+    walk(type,0,&out)
+    return out[:]
+}
+
+// Byte ranges of the transient fields of a type: what a copy leaves zero.
+transient_ranges :: proc(type:^runtime.Type_Info,allocator:=context.temp_allocator,error:^runtime.Allocator_Error=nil) -> [][2]int {
+    walk :: proc(info:^runtime.Type_Info,at:uintptr,out:[][2]int,index:^int) {
+        value,is_struct:=runtime.type_info_base(info).variant.(runtime.Type_Info_Struct)
+        if !is_struct {return}
+        for field in 0..<int(value.field_count) {
+            offset:=at+value.offsets[field]
+            if _,transient:=core.field_option(reflect.Struct_Tag(value.tags[field]),"transient");transient {
+                if out!=nil {out[index^]={int(offset),value.types[field].size}}
+                index^+=1
+            } else {walk(value.types[field],offset,out,index)}
+        }
+    }
+    count:=0
+    walk(type,0,nil,&count)
+    ranges,failed:=make([][2]int,count,allocator)
+    if error!=nil {error^=failed}
+    if failed!=nil {return nil}
+    index:=0
+    walk(type,0,ranges,&index)
+    return ranges
+}
+
+// "linear_damping" and "Mesh_Renderer" as people read them: "Linear damping", "Static mesh".
+readable :: proc(name:string,allocator:=context.temp_allocator) -> string {
+    text,error:=make([]u8,len(name),allocator)
+    if error!=nil {return name}
+    for i in 0..<len(name) {
+        c:=name[i]
+        switch {
+        case c=='_':                 c=' '
+        case i==0 && c>='a' && c<='z': c-=32
+        case i>0 && c>='A' && c<='Z':  c+=32
+        }
+        text[i]=c
+    }
+    return string(text)
+}

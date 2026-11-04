@@ -1,0 +1,181 @@
+---
+name: mirai-physics
+description: Modify, use and verify Mirai physics - the `physics` plugin (the
+  `plugins/physics/runtime/sim` solver with bodies, joints, queries, character and snapshots, the
+  `plugins/physics/runtime` integration with character locomotion, and its editor part), the
+  `destruct` plugin with its fracture model (`plugins/destruct/runtime/fracture`) and
+  `std/spatial`. Use to change the solver or the model, write gameplay with bodies and characters
+  (walk, jump, fly, swim, `Character`, `Walk`, `Swim`), water and buoyancy (`Fluid_Volume`,
+  buoyancy, drag, surface query) or change how the simulation is reflected in entities.
+---
+
+# Mirai physics
+
+Physics is a first-party plugin that a project activates. Its solver
+(`plugins/physics/runtime/sim`, package `mirai_physics`, imports only `std/*`) is the model and
+does not know what an entity is. The integration (`plugins/physics/runtime`) and the `destruct`
+plugin use it on the world tables; the `destruct` fracture model, only through its public API. The
+game and plugins use the public API of the integration, never the model. It shares `core` tables
+with networking ([networking](../mirai-networking/SKILL.md)).
+
+## Map
+
+- Bodies, shapes, step, joints, queries, snapshot, debug draw → [physics.md](references/physics.md)
+- `std/spatial` → [physics.md#stdspatial](references/physics.md#stdspatial)
+- Water: fluid volumes, buoyancy, drag and the surface query →
+  [physics.md#fluids](references/physics.md#fluids); the character in a fluid →
+  [character.md#in-a-fluid](references/character.md#in-a-fluid); `Fluid_Volume`, `fluid_at`,
+  `fluids_in` → [engine.md](references/engine.md#components)
+- Physical character (capsule, support, `Character_Move`) → [character.md](references/character.md);
+  its own vertical (walking around a planet, `core.Vertical`) →
+  [character.md#the-vertical](references/character.md#the-vertical)
+- Walk, jump, fly, swim, layered movements, seat control, game modes →
+  [engine.md#locomotion](references/engine.md#locomotion); at normal speed in slow motion
+  (`core.Own_Pace`) → [engine.md#own-pace](references/engine.md#own-pace)
+- Fracture (pieces, damage, cut, state, copy) on the public API of the solver →
+  [destruction.md](references/destruction.md)
+- `Rigid_Body`, `Collider`, `Character`, `Joint`, requests, queries, pose targets, proxies →
+  [engine.md](references/engine.md)
+- Categories and presets declared in code, sensors, `Collision_Settings` and pushes →
+  [collision](references/engine.md#collision-categories-and-presets)
+- Solver push rules (pairs that yield) →
+  [physics.md#contact-rules](references/physics.md#contact-rules)
+- A body in two places and shapes cut by boxes (`Body_Twin`, `Collider_Cuts`, the portals) →
+  [physics.md#twins-and-cuts](references/physics.md#twins-and-cuts)
+- `Destructible` in the data world, requests, reflection, networking →
+  [engine-destruct.md](references/engine-destruct.md)
+- Breaking or digging terrain (craters, debris, pieces with physics per material): not `destruct`
+  → [what can be dug](../mirai-plugins/references/terrain.md#what-digging-leaves)
+- `core.place` on a body → [engine.md#requests](references/engine.md#requests);
+  `core.World_Queries` (cameras, feet) → [engine.md#queries](references/engine.md#queries)
+- Editor part (collider preset, collision settings, `physics.collision.*` API, Simulate, Collision
+  view modes) → [engine.md#editor-part](references/engine.md#editor-part)
+
+## Workflow
+
+1. Locate the step stage (`world_step` in `plugins/physics/runtime/sim/solver.odin` runs them in
+   order) and its file:
+   - `contact.odin`: pairs and narrow phase. `collide.odin`, `gjk.odin`, `mesh.odin`: contact
+     geometry.
+   - `solver.odin`: colors, stage order. `island.odin`: persistent islands, splitting and sleep.
+   - `contact_solver.odin` and `joint_lanes.odin`: contacts and joints in lanes.
+   - `joint.odin`, `ccd.odin`, `radial.odin` (volume forces and falloff), `query.odin`,
+     `snapshot.odin`.
+   - `fluid.odin` (volumes and surface query) and `fluid_load.odin` (buoyancy, damping and drag
+     per substep).
+   - `character.odin`: support, ground probe at the end of the step, constraint and push.
+   - `debug_draw.odin`: lines and points for a debug view.
+2. Decide whether the new data is **state** or **scratch**.
+   - State: lives in `Body`, `Shape`, `Contact`, `Joint`, `Joint_Axes`, `Island`, `Manifold_Block`,
+     `Character`, `World_State` or the trees, and enters the snapshot through `snapshot_blocks`.
+   - Scratch: lives in `Step`, `World.manifolds` or the events and is rebuilt every step.
+3. Write the test next to the code (`*_test.odin`, name as a sentence) and run only the affected
+   ones.
+4. If the behavior changed, update the reference of the topic.
+
+## Invariants
+
+- **Own implementation in Odin.** `physics` is implemented from scratch in Odin. Jolt guides the
+  architecture and the collision algorithms; Box2D v3 and Box3D, the substepped soft-constraint
+  solver and the data design; Chaos, cluster destruction and the physical character.
+- **Determinism.** The same state and the same calls give the same result in the same binary, with
+  any number of workers: nothing depends on addresses or thread arrival order, new pairs are sorted
+  before creating contacts, parallel stages write only to their own element and shared consequences
+  (events, waking, destroying contacts) are applied afterwards, in index order.
+- **Everything that influences a future step is in the snapshot.** A cache that changes the path of
+  the narrow phase is state. On restore, slots used after the snapshot go back to zero so that
+  generations repeat.
+- State structs without padding or pointers, with `#assert(size_of(...))`: they are copied and
+  hashed in blocks.
+- **No allocation in the step.** Memory is reserved in `world_init` according to `World_Desc`; an
+  exhausted capacity returns a null handle and adds to `Stats`. Shared geometries (`hull_create`,
+  `mesh_create`, `heightfield_create`) are transactions that allocate.
+- The box and triangle topology tables are `@(rodata)`.
+- Shape A of a contact is the one with the greater type (`Shape_Type`); the narrow phase has one
+  routine per unordered pair. Manifolds are expressed in the frame of shape A and the normal goes
+  from A to B.
+- The solver has no game rules: the character is supported, climbs steps and pushes according to
+  the `Character_Move` it receives, and whoever writes it decides walking, jumping or flying. Its
+  ground is the one from the end of the previous step, probed again only if it became stale; its
+  moves run in parallel and their consequences on other bodies are applied afterwards, in slot
+  order. The character constraint does not keep impulses between steps.
+- A fracture event carries no geometry, and applying it to a world in the same state gives the same
+  state. One limited to the body of a piece does not depend on where the other bodies are: it is the
+  one that travels over the network.
+- The frame of each body of a destructible is the frame of the destructible: the shapes of its
+  pieces have an identity local transform.
+- Fracture changes bodies and shapes after `world_step` or between ticks, never in the middle of the
+  solver: it reads the hits of the step (`world_events(w).hit`) in `fracture_update`.
+
+### Library invariants
+
+- Rows are the authority on what exists; the simulation, on the pose of what has a body. Whoever
+  moves a body sends a request to `Body_Requests`; whoever teleports it uses `core.place`; whoever
+  imposes the pose of another owner writes `core.Pose_Target`; whoever owns a body of another
+  library uses proxies. Nobody writes the `Transform` of a body.
+- A character moves only through its `Character_Move`: locomotion writes it and, in a game mode,
+  the step of that mode writes it first, to which locomotion only adds the layered movements.
+- A tool that moves bodies uses `manipulation_target`/`manipulation_end`; a preview that only needs
+  physics uses `step_world`
+  ([requests](references/engine.md#requests),
+  [step outside the loop](references/engine.md#physics-step-outside-the-loop)). Do not duplicate
+  the step or write poses outside the owner.
+- Changes of configuration, motors, axes and target pose of joints go through `Joint_Requests`;
+  `physics_step` writes `Joint` and `Joint_State`. The world rotation is converted to the frames
+  after reconciling them.
+- Proxies accept the same forces, manipulation and constraints; whoever owns the body removes it
+  before destroying it.
+- Everything that influences a future step is in a table (`core.Motion`, `Character_State`,
+  `Character_Move`, `Character`, `Joint_State`, `Destructible_State`) or in the snapshot of
+  `Physics_State`: this allows copying the world for rollback and saves. The reflection of
+  destruction always comes from the simulation state, never from the event that changed it.
+- `physics_step` and `destruct_step` are simulation: they run in `fixed` and repeat in a network
+  correction.
+- What the simulation rejects (a body, a shape, a joint, a destructible, a request) is a
+  [problem](../mirai-core/references/core.md#problems) of the entity with the cause and the field
+  of `Physics_Settings` that fixes it; `Physics_State.stats` and `Destruct_Cache.stats` count only
+  what was created and removed.
+- Collision belongs to the `Collider`: `Character` and `Destructible` do not repeat shape, surface
+  or filter. Categories and presets are named ids declared in code; `Collision_Settings` says per
+  preset only what differs from the defaults, and the solver only sees a bit `Filter`. A collision
+  change re-filters the shape, never rebuilds it.
+
+## Verification
+
+- Packages: `plugins/physics/runtime/sim` (the solver), `std/spatial`, `plugins/physics/runtime`,
+  `plugins/physics/editor`, `plugins/destruct/runtime` and `plugins/destruct_multiplayer/runtime`.
+  Run only the `*_test.odin` of the touched topic.
+  - Solver: `ccd*`, `contact_rules`, `joint`, `six_dof`, `radial`, `character`,
+    `mesh`, `query`, `static` (triangles and change log of static collision),
+    `debug_draw`, `world` (stacks and pyramid), `snapshot`, `snapshot_fuzz`, `fluid`,
+    `collide`, `gjk`, `cylinder` and `convex_radius` (shapes and rounding); `solver` (overflowed
+    pairs, inertia, islands, uncolored constraints); `far` (the same scene 20 km from the origin).
+  - Integration: `collision`, `forces`, `geometry`, `joints`, `manipulation`, `reload`,
+    `static`, `teleport`, `fluids`, `sync` (sealed rows against the full reconciliation);
+    locomotion: `locomotion` (walk, jump, coyote, layers, flight, swimming, modes), `planet` (own
+    vertical: walking, jumping and rollback on a planet, crossing fields) and `locomotion_seat`
+    (seat control, relative forward). Editor: `collision`, `api_collision`, `colliders`,
+    `view_mode`. `destruct`: `integration`; its model `plugins/destruct/runtime/fracture`:
+    `fracture`, `features`, `state`. `geometry_test` does not need a GPU. Grounding with real
+    bodies: `demo/game/grounding_physics_test.odin`.
+- Twins and cuts: the tests of `plugins/portals/runtime` (half crossed, walls of any collider, the
+  twin that leaves, snapshot).
+- A change in step, contacts, solver, CCD, joints or characters keeps determinism:
+  `snapshot_test`, `snapshot_fuzz_test`, `worker_threads_give_the_same_result_as_one_thread`
+  (`bench_test`) and the worker tests of `solver_test`.
+- `.fracture`: [assets](../mirai-assets/SKILL.md). Debug draw and selection:
+  [editor](../mirai-editor/SKILL.md#verification). Gameplay and networking:
+  [engine.md#verification](references/engine.md#verification).
+- Measurements (the table goes in the final report of the task):
+
+  ```sh
+  mirai test plugins/physics/runtime/sim bench_steps bench_snapshot bench_characters \
+    bench_ccd bench_shapes bench_fluids --release -define:PHYSICS_BENCH=true
+  mirai test plugins/destruct/runtime/fracture bench_wall bench_destruct --release \
+    -define:FRACTURE_BENCH=true
+  mirai test plugins/physics/runtime/sim bench_colors bench_friction bench_sleep --release \
+    -define:PHYSICS_BENCH=true
+  mirai test std/spatial --release -define:SPATIAL_BENCH=true
+  ```
+
+  The `physics` scenario of `scripts/bench_compare.py` compares CCD with an isolated base.

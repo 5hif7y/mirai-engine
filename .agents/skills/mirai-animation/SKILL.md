@@ -1,0 +1,144 @@
+---
+name: mirai-animation
+description: Mirai animation - the `animation` plugin (`plugins/animation/runtime` and `editor`),
+  the `animation_physics` bridge and `std/anim`, with `.anim` clips, skeletons, skinning,
+  locomotion by motion matching (`.match`, `match_goal`, `match_play`) with inertialization,
+  layered actions, composition graphs (`.agraph`), aim offsets and additives (`.blend`), root
+  motion, retarget, mirroring, rigs and IK, morph targets, motion profiles and warping, grounding,
+  budget, `Keyframe_Path` sequences, authoring by intent and by API, and the auto-rig of an
+  uploaded or generated character without a skeleton. Use when animating characters or objects,
+  building the locomotion or the actions of a character, looking for a state machine or a
+  locomotion blend space (they do not exist; see the workflow), touching those packages or their
+  assets, or diagnosing a pose, a skinning or a clip.
+---
+
+# Mirai animation
+
+`animation` is an optional plugin (runtime and editor) over the math of `std/anim`. The runtime
+evaluates poses in the game loop; the editor edits the assets through the API with names and
+history, and its preview evaluates the same runtime over a copy of the world. With physics, the
+automatic plugin `animation_physics` feeds the locomotion of each `Character`.
+
+## Map
+
+- Animating an uploaded or generated character or animal that arrives without a rig (template rig at
+  import and Mesh2Motion clips): [auto-rig](references/animation-autorig.md).
+- Building a character (locomotion, jumps, actions) or replacing what used to be a state machine:
+  [workflow](#character-workflow) and
+  [what replaces the FSM](references/animation.md#what-replaces-the-state-machine).
+- Motion matching (`.match`, modes, entry clips, `match_goal`, `match_play` and its events):
+  [locomotion](references/animation.md#locomotion-by-motion-matching); its search and features:
+  [anim-motion](../mirai-std/references/anim-motion.md#motion-matching-matchingodin).
+- Composition graphs, layers, masks, additives and aim offsets (`.agraph`, `.blend`):
+  [composition](references/animation.md#composition-graphs-and-additive-spaces).
+- Components, shared data, playback, outputs and order, retarget and mirroring:
+  [animation.md](references/animation.md); why an entity does not animate (asset, clip, bone,
+  profile, request or memory): [problems](references/animation.md#problems).
+- Authoring by intent (body, character, requests, clip verbs, analysis, capture) and by API (clips,
+  skeletons, sockets, profiles, `.match`, graphs, control and per-instance preview):
+  [animation-authoring.md](references/animation-authoring.md).
+- `animation.*`, `skeleton.*` and `pose.profile.*` methods and their common errors:
+  [animation-api.md](references/animation-api.md).
+- Actions (layers, sections, windows, priority, cancellation):
+  [animation-actions.md](references/animation-actions.md); motion profiles and warping:
+  [animation-motion.md](references/animation-motion.md).
+- Rigs, spatial targets and chain modifiers: [animation-rigs.md](references/animation-rigs.md).
+- Morph targets, `Morph_Weights` and their deformation:
+  [animation-morphs.md](references/animation-morphs.md).
+- Supports, clip adaptation and gait without clips (the ground is the `core.World_Query` of
+  physics): [animation-grounding.md](references/animation-grounding.md).
+- `Animation_Budget` and parallel execution: [animation-budget.md](references/animation-budget.md);
+  `Keyframe_Path` sequences: [animation-sequence.md](references/animation-sequence.md).
+- Math and storage of `std/anim`: [anim](../mirai-std/references/anim.md),
+  [body](../mirai-std/references/anim-body.md), [motion](../mirai-std/references/anim-motion.md),
+  [rigs](../mirai-std/references/anim-rigs.md) and
+  [storage](../mirai-std/references/anim-storage.md).
+- The physics that writes the mode and the velocity (`Character`, `Walk`, `Swim`, `Fly`):
+  [mirai-physics](../mirai-physics/SKILL.md).
+- Use from a game and tour of features:
+  [animation gallery](../mirai-gameplay/references/animation-gallery.md); demo scenes and
+  generated content: [demo](../mirai-gameplay/references/demo.md).
+- An entity that animates at its own pace in slow motion (`core.Own_Pace`):
+  [own pace](../mirai-core/references/core.md#core-storages).
+- Animation documents of the editor: [previews](../mirai-plugins/references/previews.md).
+- Importing skeletons and clips: [imports](../mirai-imports/references/imports.md).
+
+## Workflow
+
+1. Locate the layer: pure math in `std/anim`; components, storages and loop steps in
+   `plugins/animation/runtime`; what physics reads in `plugins/animation_physics`; authoring, API
+   and preview in `plugins/animation/editor`.
+2. To animate a character, declare the intent (`animation.character.setup`, `animation.request`,
+   `animation.clip.edit`) and look at the result with `animation.analyze` and `animation.capture`
+   before touching keys.
+3. Change the data in its owner and expose it by name: plain components and storages, requests by
+   queue to the writer, no pointers stored between frames.
+4. If an asset or a schema changes, version it and update all its consumers, including the demo
+   content that `tools/demo_content` writes.
+5. Verify as [Verification](#verification) says.
+
+## Character workflow
+
+1. **Locomotion:** a `.match` in `Animation.asset` with its clips and the physics mode that each one
+   serves (`animation.character.setup` generates it from the clip names). With a `Character`,
+   `animation_physics` tells it on each tick the mode, the velocity and the request: the game writes
+   nothing. Without physics, the game calls `match_goal`.
+2. **Few clips:** idle and walk are enough; a run or jog widens the range. The rate of a clip
+   (`min_rate`..`max_rate`) covers the velocities between those of its clips and the warping of
+   `Animation.motion` stretches the stride to that of the body. A mode without clips of its own
+   keeps the clip that is playing; a jump or landing is an `entry` clip of its mode, not a state. A
+   livelier turn or start asks for turn or start clips, not transitions.
+3. **Gameplay actions:** what is added to the locomotion (waving, reloading, hitting with the torso)
+   is an action in a layer (`action_fire`, with sections, windows, priority and cancellation); what
+   takes the whole body (vault, hit received, death, emote) is `match_play` with its mode, its exit
+   at a phase or a marker, its entry and its priority, and the matching resumes by itself. The game
+   reacts to the events of the actions and of `Animation_Events.plays`, not to a state.
+4. **On top of the pose:** aim offsets and additives in an `.agraph` (a `.blend` under an
+   `Additive`), IK, look-at and grounding in the `.pose` profile.
+5. **No FSM is needed:** the mode is decided by physics, the clip is chosen by the search, actions
+   and `match_play` bring their own priority, exit and events, and the game logic lives in its data
+   and functions. If a task seems to ask for animation states, the table
+   [what replaces the FSM](references/animation.md#what-replaces-the-state-machine) says what
+   to use; a state machine is not added to the engine or to the game.
+
+## Invariants
+
+- **Locomotion is motion matching, without a state machine.** The `.match` is chosen by the mode
+  that physics writes; what a character does on top are layered actions and `match_play` clips. The
+  `.agraph` only composes poses and the `.blend` stays for aim offsets and additives: there is no
+  state machine or locomotion blend space.
+- The runtime does not allocate in a stable frame; the buffers of the program are reserved at load
+  and released when it is retired. The database of a `.match` is built at load, per library and
+  skeleton, within its memory cap.
+- Physics is the only writer of the mode and the velocity of a character; animation reads them
+  through `match_goal` on each tick and keeps no copy.
+- The transitions of a program are inertial (matching jumps and `match_play`); the crossfade is left
+  for the live layers (component layers and actions).
+- The API and its preview evaluate the same runtime as the game. The `previews` panel samples clips
+  on its own.
+- The API expresses intent with names and defaults: it resolves handles and indices inside the
+  plugin, separates targets from influence and activation, and publishes solver details only through
+  optional inspection.
+- Asset edits go through the editor's file history: one step per call, attributed to the AI turn,
+  which `history.undo` and `history.redo` undo and redo. They stay in memory unsaved like the other
+  assets: the disk does not change until saved and a created asset exists only in the registry.
+- Runtime, editor and previews read the assets through the registry (`host.assets_file` by id,
+  `asset.registry_read` by path), never the file by its path on disk, and notice a change by the
+  registry revision; this way the preview and Play see what is unsaved.
+- Skinning runs on the GPU; morphs are deformed in the same pass.
+- What the runtime cannot do is a problem of the entity (`core.report` with an `animation.*` code
+  and how to fix it), never a counter ([problems](references/animation.md#problems)). The functions
+  and helpers receive `^core.Problems`; `Constraint_Inputs` and `Grounding_Inputs` carry it.
+
+## Verification
+
+- Types: `mirai check plugins/animation/runtime`, `plugins/animation/editor` (with
+  `-collection:plugins=plugins`), `plugins/animation_physics/runtime` and `std/anim` according to
+  what was touched.
+- Tests: the cases of the Verification section of each reference in the Map, with `mirai test`;
+  `--release` when changing state or memory. Matching: `matching_test.odin` of the runtime (the
+  demo's Mirai: skating, pose jumps, response and cost) and `std/anim/matching_test.odin`.
+- API methods: generate and compile the demo editor and check them with `mirai rpc describe` and a
+  real call.
+- What is visual (skinning, morphs, rigs, locomotion) is checked with a capture with graphics
+  validation, with real physics for locomotion; CPU tests do not vouch for the GPU integration.

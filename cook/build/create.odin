@@ -1,0 +1,68 @@
+package build
+
+import "core:os"
+import "core:strings"
+import "mirai:project"
+import "mirai:std/base"
+
+Create_Error :: enum u8 {
+    None,
+    Template_Missing, // the template has no project.mirai
+    Folder_Not_Empty, // the destination is a file, or a folder with something in it
+    Copy_Failed,
+    Manifest_Failed,  // the manifest of the template does not read, or the name does not fit it
+}
+
+TEMPLATE_DEFAULT :: "empty"
+
+// <engine>/templates/<name>: a project that `mirai new` copies.
+template_folder :: proc(engine_root:string,name:=TEMPLATE_DEFAULT,allocator:=context.allocator) -> string {
+    return project.path(engine_root,"templates",name,allocator=allocator)
+}
+
+Template :: struct {name,summary:string}
+
+// The templates of the engine, by name: the folders of <engine>/templates
+// with a project.mirai. The summary is the first line of their README.md
+// without the marks of a heading, or empty.
+templates_list :: proc(engine_root:string,allocator:=context.allocator) -> []Template {
+    found:=make([dynamic]Template,allocator)
+    entries,error:=os.read_all_directory_by_path(project.path(engine_root,"templates",allocator=context.temp_allocator),context.temp_allocator)
+    if error!=nil {return found[:]}
+    for entry in entries {
+        if entry.type!=.Directory || !os.is_file(project.path(entry.fullpath,project.PROJECT_FILE,allocator=context.temp_allocator)) {continue}
+        summary:=""
+        if text,read_error:=os.read_entire_file(project.path(entry.fullpath,"README.md",allocator=context.temp_allocator),context.temp_allocator);read_error==nil {
+            line:=string(text)
+            if cut:=strings.index_any(line,"\r\n");cut>=0 {line=line[:cut]}
+            summary=strings.trim_space(strings.trim_left(line,"#"))
+        }
+        append(&found,Template{strings.clone(entry.name,allocator),strings.clone(summary,allocator)})
+    }
+    return found[:]
+}
+
+// A new project: the tree of the template with every folder of the layout,
+// and name in its manifest. An empty name is the name of the folder.
+project_create :: proc(template,folder,name:string) -> Create_Error {
+    if !os.is_file(project.path(template,project.PROJECT_FILE,allocator=context.temp_allocator)) {return .Template_Missing}
+    root:=project.path_absolute(folder,context.temp_allocator)
+    if os.exists(root) {
+        if !os.is_dir(root) {return .Folder_Not_Empty}
+        entries,error:=os.read_all_directory_by_path(root,context.temp_allocator)
+        if error!=nil || len(entries)>0 {return .Folder_Not_Empty}
+    }
+    if os.copy_directory_all(root,template)!=nil {return .Copy_Failed}
+    // What a build of the template itself left is not part of it.
+    _=os.remove_all(project.folder_path(root,.Generated,context.temp_allocator))
+    for layout in ([]project.Folder{.Assets,.Source,.Game,.Editor,.Plugins,.Shaders}) {
+        directory:=project.folder_path(root,layout,context.temp_allocator)
+        if os.make_directory_all(directory)!=nil && !os.is_dir(directory) {return .Copy_Failed}
+    }
+    file:=project.path(root,project.PROJECT_FILE,allocator=context.temp_allocator)
+    m,error:=project.manifest_read(file)
+    if error.code!=.None {return .Manifest_Failed}
+    title:=name!=""?name:root[strings.last_index_byte(root,'/')+1:]
+    if !base.text_set(m.name[:],title) || project.manifest_write(file,&m).code!=.None {return .Manifest_Failed}
+    return .None
+}

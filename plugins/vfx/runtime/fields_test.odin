@@ -1,0 +1,70 @@
+package vfx
+
+import "core:math/linalg"
+import "core:testing"
+import "mirai:core"
+import volume "mirai:engine/volume"
+import mm "mirai:std/math"
+
+// What particle_fields of particles.slang finds of the gravity at p, a place
+// relative to the origin of the frame.
+@(private="file")
+fields_gravity :: proc(f:Gpu_Fields,p:[3]f32) -> [3]f32 {
+    weight :: proc(v:volume.Gpu_Volume,p:[3]f32) -> f32 {
+        if v.kind.x==0 {return 1}
+        local:[3]f32
+        for row,i in v.to_local {local[i]=row.x*p.x+row.y*p.y+row.z*p.z+row.w}
+        depth:=v.kind.x==1?min(v.shape.x-abs(local.x),v.shape.y-abs(local.y),v.shape.z-abs(local.z)):v.shape.x-linalg.length(local)
+        if depth<0 {return 0}
+        return v.shape.w>0?min(depth/v.shape.w,1):1
+    }
+    value:=f.fallback.xyz
+    g:=f.gravity
+    for i in 0..<g.count.x {
+        w:=weight(g.volumes[i],p)
+        if w<=0 {continue}
+        by:=g.pulls[i].xyz
+        if g.centers[i].x!=0 {
+            to:=g.pulls[i].xyz-p
+            distance:=linalg.length(to)
+            strength:=g.centers[i].y
+            if surface:=g.centers[i].z;surface>0 {strength*=distance>surface?surface*surface/(distance*distance):distance/surface}
+            by=distance>1e-4?to/distance*strength:{}
+        }
+        if g.volumes[i].kind.y!=0 {value+=by*w} else {value+=(by-value)*w}
+    }
+    return value
+}
+
+// The particles fall with the gravity the bodies fall with, from the same
+// fields, far from the centre of the world too: the level, a planet in its
+// sphere and a room that adds a push.
+@(test)
+particles_take_the_gravity_of_their_place_as_the_bodies :: proc(t:^testing.T) {
+    es:core.Entities;core.entities_init(&es);defer core.entities_destroy(&es)
+    gravities:core.Table(volume.Gravity);core.table_init(&gravities,"Gravity");defer core.table_destroy(&gravities)
+    volumes:core.Table(volume.Volume);core.table_init(&volumes,"Volume");defer core.table_destroy(&volumes)
+    worlds:core.Table(core.World_Transform);core.table_init(&worlds,"World_Transform");defer core.table_destroy(&worlds)
+    place :: proc(es:^core.Entities,gravities:^core.Table(volume.Gravity),volumes:^core.Table(volume.Volume),worlds:^core.Table(core.World_Transform),g:volume.Gravity,v:Maybe(volume.Volume),position:[3]f32,rotation:=mm.QUAT_IDENTITY) {
+        e:=core.create(es)
+        core.add(gravities,e,g)
+        if v,ok:=v.?;ok {core.add(volumes,e,v)}
+        core.add(worlds,e,core.World_Transform{transform={position=position,rotation=rotation,scale=1}})
+        core.table_settle(gravities,es);core.table_settle(volumes,es);core.table_settle(worlds,es)
+    }
+    place(&es,&gravities,&volumes,&worlds,volume.GRAVITY_DEFAULT,nil,{})
+    place(&es,&gravities,&volumes,&worlds,{pull=.Center,acceleration=5,radius=2},volume.Volume{shape=.Sphere,extents={10,0,0},blend=2,priority=1},{10040,0,0})
+    place(&es,&gravities,&volumes,&worlds,{acceleration=3},volume.Volume{shape=.Box,extents={4,4,4},priority=2,mode=.Add},{10020,0,0},mm.quat_axis_angle({0,0,1},mm.PI/2))
+    origin:=[3]f32{10032,0,0}
+    fields:=fields_relative(fields_of(core.read(&gravities),{},core.read(&volumes),core.read(&worlds)),origin)
+    Of :: struct {gravities:core.Read(volume.Gravity),worlds:core.Read(core.World_Transform),point:[3]f32}
+    of :: proc(o:Of,row:i32) -> [3]f32 {
+        world,_:=core.get(o.worlds,core.entity_at(o.gravities,int(row)))
+        return volume.gravity_of(core.at(o.gravities,int(row)),world.transform,o.point)
+    }
+    for p in ([?][3]f32{{0,0,0},{10040,4,0},{10048,0,0},{10031,0,0},{10020,1,0},{10060,0,0}}) {
+        want:=volume.combine(volume.gather(core.read(&volumes),core.read(&worlds),core.read(&gravities),p),volume.GRAVITY_WORLD,Of{core.read(&gravities),core.read(&worlds),p},of,volume.mix_linear)
+        got:=fields_gravity(fields,p-origin)
+        testing.expectf(t,linalg.length(got-want)<1e-3,"at %v: %v on the GPU, %v for a body",p,got,want)
+    }
+}

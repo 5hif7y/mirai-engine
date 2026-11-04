@@ -1,0 +1,324 @@
+package physics
+
+import "mirai:asset"
+import "mirai:core"
+import "mirai:host"
+import render "mirai:engine/render"
+import sim "plugins:physics/runtime/sim"
+import "mirai:std/base"
+import "mirai:std/geom"
+import mm "mirai:std/math"
+
+collision_edge_active :: proc "contextless" (normal,a,b,opposite:[3]f32) -> bool {
+    return sim.mesh_edge_active(normal,a,b,opposite)
+}
+
+@(private)
+mesh_geometry_equal :: proc(a,b:sim.Mesh) -> bool {
+    return sliced_equal(a.vertices,b.vertices) && sliced_equal(a.triangles,b.triangles) && sliced_equal(a.flags,b.flags)
+}
+
+@(private)
+collider_geometry_unchanged :: proc(s:^Sync,l:^Link,e:core.Entity,relative:=mm.TRANSFORM_IDENTITY) -> bool {
+    static,_:=core.get(s.statics,e)
+    w:=&s.state.world
+    switch l.collider.kind {
+    case .Mesh:
+        actual:=sim.mesh_geometry(w,l.mesh)
+        built:=mesh_cached(s.app,s.meshes,static.mesh,static.shape,l.scale)
+        return actual!=nil && built!=nil && mesh_geometry_equal(actual^,built^)
+    case .Heightfield:
+        actual:=sim.heightfield_geometry(w,l.heightfield)
+        field,found:=host.assets_heightfield(s.app.assets,static.mesh)
+        if actual==nil || !found || actual.columns!=field.columns || actual.rows!=field.rows || actual.cell!=field.cell*l.scale || !sliced_equal(actual.heights,field.heights) || !sliced_equal(actual.disabled_borders,field.disabled_borders) || !sliced_equal(actual.holes,field.holes) {return false}
+        origin:=l.collider.center*l.scale+field.origin*l.scale
+        expected:=sim.Transform{relative.position+mm.quat_rotate(relative.rotation,origin),relative.rotation}
+        return sim.shape_local_transform(w,l.shape).p==expected.p
+    case .Box,.Sphere,.Capsule,.Cylinder,.Hull,.External:
+        return false
+    }
+    return false
+}
+
+// The convex radius of a collider at the scale of its entity: the smallest axis of the scale shrinks it.
+@(private)
+collider_round :: proc "contextless" (collider:Collider,scale:[3]f32) -> f32 {
+    return collider.convex_radius*min(scale.x,scale.y,scale.z)
+}
+
+// Whether the rounding of a collider leaves its shape a core: below the smallest half extent of a box and the
+// radius and half height of a cylinder at the scale of the entity. A hull finds out when it is built.
+@(private)
+collider_round_fits :: proc "contextless" (collider:Collider,scale:[3]f32) -> bool {
+    round:=collider_round(collider,scale)
+    if !(round>=0 && round<max(f32)) {return false}
+    if round==0 {return true}
+    smallest:=max(f32)
+    #partial switch collider.kind {
+    case .Box:
+        size:=collider.size*scale
+        smallest=min(size.x,size.y,size.z)
+    case .Cylinder:
+        smallest=min(collider.size.x*max(scale.x,scale.z),collider.size.y*scale.y)
+    }
+    // A shape without size is refused as such, not for its rounding.
+    return !(smallest>0) || round<smallest
+}
+
+// The triangles of what a Mesh_Renderer shows at a scale, built for the
+// simulation. The application builds each one once and every world that needs
+// it copies it into its simulation.
+@(storage,host,free="collider_meshes_destroy")
+Collider_Meshes :: struct {
+    entries:[dynamic]Collider_Mesh,
+    built:u64,
+    structure:u64,
+}
+
+@(private)
+Collider_Mesh :: struct {
+    mesh:base.Asset_Id,
+    shape:host.Shape,
+    scale:[3]f32,
+    size,time:i64, // of the file of the mesh when it was read
+    generated:bool,
+    built:sim.Mesh,
+}
+
+@(private)
+collider_meshes_prune :: proc(meshes:^Collider_Meshes,assets:^host.Assets) {
+    structure:=assets!=nil?assets.structure:0
+    if meshes.structure==structure {return}
+    meshes.structure=structure
+    for index:=len(meshes.entries)-1;index>=0;index-=1 {
+        entry:=&meshes.entries[index]
+        if !entry.generated || host.assets_mesh_generated(assets,entry.mesh) {continue}
+        sim.mesh_release(&entry.built,context.allocator)
+        ordered_remove(&meshes.entries,index)
+    }
+}
+
+// Frees the meshes. The generated world has no destructor for a storage, so whoever owns the application calls it.
+collider_meshes_destroy :: proc(meshes:^Collider_Meshes) {
+    for &entry in meshes.entries {sim.mesh_release(&entry.built,context.allocator)}
+    delete(meshes.entries)
+    meshes^={}
+}
+
+// The built mesh of a collider, made now when the application does not have
+// it or its file changed. nil when it cannot be made: the caller builds one of its own.
+@(private)
+mesh_cached :: proc(app:^host.App,meshes:^Collider_Meshes,mesh:base.Asset_Id,shape:host.Shape,scale:[3]f32) -> ^sim.Mesh {
+    size,time:i64
+    generated:=host.assets_mesh_generated(app.assets,mesh)
+    if mesh!={} {
+        if app.assets==nil {return nil}
+        if !generated {
+            file,found:=asset.registry_find(&app.assets.registry,mesh)
+            if !found {return nil}
+            size,time=file.size,file.time
+        }
+    }
+    shape:=mesh=={}?shape:host.Shape.None
+    entry:^Collider_Mesh
+    for &known in meshes.entries {
+        if known.mesh!=mesh || known.shape!=shape || known.scale!=scale {continue}
+        if known.size==size && known.time==time {return known.built.triangles!=nil?&known.built:nil}
+        sim.mesh_release(&known.built,context.allocator)
+        entry=&known
+        break
+    }
+    if entry==nil {
+        if append(&meshes.entries,Collider_Mesh{})!=1 {return nil}
+        entry=&meshes.entries[len(meshes.entries)-1]
+    }
+    entry^={mesh=mesh,shape=shape,scale=scale,size=size,time=time,generated=generated}
+    buffer:geom.Mesh_Buffer
+    geom.mesh_buffer_init(&buffer,context.temp_allocator)
+    _,found:=host.assets_collision(app.assets,mesh,shape,.Mesh,&buffer)
+    for &position in buffer.positions {position*=scale}
+    disabled:=host.assets_mesh_disabled_edges(app.assets,mesh)
+    if !found || !sim.mesh_build(&entry.built,{buffer.positions[:],buffer.indices[:],disabled},context.allocator) {
+        // Kept empty: what cannot be built is not tried again for every entity that shows it.
+        entry.built={}
+        return nil
+    }
+    meshes.built+=1
+    return &entry.built
+}
+
+// What a slot of geometry of the simulation was made from. Colliders made from the same (kind, mesh or
+// shape, scale and rounding, of the same file) share the slot: the simulation counts the shapes that use
+// it and frees it with the last one. Plain data in Physics_State, copied with the simulation.
+@(private)
+Geometry_Source :: struct {
+    generation:u32, // of the slot it was made in; another generation: the slot holds something else
+    kind:Collider_Kind,
+    shape:host.Shape,
+    mesh:base.Asset_Id,
+    scale:[3]f32,
+    round:f32,
+    size,time:i64, // of the file of the mesh, as Collider_Mesh; zero for a generated one
+}
+
+@(private)
+geometry_source_same :: proc "contextless" (a,b:Geometry_Source) -> bool {
+    return a.kind==b.kind && a.shape==b.shape && a.mesh==b.mesh && a.scale==b.scale && a.round==b.round && a.size==b.size && a.time==b.time
+}
+
+// What the geometry of a collider is made from. False when the file of its mesh is unknown: then it is not
+// shared.
+@(private)
+geometry_source_of :: proc(s:^Sync,kind:Collider_Kind,static:render.Mesh_Renderer,scale:[3]f32,round:f32) -> (source:Geometry_Source,ok:bool) {
+    source={kind=kind,shape=static.mesh=={}?static.shape:.None,mesh=static.mesh,scale=scale,round=round}
+    if static.mesh!={} && !host.assets_mesh_generated(s.app.assets,static.mesh) {
+        if s.app.assets==nil {return}
+        file,found:=asset.registry_find(&s.app.assets.registry,static.mesh)
+        if !found {return}
+        source.size,source.time=file.size,file.time
+    }
+    return source,true
+}
+
+// A live slot made from the same source, given to the link: hulls, then meshes (a flat hull is one), then
+// heightfields, in the order of Physics_State.geometry.
+@(private)
+geometry_shared :: proc(s:^Sync,l:^Link,source:Geometry_Source) -> (geometry:sim.Geometry,ok:bool) {
+    w:=&s.state.world
+    hulls,meshes:=len(w.hulls),len(w.meshes)
+    for &known,at in s.state.sources {
+        if known.generation==0 || !geometry_source_same(known,source) {continue}
+        switch {
+        case at<hulls:
+            if w.hulls[at].generation!=known.generation {continue}
+            l.hull=sim.Hull_Handle(base.handle_make(u32(at),known.generation))
+            return l.hull,true
+        case at<hulls+meshes:
+            if w.meshes[at-hulls].generation!=known.generation {continue}
+            l.mesh=sim.Mesh_Handle(base.handle_make(u32(at-hulls),known.generation))
+            return l.mesh,true
+        case:
+            if w.heightfields[at-hulls-meshes].generation!=known.generation {continue}
+            l.heightfield=sim.Heightfield_Handle(base.handle_make(u32(at-hulls-meshes),known.generation))
+            return l.heightfield,true
+        }
+    }
+    return
+}
+
+// Writes down what a slot the link made was made from. Without memory the slot is only not shared.
+@(private)
+geometry_remember :: proc(s:^Sync,l:^Link,source:Geometry_Source) {
+    state:=s.state
+    w:=&state.world
+    total:=len(w.hulls)+len(w.meshes)+len(w.heightfields)
+    if len(state.sources)!=total && resize(&state.sources,total)!=nil {return}
+    at:=-1
+    handle:base.Handle
+    switch {
+    case l.hull!={}:        handle=base.Handle(l.hull);at=int(base.handle_index(handle))
+    case l.mesh!={}:        handle=base.Handle(l.mesh);at=len(w.hulls)+int(base.handle_index(handle))
+    case l.heightfield!={}: handle=base.Handle(l.heightfield);at=len(w.hulls)+len(w.meshes)+int(base.handle_index(handle))
+    }
+    if at<0 || at>=total {return}
+    known:=source
+    known.generation=base.handle_generation(handle)
+    state.sources[at]=known
+}
+
+// Collision geometry of the Mesh_Renderer, scaled and copied into the simulation; a hull rounded by
+// `round`. A collider made from what another one already has takes its slot.
+@(private)
+collider_geometry :: proc(s:^Sync,l:^Link,kind:Collider_Kind,e:core.Entity,scale:[3]f32,round:f32) -> (geometry:sim.Geometry,origin:[3]f32,failure:Shape_Failure) {
+    static,has_mesh:=core.get(s.statics,e)
+    if !has_mesh {return {},{},.No_Mesh}
+    source,shareable:=geometry_source_of(s,kind,static,scale,round)
+    if kind==.Heightfield {
+        field,found:=host.assets_heightfield(s.app.assets,static.mesh)
+        if !found {return {},{},.No_Heightfield}
+        origin=field.origin*scale
+        for value in origin {if value-value!=0 {return {},{},.No_Heightfield}}
+    }
+    if shareable {
+        if shared,found:=geometry_shared(s,l,source);found {return shared,origin,.None}
+    }
+    geometry,failure=collider_geometry_make(s,l,kind,static,scale,round)
+    if failure==.None && shareable {geometry_remember(s,l,source)}
+    return geometry,origin,failure
+}
+
+// Makes the geometry of a collider in a slot of its own.
+@(private)
+collider_geometry_make :: proc(s:^Sync,l:^Link,kind:Collider_Kind,static:render.Mesh_Renderer,scale:[3]f32,round:f32) -> (geometry:sim.Geometry,failure:Shape_Failure) {
+    w:=&s.state.world
+    made:bool
+    if kind==.Heightfield {
+        field,_:=host.assets_heightfield(s.app.assets,static.mesh)
+        l.heightfield,made=sim.heightfield_create(w,{field.heights,field.columns,field.rows,field.cell*scale,field.disabled_borders,field.holes})
+        if !made {return {},.Geometry_Budget}
+        return l.heightfield,.None
+    }
+    if kind==.Mesh {
+        if built:=mesh_cached(s.app,s.meshes,static.mesh,static.shape,scale);built!=nil {
+            l.mesh,made=sim.mesh_create_copy(w,built)
+            if !made {return {},.Geometry_Budget}
+            return l.mesh,.None
+        }
+    }
+    buffer:geom.Mesh_Buffer
+    geom.mesh_buffer_init(&buffer,context.temp_allocator)
+    if _,found:=host.assets_collision(s.app.assets,static.mesh,static.shape,kind==.Mesh?.Mesh:.Hull,&buffer);!found {return {},.No_Geometry}
+    for &position in buffer.positions {position*=scale}
+    if kind==.Mesh {
+        l.mesh,made=sim.mesh_create(w,{buffer.positions[:],buffer.indices[:],host.assets_mesh_disabled_edges(s.app.assets,static.mesh)})
+        if !made {return {},.Geometry_Budget}
+        return l.mesh,.None
+    }
+    built,error:=geom.hull_build(buffer.positions[:],{max_vertices=COLLIDER_HULL_VERTICES},context.temp_allocator)
+    if error!=.None {return {},.Hull}
+    if geom.hull_is_flat(built) {
+        // A polygon has no volume: it collides as a mesh of its triangles and adds no mass.
+        triangles:[3*(COLLIDER_HULL_VERTICES-2)]u32
+        corners:=len(built.vertices)
+        for i in 1..<corners-1 {triangles[3*(i-1)+1],triangles[3*(i-1)+2]=u32(i),u32(i+1)}
+        l.mesh,made=sim.mesh_create(w,{vertices=built.vertices,indices=triangles[:3*(corners-2)]})
+        if !made {return {},.Geometry_Budget}
+        return l.mesh,.None
+    }
+    if len(built.vertices)>255 || len(built.faces)>255 || len(built.face_vertices)>255 {return {},.Hull}
+    counts:[255]u8
+    indices:[255]u8
+    used:=0
+    for face,at in built.faces {
+        counts[at]=u8(face.vertex_count)
+        for vertex in built.face_vertices[face.first_vertex:][:face.vertex_count] {
+            indices[used]=u8(vertex)
+            used+=1
+        }
+    }
+    desc:=sim.Hull_Desc{built.vertices,counts[:len(built.faces)],indices[:used]}
+    l.hull,made=sim.hull_create(w,desc,round)
+    if !made && round>0 {
+        // Without the rounding it builds: the radius leaves it no core.
+        if sharp,built_sharp:=sim.hull_create(w,desc);built_sharp {
+            sim.hull_destroy(w,sharp)
+            return {},.Convex_Radius
+        }
+    }
+    if !made {return {},.Geometry_Budget}
+    return l.hull,.None
+}
+
+// Releases geometry after its shape is gone: the slot goes with the last shape that uses it, and stays for
+// the others.
+@(private)
+geometry_release :: proc(s:^Sync,l:^Link) {
+    w:=&s.state.world
+    if l.hull!={} {sim.hull_destroy(w,l.hull)}
+    if l.mesh!={} {sim.mesh_destroy(w,l.mesh)}
+    if l.heightfield!={} {sim.heightfield_destroy(w,l.heightfield)}
+    l.hull,l.mesh={},{}
+    l.heightfield={}
+}
+
+

@@ -1,0 +1,1628 @@
+package editor
+
+import "core:fmt"
+import "core:math"
+import "core:math/linalg"
+import "core:path/filepath"
+import "core:strings"
+import "mirai:asset"
+import "mirai:core"
+import "mirai:host"
+import "mirai:platform"
+import gpu "mirai:render"
+import "mirai:std/base"
+import mm "mirai:std/math"
+import "mirai:ui"
+
+
+@(private) SHELL_SCOPE :: ui.Id(0x4d495241)
+@(private) BAR_BUTTON_HEIGHT :: f32(30)
+@(private) DOCUMENT_TOOLBAR_HEIGHT :: f32(44) // nominal: bars_snap puts its edges on whole pixels
+@(private) TOOLBAR_BUTTON :: f32(28) // side of a button of the toolbar
+@(private) WINDOW_CONTROL_WIDTH :: f32(28)
+@(private) PANEL_PADDING :: f32(8)
+@(private) SPLITTER_WIDTH :: f32(6)
+@(private) NAMED_CAPACITY :: 96
+
+Panel_Width :: struct {fraction,min,max:f32}
+LEFT_WIDTH :: Panel_Width{0,320,320}
+RIGHT_WIDTH :: Panel_Width{0,312,312}
+BOTTOM_HEIGHT :: f32(220)
+BOTTOM_MIN :: f32(120)
+
+Library_Tab :: enum u8 {Editor,Content,Ai,Hierarchy,Git,World}
+Library_Tabs :: bit_set[Library_Tab]
+
+// The tabs of the left panel each type of document has: what can be shown
+// beside it. An asset document has Hierarchy too when its plugin builds one.
+DOCUMENT_LIBRARY_TABS :: [Document_Type]Library_Tabs{
+    .Scene={.Editor,.Content,.Hierarchy,.World,.Ai,.Git},
+    .Prefab={.Editor,.Content,.Hierarchy,.Ai,.Git},
+    .Asset={.Content,.Ai,.Git},
+}
+Bottom_Tab :: enum u8 {Console,Build}
+Modal :: enum u8 {None,Confirm,Save_Changes,Recovery,Shortcuts,Settings,Delete_Asset,Git_Discard}
+
+// Whether the world of a document uses unsaved assets, as last asked
+// (document_uses_unsaved): key is the revision of the registry and the state
+// of its history then.
+Unsaved_Use :: struct {
+    world:rawptr,
+    key:[2]u64,
+    uses:bool,
+}
+
+// The dot of unsaved changes, as the prototype draws it.
+UNSAVED_COLOR :: ui.Color{201,181,239,255}
+Splitter :: enum u8 {None,Bottom,Left,Right}
+
+// How a side panel sits: over the scene, or docked to the edge of the window
+// for its whole height, with the scene beside it, smaller.
+Panel_Mode :: enum u8 {Floating,Docked}
+// The mode of a side panel for a type of document: that of every document, or its own.
+Panel_Choice :: enum u8 {Global,Floating,Docked}
+Document_Type :: enum u8 {Scene,Prefab,Asset}
+Panel_Side :: enum u8 {Left,Right}
+
+// A bottom height of 0 uses the default, and so does a docked width of 0.
+Layout :: struct {
+    left_open,right_open,bottom_open:bool,
+    library_tab,previous_library_tab:Library_Tab,
+    create_folded:[CARD_GROUP_CAPACITY]bool,
+    run_kind:Run_Kind,  // what the Play button starts
+    bottom_tab:Bottom_Tab,
+    bottom_height:f32,
+    git_history:f32, // the height of the history of the Git tab; 0: GIT_HISTORY_DEFAULT
+    left_mode,right_mode:Panel_Mode,
+    left_modes,right_modes:[Document_Type]Panel_Choice,
+    left_width,right_width:f32, // docked, as their edges were dragged
+}
+
+LAYOUT_DEFAULT :: Layout{left_open=true,right_open=true,library_tab=.Content,previous_library_tab=.Content}
+DOCK_MIN :: f32(220) // the narrowest a docked panel is dragged
+LEFT_PANEL_HEIGHT :: f32(620) // the most a floating left panel takes, whatever tab it shows
+
+Run_Kind :: enum u8 {Play,Simulate,Play_From_Camera}
+
+@(rodata)
+RUN_ACTIONS := [Run_Kind]Action{.Play=.Play,.Simulate=.Simulate,.Play_From_Camera=.Play_From_Camera}
+
+// Rectangles of the last frame, in window points; no size: not shown.
+Shell_Rects :: struct {bar,left,right,bottom:ui.Rect}
+
+Drag_Kind :: enum u8 {None,Preset,Asset,Entity}
+
+// Something carried from a panel: to the scene, to a row of the outliner, to a field.
+Drag :: struct {
+    kind:Drag_Kind,
+    card:int,          // Preset: its place in cards()
+    icon:ui.Icon,
+    color:ui.Color,
+    asset_id:base.Asset_Id,
+    asset_kind:asset.Fourcc,
+    part:[64]u8,       // Asset: the clip of a library it carries; empty: the whole asset
+    entity:core.Entity,
+    press:[2]f32,
+    moved:bool,    // it travelled: a drag, not a click
+    released:bool, // the button came up this frame: whatever is under the pointer takes it
+    label:[64]u8,
+    label_length:int,
+}
+
+Placement :: struct {active:bool,using subject:Drag}
+
+@(private)
+Named :: struct {id:ui.Id,kind:platform.Window_Region_Kind,clip:ui.Id}
+
+@(private)
+Shell_Item :: struct {
+    id:ui.Id,
+    kind:enum u8 {Tool,View},
+    icon:ui.Icon,
+    label:[64]u8,
+    label_length:int,
+    shortcut:[8]u8,
+    shortcut_length:int,
+    active,clicked:bool,
+}
+
+// The UI of the editor. A plugin builds into ctx from the ui phase, between
+// editor_panels and editor_end.
+@(storage,free="gui_destroy")
+Editor_Ui :: struct {
+    ctx:^ui.Context,
+    draws:[dynamic]gpu.Ui_Draw,
+    panels:[dynamic]gpu.World_Panel,
+    begun:bool,     // the frame of ctx is open
+    dropped:u64,    // UI commands that did not fit
+    layout:Layout,
+    rects:Shell_Rects,
+    modal:Modal,
+    modal_scroll:f32,
+    toolbar_height:f32, // of the toolbar under the document bar, its bottom on a whole pixel (bars_snap)
+    pending:Pending,
+    save_then:bool, // a Save As asked by the question about unsaved changes goes on with what waits
+    confirm_assets:[dynamic]string, // the unsaved assets the question lists, by their path in the registry
+    delete_asset:base.Asset_Id,     // what Modal.Delete_Asset asks about
+    discard_path:[GIT_PATH_BYTES]u8, // what Modal.Git_Discard asks about; empty: every change
+    unsaved_uses:[dynamic]Unsaved_Use,
+    drag:Drag,
+    placement:Placement,
+    preview:Placement_Preview,
+    splitter:Splitter,
+    splitter_start:f32,
+    splitter_press:[2]f32,
+    cursor:platform.Cursor,
+    cursor_set:platform.Cursor,
+    named:[NAMED_CAPACITY]Named,
+    named_count:int,
+    variant:Variant_Prompt,
+    title:[256]u8,
+    title_length:int,
+    create_scroll:[2]f32,
+    items,next_items:[16]Shell_Item,
+    item_count,next_item_count:int,
+    drawings:[DRAWING_CAPACITY]Drawing, // of the frame being built
+    drawing_count:int,
+    tool_top,tool_width:f32,          // where the panel of a tool goes, in place of Details
+    tool_dock:f32,                    // its height when the right panel is docked; 0: floating
+    documents_scroll:f32,
+    documents_width:f32,
+    documents_reveal:bool,
+    presence_menu:Presence_Menu, // the figure whose menu is open (presence_menu.odin)
+    viewport_menu:Viewport_Menu, // of the right click on the scene (play_here.odin)
+}
+
+// Kinds draw_user receives.
+User_Icon :: enum u8 {
+    Minimize,Maximize,Close,Pause,Gear,Search,Folder,Up,List,Save,Undo,Redo,Share,Camera,Graphics,Component,Simulate,
+    Scene,Copy,Trash,Hammer,Terminal,Tree,Command,Unlink,Variant,
+    Agent_Star,Agent_Bolt,Agent_Ghost,Agent_Shield,Agent_Leaf,Agent_Butterfly,Agent_Claude,Agent_Codex,
+    Agent_Star_Done,Agent_Bolt_Done,Agent_Ghost_Done,Agent_Shield_Done,Agent_Leaf_Done,Agent_Butterfly_Done,Agent_Claude_Done,Agent_Codex_Done,
+    Agent_Star_Ask,Agent_Bolt_Ask,Agent_Ghost_Ask,Agent_Shield_Ask,Agent_Leaf_Ask,Agent_Butterfly_Ask,Agent_Claude_Ask,Agent_Codex_Ask,
+    Retry,Connection,Waiting,
+    Star,Star_Filled,Collapse,Users,
+    Expand, // two chevrons apart: open everything, as Collapse closes it
+    Panel_Close,Panel_Open, // a panel on the left with an arrow that folds it, or that brings it back
+    Branch,        // three commits of git and the branch between them
+    Back,          // a chevron to the left: the previous one
+    Down,          // an arrow down, as Up
+    Arrow_Left,Arrow_Right,Arrow_Up_Left,Arrow_Up_Right,Arrow_Down_Right,Arrow_Down_Left, // the sides and corners of a box
+    Shield,        // what an agent asks leave for
+    Drawing,       // data: the ^Drawing of a plugin
+    Mirai,         // the mark, its arms in the color given and its star white
+    To_Start,Step_Back,Step_Forward,To_End,Loop,Range,Fit_Width,Marker, // of the time strip (timeline.odin)
+    Wordmark,      // the name MIRAI in the text of the theme, at the left of its area
+    Terrain,       // two peaks: a terrain and its tool
+    Plugin,        // three blocks and a fourth set apart: a plugin without an icon of its own
+    Mirai_Shape,   // the mark in one color, the one given
+}
+
+DRAWING_CAPACITY :: 8 // areas plugins draw in one frame
+
+// What a plugin draws in an area of its panel, called while the frame is painted.
+Drawing_Proc :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr)
+Drawing :: struct {
+    draw:Drawing_Proc,
+    user:rawptr, // must live until the frame is painted: a field of the plugin's storage
+}
+
+@(private)
+gui_init :: proc(g:^Editor_Ui,app:^host.App) -> bool {
+    ctx,error:=new(ui.Context,app.allocator)
+    if error!=nil {return false}
+    desc:=host.app_ui_context_desc(app)
+    desc.draw_user=draw_user
+    if !ui.context_init(ctx,desc) {
+        free(ctx,app.allocator)
+        return false
+    }
+    g.ctx=ctx
+    g.preview.parts=make([dynamic]Placement_Part,app.allocator)
+    resize(&g.draws,host.UI_COMMAND_CAPACITY)
+    resize(&g.panels,16)
+    g.layout=LAYOUT_DEFAULT
+    if app.platform!=nil && platform.window_native(app.platform)!=nil {
+        _=platform.window_set_icon(app.platform,mark_icon_pixels(context.temp_allocator),MARK_ICON_SIZE,MARK_ICON_SIZE)
+    }
+    return true
+}
+
+// The panels hold views of the frame, which only the arrays own.
+gui_destroy :: proc(g:^Editor_Ui) {
+    if g.ctx!=nil {
+        allocator:=g.ctx.allocator
+        ui.context_destroy(g.ctx)
+        free(g.ctx,allocator)
+        g.ctx=nil
+    }
+    delete(g.draws);delete(g.panels)
+    delete(g.preview.parts)
+    g.preview={}
+    g.draws,g.panels={},{}
+    confirm_assets_set(g,nil)
+    core.value_free(g,type_info_of(Editor_Ui))
+}
+
+// The id of a widget of the shell, whatever scope is open.
+shell_id :: proc(g:^Editor_Ui,name:string,index:int=0) -> ui.Id {return ui.id_derive(g.ctx,SHELL_SCOPE,name,index)}
+
+@(private)
+shell_item :: proc(g:^Editor_Ui,item:Shell_Item) -> bool {
+    if !g.begun {return false}
+    if g.next_item_count>=len(g.next_items) {g.dropped+=1;return false}
+    g.next_items[g.next_item_count]=item
+    g.next_item_count+=1
+    for previous in g.items[:g.item_count] {
+        if previous.id==item.id {return previous.clicked}
+    }
+    return false
+}
+
+tool_button :: proc(g:^Editor_Ui,id:ui.Id,icon:ui.Icon,label,shortcut:string,active:bool) -> bool {
+    item:=Shell_Item{id=id,kind=.Tool,icon=icon,active=active}
+    item.label_length=copy(item.label[:],label)
+    item.shortcut_length=copy(item.shortcut[:],shortcut)
+    return shell_item(g,item)
+}
+
+// An area of a plugin's panel that draw paints with the ui.draw_ procedures,
+// in the rectangle the layout gives it and under the clip of its container.
+// The pointer on it is its interaction. Past DRAWING_CAPACITY in a frame the
+// area stays empty.
+drawing :: proc(g:^Editor_Ui,id:ui.Id,width,height:ui.Size,draw:Drawing_Proc,user:rawptr,flags:ui.Widget_Flags={}) -> ui.Interaction {
+    data:=u64(0)
+    if g.drawing_count<len(g.drawings) {
+        g.drawings[g.drawing_count]={draw,user}
+        data=u64(uintptr(&g.drawings[g.drawing_count]))
+        g.drawing_count+=1
+    } else {
+        g.dropped+=1
+    }
+    return ui.canvas(g.ctx,id,width,height,u32(User_Icon.Drawing),data,flags)
+}
+
+view_toggle :: proc(g:^Editor_Ui,id:ui.Id,label:string,active:bool) -> bool {
+    item:=Shell_Item{id=id,kind=.View,active=active}
+    item.label_length=copy(item.label[:],label)
+    return shell_item(g,item)
+}
+
+// The layout of the panel of the active tool of a plugin, or of the shown
+// panel of the project: the place of Details, which they take while shown.
+tool_panel :: proc(g:^Editor_Ui,id:ui.Id) -> ui.Panel_Float {
+    ctx:=g.ctx
+    if rect,found:=ui.widget_rect(ctx,id);found {g.rects.right=rect}
+    if g.tool_dock>0 {return {width=ui.fixed(g.tool_width),height=ui.fixed(g.tool_dock),padding=ui.padding_all(PANEL_PADDING),gap=8,anchor=.Top_Right,pivot=.Top_Right,offset={0,g.tool_top},docked=true}}
+    return {width=ui.fixed(g.tool_width),height=ui.FIT,padding=ui.padding_all(PANEL_PADDING),gap=8,anchor=.Top_Right,pivot=.Top_Right,offset={-ctx.theme.margin,g.tool_top}}
+}
+
+// The width of what the panel of tool_panel holds, inside its padding.
+tool_panel_inner :: proc(g:^Editor_Ui) -> f32 {return g.tool_width-2*PANEL_PADDING}
+
+// True while a tool of a plugin or a panel of the project takes the place of
+// Details.
+tool_panel_shown :: proc(s:^Session) -> bool {
+    if playing(s) || scene_covered(s) {return false}
+    return s.viewport.plugin_tool!=0 || panel_shown(s.panels)!=nil
+}
+
+@(private)
+named_add :: proc(g:^Editor_Ui,id:ui.Id,kind:=platform.Window_Region_Kind.Client,clip:ui.Id=0) {
+    if g.named_count>=len(g.named) {return}
+    g.named[g.named_count]={id,kind,clip}
+    g.named_count+=1
+}
+
+@(private)
+draw_user :: proc(ctx:^ui.Context,rect:ui.Rect,kind:u32,data:u64,color:ui.Color) {
+    c:=ui.rect_center(rect)
+    s:=min(rect.w,rect.h)/16
+    switch User_Icon(kind) {
+    case .Agent_Star,.Agent_Bolt,.Agent_Ghost,.Agent_Shield,.Agent_Leaf,.Agent_Butterfly,.Agent_Claude,.Agent_Codex,
+         .Agent_Star_Done,.Agent_Bolt_Done,.Agent_Ghost_Done,.Agent_Shield_Done,.Agent_Leaf_Done,.Agent_Butterfly_Done,.Agent_Claude_Done,.Agent_Codex_Done,
+         .Agent_Star_Ask,.Agent_Bolt_Ask,.Agent_Ghost_Ask,.Agent_Shield_Ask,.Agent_Leaf_Ask,.Agent_Butterfly_Ask,.Agent_Claude_Ask,.Agent_Codex_Ask:
+        ai_agent_avatar_draw(ctx,rect,u8(kind-u32(User_Icon.Agent_Star)),color)
+    case .Drawing:
+        if d:=(^Drawing)(uintptr(data));d!=nil && d.draw!=nil {d.draw(ctx,rect,d.user)}
+    case .To_Start,.Step_Back,.Step_Forward,.To_End,.Loop,.Range,.Fit_Width,.Marker:
+        timeline_icon_draw(ctx,User_Icon(kind),c,s,color)
+    case .Mirai:
+        mark_shape_draw(ctx,c,s,color,MARK_STAR)
+    case .Wordmark:
+        wordmark_draw(ctx,rect,ctx.theme.text)
+    case .Mirai_Shape:
+        mark_shape_draw(ctx,c,s,color,color)
+    case .Retry:
+        points:[17][2]f32
+        for &point,i in points {
+            angle:=f32(i)*math.PI/10
+            point=c+[2]f32{math.cos(angle),math.sin(angle)}*5*s
+        }
+        ui.draw_polyline(ctx,points[:],1.3*s,color)
+        ui.draw_polyline(ctx,([][2]f32{c+{2*s,-5*s},c+{6*s,-5*s},c+{6*s,-9*s}}),1.3*s,color)
+    case .Close:
+        ui.draw_line(ctx,c+{-3.5,-3.5},c+{3.5,3.5},1.2,color)
+        ui.draw_line(ctx,c+{3.5,-3.5},c+{-3.5,3.5},1.2,color)
+    case .Minimize:
+        ui.draw_line(ctx,c+{-4,0},c+{4,0},1.2,color)
+    case .Maximize:
+        ui.draw_rect_lines(ctx,{c.x-4,c.y-4,8,8},1.2,color)
+    case .Pause:
+        ui.draw_rounded(ctx,{c.x-4.5*s,c.y-5.5*s,3*s,11*s},0.8*s,color)
+        ui.draw_rounded(ctx,{c.x+1.5*s,c.y-5.5*s,3*s,11*s},0.8*s,color)
+    case .Simulate:
+        a,b:=c+{-2.5*s,2.5*s},c+{2.5*s,-2.5*s}
+        for p in ([2][2]f32{a,b}) {ui.draw_rounded_stroke(ctx,{p.x-3.5*s,p.y-3.5*s,7*s,7*s},3.5*s,1.4*s,color)}
+        ui.draw_line(ctx,a,b,1.4*s,color)
+    case .Search:
+        ui.draw_ring(ctx,c+{-1.5*s,-1.5*s},4.5*s,1.4,color)
+        ui.draw_line(ctx,c+{2*s,2*s},c+{6*s,6*s},1.4,color)
+    case .Camera:
+        ui.draw_rect_lines(ctx,{c.x-6*s,c.y-4*s,8*s,8*s},1.3,color)
+        p:=[4][2]f32{c+{2*s,-2*s},c+{6*s,-4*s},c+{6*s,4*s},c+{2*s,2*s}}
+        ui.draw_polyline(ctx,p[:],1.3,color,true)
+    case .Graphics:
+        for x,index in ([3]f32{-5,0,5}) {
+            y:=index==1?f32(3):f32(-2)
+            ui.draw_line(ctx,c+{x*s,-6*s},c+{x*s,(y-1.5)*s},1.3,color)
+            ui.draw_line(ctx,c+{x*s,(y+1.5)*s},c+{x*s,6*s},1.3,color)
+            ui.draw_rect_lines(ctx,{c.x+(x-1.5)*s,c.y+(y-1.5)*s,3*s,3*s},1.1,color)
+        }
+    case .Component:
+        ui.draw_polyline(ctx,([][2]f32{c+{-3*s,-4*s},c+{-7*s,0},c+{-3*s,4*s}}),1.3,color)
+        ui.draw_polyline(ctx,([][2]f32{c+{3*s,-4*s},c+{7*s,0},c+{3*s,4*s}}),1.3,color)
+        ui.draw_line(ctx,c+{1.5*s,-6*s},c+{-1.5*s,6*s},1.3,color)
+    case .Gear:
+        ui.draw_ring(ctx,c,4.5*s,1.4,color)
+        ui.draw_ring(ctx,c,1.5*s,1.2,color)
+        for i in 0..<8 {
+            a:=f32(i)*math.PI/4
+            d:=[2]f32{math.cos(a),math.sin(a)}
+            ui.draw_line(ctx,c+d*4.5*s,c+d*6.5*s,2,color)
+        }
+    case .Connection:
+        ui.draw_rounded_stroke(ctx,{c.x-7*s,c.y-s,8*s,5*s},2*s,1.3,color)
+        ui.draw_rounded_stroke(ctx,{c.x-s,c.y-4*s,8*s,5*s},2*s,1.3,color)
+        ui.draw_line(ctx,c+{-2*s,2*s},c+{2*s,-2*s},1.3,color)
+    case .Shield:
+        points:=[10][2]f32{c+{0,-6.2*s},c+{5*s,-4.2*s},c+{5*s,-.2*s},c+{4*s,2.8*s},c+{2*s,4.8*s},c+{0,6.2*s},c+{-2*s,4.8*s},c+{-4*s,2.8*s},c+{-5*s,-.2*s},c+{-5*s,-4.2*s}}
+        ui.draw_polyline(ctx,points[:],1.3,color,true)
+    case .Waiting:
+        for y in ([2]f32{-6,6}) {ui.draw_line(ctx,c+{-5*s,y*s},c+{5*s,y*s},1.3,color)}
+        ui.draw_polyline(ctx,([][2]f32{c+{-4*s,-6*s},c+{-4*s,-3*s},c+{4*s,3*s},c+{4*s,6*s}}),1.3,color)
+        ui.draw_polyline(ctx,([][2]f32{c+{4*s,-6*s},c+{4*s,-3*s},c+{-4*s,3*s},c+{-4*s,6*s}}),1.3,color)
+    case .Star,.Star_Filled:
+        // Five points, and the five between them at 0.45 of their reach.
+        points:[10][2]f32
+        for &point,i in points {
+            angle:=f32(i)*math.PI/5-math.PI/2
+            reach:=6.5*s if i%2==0 else 2.9*s
+            point=c+[2]f32{math.cos(angle),math.sin(angle)+0.08}*reach
+        }
+        if User_Icon(kind)==.Star_Filled {
+            for i in 0..<10 {ui.draw_triangle(ctx,c+{0,0.5*s},points[i],points[(i+1)%10],color)}
+        } else {ui.draw_polyline(ctx,points[:],1.2*s,color,true)}
+    case .Collapse:
+        ui.draw_polyline(ctx,([][2]f32{c+{-4*s,-7*s},c+{0,-3*s},c+{4*s,-7*s}}),1.3*s,color)
+        ui.draw_polyline(ctx,([][2]f32{c+{-4*s,7*s},c+{0,3*s},c+{4*s,7*s}}),1.3*s,color)
+        ui.draw_line(ctx,c+{-6*s,0},c+{6*s,0},1.3*s,color)
+    case .Expand:
+        ui.draw_polyline(ctx,([][2]f32{c+{-4*s,-3*s},c+{0,-7*s},c+{4*s,-3*s}}),1.3*s,color)
+        ui.draw_polyline(ctx,([][2]f32{c+{-4*s,3*s},c+{0,7*s},c+{4*s,3*s}}),1.3*s,color)
+        ui.draw_line(ctx,c+{-6*s,0},c+{6*s,0},1.3*s,color)
+    case .Panel_Close,.Panel_Open:
+        ui.draw_rounded_stroke(ctx,{c.x-7*s,c.y-7*s,14*s,14*s},3*s,1.4*s,color)
+        ui.draw_line(ctx,c+{-2.5*s,-7*s},c+{-2.5*s,7*s},1.4*s,color)
+        tip:=f32(0.5 if User_Icon(kind)==.Panel_Close else 3.5)
+        back:=f32(3.5 if User_Icon(kind)==.Panel_Close else 0.5)
+        ui.draw_polyline(ctx,([][2]f32{c+{back*s,-2.5*s},c+{tip*s,0},c+{back*s,2.5*s}}),1.4*s,color)
+    case .Folder:
+        ui.draw_triangle(ctx,c+{-6.5*s,-4.5*s},c+{-2*s,-4.5*s},c+{-0.5*s,-3*s},color)
+        ui.draw_triangle(ctx,c+{-6.5*s,-4.5*s},c+{-0.5*s,-3*s},c+{-6.5*s,-3*s},color)
+        ui.draw_rect(ctx,{c.x-6.5*s,c.y-3*s,13*s,8*s},color)
+    case .Up:
+        ui.draw_line(ctx,c+{0,6*s},c+{0,-6*s},1.5,color)
+        ui.draw_line(ctx,c+{-4.5*s,-1.5*s},c+{0,-6*s},1.5,color)
+        ui.draw_line(ctx,c+{4.5*s,-1.5*s},c+{0,-6*s},1.5,color)
+    case .List:
+        for y in ([3]f32{-5,0,5}) {
+            ui.draw_circle(ctx,c+{-6*s,y*s},s,color)
+            ui.draw_line(ctx,c+{-2*s,y*s},c+{7*s,y*s},1.4,color)
+        }
+    case .Save:
+        p:=[5][2]f32{c+{-6*s,-6*s},c+{3*s,-6*s},c+{6*s,-3*s},c+{6*s,6*s},c+{-6*s,6*s}}
+        ui.draw_polyline(ctx,p[:],1.3,color,true)
+        ui.draw_rect_lines(ctx,{c.x-3*s,c.y-6*s,5*s,4*s},1.2,color)
+        ui.draw_rect_lines(ctx,{c.x-3*s,c.y+s,6*s,5*s},1.2,color)
+    case .Undo,.Redo:
+        sign:=User_Icon(kind)==.Redo?f32(-1):f32(1)
+        p:=[4][2]f32{c+{-6*s*sign,-2*s},c+{2*s*sign,-2*s},c+{5*s*sign,s},c+{5*s*sign,5*s}}
+        ui.draw_polyline(ctx,p[:],1.5,color)
+        ui.draw_line(ctx,p[0],c+{-2*s*sign,-6*s},1.5,color)
+        ui.draw_line(ctx,p[0],c+{-2*s*sign,2*s},1.5,color)
+    // The icons of the prototype drawn on a 24 unit grid, at two thirds.
+    case .Scene:
+        for y in ([2]f32{-2,2}) {ui.draw_line(ctx,c+{-5.33*s,y*s},c+{5.33*s,y*s},1.3*s,color)}
+        ui.draw_line(ctx,c+{-1.33*s,-6*s},c+{-2.67*s,6*s},1.3*s,color)
+        ui.draw_line(ctx,c+{2.67*s,-6*s},c+{1.33*s,6*s},1.3*s,color)
+    case .Copy:
+        ui.draw_rounded_stroke(ctx,{c.x-2*s,c.y-2*s,8.67*s,8.67*s},1.33*s,1.3*s,color)
+        back:=[8][2]f32{{-4.67,2},{-5.33,2},{-6.67,0.67},{-6.67,-5.33},{-5.33,-6.67},{0.67,-6.67},{2,-5.33},{2,-4.67}}
+        for &p in back {p=c+p*s}
+        ui.draw_polyline(ctx,back[:],1.3*s,color)
+    case .Trash:
+        ui.draw_line(ctx,c+{-6*s,-4*s},c+{6*s,-4*s},1.3*s,color)
+        can:=[6][2]f32{{4.67,-4},{4,5.33},{2.67,6.67},{-2.67,6.67},{-4,5.33},{-4.67,-4}}
+        lid:=[6][2]f32{{-2,-4},{-2,-5.33},{-1.33,-6},{1.33,-6},{2,-5.33},{2,-4}}
+        for &p in can {p=c+p*s}
+        for &p in lid {p=c+p*s}
+        ui.draw_polyline(ctx,can[:],1.3*s,color)
+        ui.draw_polyline(ctx,lid[:],1.3*s,color)
+        for x in ([2]f32{-1.33,1.33}) {ui.draw_line(ctx,c+{x*s,-0.67*s},c+{x*s,3.33*s},1.3*s,color)}
+    case .Hammer:
+        d,p:=[2]f32{0.7071,-0.7071},[2]f32{0.7071,0.7071}
+        ui.draw_line(ctx,c+{-5.5*s,5.5*s},c+{1*s,-1*s},1.6*s,color)
+        head:=c+{2.5*s,-2.5*s}
+        ui.draw_quad_colors(ctx,{head+(-p*4.5-d*1.8)*s,head+(p*4.5-d*1.8)*s,head+(p*4.5+d*1.8)*s,head+(-p*4.5+d*1.8)*s},{color,color,color,color})
+    case .Plugin:
+        for corner in ([4][2]f32{{-6,1.5},{-0.5,1.5},{-6,-4},{1.5,-6}}) {ui.draw_rounded_stroke(ctx,{c.x+corner.x*s,c.y+corner.y*s,4.5*s,4.5*s},1*s,1.2*s,color)}
+    case .Terrain:
+        peaks:=[5][2]f32{{-6.67,6},{-2.67,-6},{0,-0.67},{3.33,-4},{6.67,6}}
+        for &p in peaks {p=c+p*s}
+        ui.draw_polyline(ctx,peaks[:],1.3*s,color,true)
+    case .Terminal:
+        prompt:=[3][2]f32{c+{-5.33*s,3.33*s},c+{-1.33*s,-0.67*s},c+{-5.33*s,-4.67*s}}
+        ui.draw_polyline(ctx,prompt[:],1.3*s,color)
+        ui.draw_line(ctx,c+{0,4.67*s},c+{5.33*s,4.67*s},1.3*s,color)
+    case .Tree:
+        for box in ([3][2]f32{{-2,-6.67},{-6.67,2.67},{2.67,2.67}}) {ui.draw_rounded_stroke(ctx,{c.x+box.x*s,c.y+box.y*s,4*s,4*s},0.67*s,1.3*s,color)}
+        branch:=[6][2]f32{{-4.67,2.67},{-4.67,0.67},{-4,0},{4,0},{4.67,0.67},{4.67,2.67}}
+        for &p in branch {p=c+p*s}
+        ui.draw_polyline(ctx,branch[:],1.3*s,color)
+        ui.draw_line(ctx,c,c+{0,-2.67*s},1.3*s,color)
+    case .Down:
+        ui.draw_line(ctx,c+{0,-6*s},c+{0,6*s},1.5,color)
+        ui.draw_line(ctx,c+{-4.5*s,1.5*s},c+{0,6*s},1.5,color)
+        ui.draw_line(ctx,c+{4.5*s,1.5*s},c+{0,6*s},1.5,color)
+    case .Arrow_Left,.Arrow_Right,.Arrow_Up_Left,.Arrow_Up_Right,.Arrow_Down_Right,.Arrow_Down_Left:
+        // Toward its side or corner, with a head of two strokes at 45 degrees.
+        DIRECTIONS :: [6][2]f32{{-1,0},{1,0},{-0.7071,-0.7071},{0.7071,-0.7071},{0.7071,0.7071},{-0.7071,0.7071}}
+        directions:=DIRECTIONS
+        d:=directions[int(User_Icon(kind))-int(User_Icon.Arrow_Left)]
+        tip:=c+d*6*s
+        ui.draw_line(ctx,c-d*6*s,tip,1.5,color)
+        for side in ([2]f32{1,-1}) {
+            back:=[2]f32{-d.x*0.7071-side*d.y*0.7071,-d.y*0.7071+side*d.x*0.7071}
+            ui.draw_line(ctx,tip,tip+back*4.5*s,1.5,color)
+        }
+    case .Back:
+        chevron:=[3][2]f32{{2.5,-5},{-2.5,0},{2.5,5}}
+        for &p in chevron {p=c+p*s}
+        ui.draw_polyline(ctx,chevron[:],1.5*s,color)
+    case .Branch:
+        for ring in ([3][2]f32{{-4,-4.67},{-4,4.67},{4,-2.67}}) {ui.draw_ring(ctx,c+ring*s,1.6*s,1.2*s,color)}
+        ui.draw_line(ctx,c+{-4*s,-3*s},c+{-4*s,3*s},1.2*s,color)
+        curve:=[4][2]f32{{4,-1},{3.6,0.8},{1.2,1.8},{-3,3.4}}
+        for &p in curve {p=c+p*s}
+        ui.draw_polyline(ctx,curve[:],1.2*s,color)
+    case .Unlink:
+        halves:=[2][6][2]f32{{{-2.5,-0.5},{-4.5,1.5},{-4.6,3.4},{-3.2,4.8},{-1.2,4.8},{0.8,2.8}},{{2.5,0.5},{4.5,-1.5},{4.6,-3.4},{3.2,-4.8},{1.2,-4.8},{-0.8,-2.8}}}
+        for &half in halves {
+            for &p in half {p=c+p*s}
+            ui.draw_polyline(ctx,half[:],1.5*s,color)
+        }
+        for spark in ([4][2][2]f32{{{-3,-5},{-5,-7}},{{3,5},{5,7}},{{-5,-2},{-7,-2}},{{7,2},{5,2}}}) {ui.draw_line(ctx,c+spark[0]*s,c+spark[1]*s,1.5*s,color)}
+    case .Variant:
+        // A prefab cube with a plus: a new prefab made from it.
+        top,right,bottom_right,bottom:=c+[2]f32{-1.5,-7}*s,c+[2]f32{3.5,-4.5}*s,c+[2]f32{3.5,1}*s,c+[2]f32{-1.5,3.5}*s
+        bottom_left,left,middle:=c+[2]f32{-6.5,1}*s,c+[2]f32{-6.5,-4.5}*s,c+[2]f32{-1.5,-2}*s
+        cube:=[6][2]f32{top,right,bottom_right,bottom,bottom_left,left}
+        ui.draw_polyline(ctx,cube[:],1.3*s,color,true)
+        ui.draw_line(ctx,left,middle,1.3*s,color);ui.draw_line(ctx,right,middle,1.3*s,color);ui.draw_line(ctx,middle,bottom,1.3*s,color)
+        ui.draw_line(ctx,c+[2]f32{2.5,5}*s,c+[2]f32{7.5,5}*s,1.5*s,color)
+        ui.draw_line(ctx,c+[2]f32{5,2.5}*s,c+[2]f32{5,7.5}*s,1.5*s,color)
+    case .Command:
+        for x in ([2]f32{-2,2}) {ui.draw_line(ctx,c+{x*s,-4*s},c+{x*s,4*s},1.3*s,color)}
+        for y in ([2]f32{-2,2}) {ui.draw_line(ctx,c+{-4*s,y*s},c+{4*s,y*s},1.3*s,color)}
+        for corner in ([4][2]f32{{-4,-4},{4,-4},{4,4},{-4,4}}) {ui.draw_ring(ctx,c+corner*s,2*s,1.3*s,color)}
+    // Two people, the second behind the first.
+    case .Users:
+        ui.draw_ring(ctx,c+{-2*s,-3*s},2.6*s,1.3,color)
+        front:=[5][2]f32{c+{-7*s,6*s},c+{-6.3*s,3*s},c+{-2*s,1.4*s},c+{2.3*s,3*s},c+{3*s,6*s}}
+        ui.draw_polyline(ctx,front[:],1.3,color)
+        ui.draw_ring(ctx,c+{4.6*s,-2.4*s},2.1*s,1.2,color)
+        back:=[3][2]f32{c+{4.6*s,1.6*s},c+{6.8*s,2.6*s},c+{7.4*s,5.4*s}}
+        ui.draw_polyline(ctx,back[:],1.2,color)
+    case .Share:
+        a,b,d:=c+{-5*s,0},c+{5*s,-5*s},c+{5*s,5*s}
+        ui.draw_line(ctx,a,b,1.4,color);ui.draw_line(ctx,a,d,1.4,color)
+        for p in ([3][2]f32{a,b,d}) {ui.draw_ring(ctx,p,2*s,1.3,color)}
+    }
+}
+
+// ---------------------------------------------------------------- drag
+
+drag_begin :: proc(g:^Editor_Ui,d:Drag,label:string) {
+    g.drag=d
+    g.drag.press=g.ctx.pointer
+    g.drag.moved,g.drag.released=false,false
+    g.drag.label_length=copy(g.drag.label[:],label)
+}
+
+// True when a drag ends over a rectangle of the last frame.
+drag_dropped :: proc(g:^Editor_Ui,rect:ui.Rect) -> bool {
+    d:=&g.drag
+    return d.kind!=.None && d.moved && d.released && ui.rect_contains(rect,g.ctx.pointer)
+}
+
+// True while a drag passes over a rectangle of the last frame.
+drag_over :: proc(g:^Editor_Ui,rect:ui.Rect) -> bool {
+    d:=&g.drag
+    return d.kind!=.None && d.moved && !d.released && ui.rect_contains(rect,g.ctx.pointer)
+}
+
+@(private)
+drag_update :: proc(g:^Editor_Ui,frame:^platform.Input_Frame) {
+    d:=&g.drag
+    if d.kind==.None {return}
+    if !d.moved && linalg.distance(frame.mouse_position,d.press)>DRAG_THRESHOLD {d.moved=true}
+    if .Left in frame.mouse_released || .Left not_in frame.mouse_down {d.released=true}
+}
+
+// What is carried, next to the pointer.
+@(private)
+drag_chip :: proc(s:^Session,g:^Editor_Ui) {
+    d:=&g.drag
+    if d.kind==.None || !d.moved || d.released {return}
+    ctx:=g.ctx
+    th:=&ctx.theme
+    p:=ctx.pointer
+    if ui.box(ctx,{width=ui.FIT,height=ui.fixed(24),padding={8,0,10,0},gap=6,align_y=.Center,float={to=.Surface,offset={p.x+14,p.y+12},layer=ui.LAYER_TOOLTIP},fill=th.popup,stroke=th.border,radius=th.radius_control,shadow=true}) {
+        icon,color:=drag_icon(s,d)
+        ui.icon(ctx,icon,color,14)
+        ui.label(ctx,string(d.label[:d.label_length]),th.font_small,th.text)
+    }
+}
+
+@(private)
+drag_icon :: proc(s:^Session,d:^Drag) -> (ui.Icon,ui.Color) {
+    switch d.kind {
+    case .None:   return .None,{}
+    case .Preset: return d.icon,d.color
+    case .Entity: return .Group,GROUP_COLOR
+    case .Asset:  return asset_icon(s,d.asset_kind)
+    }
+    return .None,{}
+}
+
+// ---------------------------------------------------------------- the frame
+
+@(private)
+shell_build :: proc(s:^Session,w:core.World_Ref) {
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    g.cursor=.Default
+    g.items,g.item_count=g.next_items,g.next_item_count
+    g.next_item_count=0
+    g.drawing_count=0
+    if s.projects!=nil && s.projects.launcher {
+        projects_build(s)
+        return
+    }
+    // Behind a document in front, where the scene would be, the canvas of the prototype.
+    if scene_covered(s) {
+        if ui.box(ctx,{width=ui.fixed(ctx.size.x),height=ui.fixed(ctx.size.y),fill=th.well,float={to=.Surface}}) {}
+    }
+    player_processes_view_build(s)
+    bar_build(s,w)
+    l:=&g.layout
+    play:=play_shown(s)
+    document:=asset_document_active(s)
+    if play {
+        if s.ai.chat_open!=s.play_chat_open {play_chat_set(s,s.ai.chat_open)}
+    } else {
+        if s.ai.chat_open && l.library_tab!=.Ai {library_select(s,.Ai)}
+        if !s.ai.chat_open && l.library_tab==.Ai {library_select(s,l.previous_library_tab)}
+        if !material_document_shown(s) && s.ai.material.open {s.ai.material={}}
+    }
+    bars:=th.bar_height+toolbar_height(g)
+    top:=bars+th.margin
+    bottom_limit:=ctx.size.y-th.margin
+    // A docked panel takes its edge of the window for the whole height under
+    // the bars, and the scene what is left between them.
+    left_dock,right_dock:=dock_widths(s)
+    left_width:=left_dock>0?left_dock:min(width_of(LEFT_WIDTH,ctx.size.x),max(ctx.size.x-2*th.margin,120))
+    right_width:=right_dock>0?right_dock:width_of(RIGHT_WIDTH,ctx.size.x)
+    bottom_height:=clamp(l.bottom_height>0?l.bottom_height:BOTTOM_HEIGHT,BOTTOM_MIN,max(ctx.size.y*0.6,BOTTOM_MIN))
+    g.rects.left,g.rects.right,g.rects.bottom={},{},{}
+    // The clients of a game on the network take the viewport, as a Play does.
+    panels:=!play && !player_processes_view(s)
+    // A paused game shows what is selected of it.
+    details:=panels || s.mode==.Paused && !player_processes_view(s)
+
+    if (panels && l.left_open || play && s.play_chat_open) && !s.viewport.pick.active {
+        tabs,shown_tab:=library_tabs(s),library_tab_shown(s)
+        height:=min(max(bottom_limit-top,80),LEFT_PANEL_HEIGHT)
+        // Beside a document in front the panel takes the height of the window.
+        if document!=nil {height=max(bottom_limit-top,80)}
+        if left_dock>0 {height=max(ctx.size.y-bars,80)}
+        id:=shell_id(g,"left")
+        style:=ui.Panel_Float{width=ui.fixed(left_width),height=ui.fixed(height),padding=ui.padding_all(PANEL_PADDING),gap=8,anchor=.Top_Left,pivot=.Top_Left,offset={th.margin,top},stroke=SIDE_PANEL_RULE}
+        if left_dock>0 {style.offset,style.docked={0,bars},true}
+        if ui.panel(ctx,id,style) {
+            if ui.box(ctx,{width=ui.GROW,height=ui.fixed(th.control),gap=3,align_y=.Center}) {
+                if play {ui.label(ctx,"AI",th.font_small,th.text)} else {
+                    // Each tab a chip, as the tabs of the documents: the one shown lit, the others muted.
+                    // Editor and AI by name; the browser, the hierarchy, the world and source control by their icons.
+                    labels:=[Library_Tab]string{.Editor="Editor",.Content="",.Ai="AI",.Hierarchy="",.Git="",.World=""}
+                    icons:=[Library_Tab]ui.Icon{.Editor=.None,.Content=ui.icon_user(u8(User_Icon.Folder)),.Ai=.None,.Hierarchy=ui.icon_user(u8(User_Icon.List)),.Git=ui.icon_user(u8(User_Icon.Branch)),.World=.Layers}
+                    tips:=[Library_Tab]string{.Editor="",.Content="Content Browser",.Ai="",.Hierarchy="Hierarchy",.Git="Source control",.World="World"}
+                    for tab in ([]Library_Tab{.Editor,.Content,.Hierarchy,.World,.Ai,.Git}) {
+                        if tab not_in tabs {continue}
+                        shown:=shown_tab==tab
+                        color:=shown?ui.Color{}:th.text_muted
+                        // A merge that waits for its conflicts marks the tab while it lasts.
+                        if tab==.Git && s.git!=nil && s.git.merging {color=th.danger}
+                        if ui.button(ctx,shell_id(g,"library_tab",int(tab)+1),{label=labels[tab],icon=icons[tab],tip=tips[tab],style=shown?.Toggle:.Field,active=shown,icon_color=color,height=ctx.theme.control,size=th.font_small,icon_size=15,width=labels[tab]==""?28:0,padding=8,center=true}).clicked {library_select(s,tab)}
+                    }
+                }
+                ui.spacer(ctx)
+                if shown_tab==.Ai {
+                    ai_chat_bar_buttons(s)
+                    ai_chat_settings_button(s)
+                } else if !play {
+                    if shown_tab==.Content {content_create_button(s,shell_id(g,"library_create"),22)}
+                    content_settings_button(s,shell_id(g,"library_settings"),22)
+                }
+                // Folds the panel, as Tab does; the chat has its own buttons.
+                if shown_tab!=.Ai && ui.button(ctx,shell_id(g,"library_close"),{icon=ui.icon_user(u8(User_Icon.Panel_Close)),icon_color=th.text_muted,icon_size=15,tip="Hide panel",style=.Ghost,width=22,height=22}).clicked {
+                    if play {play_chat_set(s,false)} else {action_run(s,.Library_Panel)}
+                }
+            }
+            room:=height-2*PANEL_PADDING-th.control-8
+            ui.id_push(ctx,id)
+            switch shown_tab {
+            case .Editor: create_build(s,w,room,left_width-2*PANEL_PADDING)
+            case .Hierarchy:
+                // The entities of the scene, or the hierarchy the plugin of the document in front builds in this room.
+                if document==nil {outliner_build(s,w,left_width-2*PANEL_PADDING,room)}
+                else if ui.box(ctx,{id=shell_id(g,"hierarchy_room"),width=ui.GROW,height=ui.fixed(room),track=true}) {}
+            case .Content: content_build(s,w,room,left_width-2*PANEL_PADDING)
+            case .World: world_map_build(s,w,left_width-2*PANEL_PADDING,room)
+            case .Git: git_panel_build(s,left_width-2*PANEL_PADDING,room)
+            case .Ai: ai_chat_content_build(s,left_width-2*PANEL_PADDING,room)
+            }
+            ui.id_pop(ctx)
+            if shown_tab==.Ai {
+                ai_chat_history_build(s,left_width-2*PANEL_PADDING)
+                ai_chat_settings_build(s)
+            }
+            if !play {content_settings_build(s,shown_tab==.Content)}
+        }
+        if rect,found:=ui.widget_rect(ctx,id);found {g.rects.left=rect}
+        if left_dock>0 {dock_edge(s,.Left,left_width,bars)}
+    } else if (panels && !l.left_open || play && !s.play_chat_open) && !s.viewport.pick.active {
+        if ui.panel(ctx,shell_id(g,"library_reopen"),{width=ui.fixed(30),height=ui.fixed(30),offset={th.margin,top}}) {
+            if ui.button(ctx,shell_id(g,"library_reopen_button"),{icon=play?.Sparkle:ui.icon_user(u8(User_Icon.Panel_Open)),icon_size=15,style=.Ghost,width=30,height=30,tip=play?"":"Show panel"}).clicked {
+                if play {play_chat_set(s,true)} else {l.left_open=true}
+            }
+        }
+    }
+    if panels && l.bottom_open {
+        x0:=left_dock>0?left_dock+th.margin:l.left_open?th.margin+left_width+th.margin:th.margin
+        x1:=ctx.size.x-(right_dock>0?right_dock:0)-th.margin
+        y:=bottom_limit-bottom_height
+        id:=shell_id(g,"bottom")
+        if ui.panel(ctx,id,{width=ui.fixed(max(x1-x0,120)),height=ui.fixed(bottom_height),padding={PANEL_PADDING,8,PANEL_PADDING,PANEL_PADDING},gap=8,anchor=.Top_Left,pivot=.Top_Left,offset={x0,y}}) {
+            if ui.box(ctx,{width=ui.GROW,height=ui.fixed(28),gap=8,align_y=.Center}) {
+                tab:=int(l.bottom_tab)
+                ui.tabs(ctx,shell_id(g,"bottom_tabs"),{"Console","Build"},&tab,ui.fixed(200),28)
+                l.bottom_tab=Bottom_Tab(tab)
+                ui.spacer(ctx)
+                ui.id_push(ctx,id)
+                switch l.bottom_tab {
+                case .Console: console_tools(s)
+                case .Build:   build_tools(s)
+                }
+                ui.id_pop(ctx)
+                if ui.button(ctx,shell_id(g,"bottom_close"),{icon=.Cross,style=.Ghost,width=24,height=24}).clicked {l.bottom_open=false}
+            }
+            room:=bottom_height-PANEL_PADDING-8-28-8
+            ui.id_push(ctx,id)
+            switch l.bottom_tab {
+            case .Console: console_build(s,room)
+            case .Build:   build_panel_build(s,room)
+            }
+            ui.id_pop(ctx)
+        }
+        g.rects.bottom={x0,y,x1-x0,bottom_height}
+        if height,changed:=splitter(s,.Bottom,{x0,y-SPLITTER_WIDTH/2,x1-x0,SPLITTER_WIDTH},bottom_height,-1);changed {l.bottom_height=clamp(height,BOTTOM_MIN,ctx.size.y*0.6)}
+    }
+
+    _,_,deletion:=ai_review_shown(s)
+    // Docked, the panel of a tool takes the place of Details for the whole height too.
+    g.tool_top,g.tool_width,g.tool_dock=top,right_width,0
+    if right_dock>0 {g.tool_top,g.tool_dock=bars,ctx.size.y-bars}
+    // Docked, Details stays with nothing selected: the scene does not change size with the selection.
+    content:=len(s.selection.entities)>0 || deletion || git_review_shown(s)
+    if details && document==nil && l.right_open && ctx.size.x>=760 && (content || right_dock>0) && !s.viewport.pick.active && !tool_panel_shown(s) {
+        max_height:=bottom_limit-top
+        if l.bottom_open {max_height-=bottom_height+th.margin}
+        if right_dock>0 {max_height=ctx.size.y-bars}
+        max_height=max(max_height,120)
+        id:=shell_id(g,"right")
+        style:=ui.Panel_Float{width=ui.fixed(right_width),height=ui.FIT,anchor=.Top_Right,pivot=.Top_Right,offset={-th.margin,top},stroke=SIDE_PANEL_RULE}
+        if right_dock>0 {style.height,style.offset,style.docked=ui.fixed(max_height),{0,bars},true}
+        if ui.panel(ctx,id,style) {
+            ui.id_push(ctx,id)
+            // What is watched, or what another editor holds, is read, not edited.
+            read_only:=watching(s) || selection_held(s)
+            if read_only {ui.disabled_begin(ctx)}
+            if content {inspector_build(s,w,right_width,max_height)}
+            if read_only {ui.disabled_end(ctx)}
+            ui.id_pop(ctx)
+        }
+        if rect,found:=ui.widget_rect(ctx,id);found {g.rects.right=rect} else {g.rects.right={ctx.size.x-th.margin-right_width,top,right_width,120}}
+    }
+    if right_dock>0 {dock_edge(s,.Right,right_width,bars)}
+    if panels && material_document_shown(s) {material_document_build(s)}
+    camera_preview_bar(s)
+    play_history_bar(s)
+    inspector_popups(s,w)
+    tools_popups(s,w)
+    if s.projects!=nil && s.projects.shown {projects_popup_build(s)}
+    modal_build(s)
+    toast_build(s)
+    window_outline(s)
+}
+
+library_select :: proc(s:^Session,tab:Library_Tab) {
+    l:=&s.gui.layout
+    if l.library_tab!=.Ai {l.previous_library_tab=l.library_tab}
+    l.library_tab=tab
+    l.left_open=true
+    s.ai.chat_open=tab==.Ai
+    if tab==.Ai {s.ai.focus=true}
+    // The search of the browser takes the keyboard, as the message of AI does,
+    // unless an asset it reveals takes it.
+    if tab==.Content && s.content!=nil {s.content.focus_search=s.content.reveal=={}}
+}
+
+// What follows the frame of the UI: the rectangles the window moves by, its title, the cursor.
+@(private)
+shell_after :: proc(s:^Session) {
+    g:=s.gui
+    ctx:=g.ctx
+    p:=s.app.platform
+    g.rects.bar={0,0,ctx.size.x,ctx.theme.bar_height+toolbar_height(g)}
+    if g.cursor==.Default {
+        switch ctx.cursor {
+        case .Default:
+        case .Text: g.cursor=.Text
+        case .Resize_Horizontal: g.cursor=.Resize_Horizontal
+        }
+    }
+    if g.cursor!=g.cursor_set {
+        platform.window_set_cursor(p,g.cursor)
+        g.cursor_set=g.cursor
+    }
+    title:=fmt.tprintf("%s%s - Mirai",document_title(s.document),document_dirty(s)?" *":"")
+    if s.projects!=nil && s.projects.launcher {title="Mirai"} else if d:=asset_document_active(s);d!=nil {title=fmt.tprintf("%s%s - Mirai",asset_document_title(s,d),asset_document_dirty(s,d)?" *":"")}
+    if title!=string(g.title[:g.title_length]) {
+        g.title_length=copy(g.title[:],title)
+        platform.window_set_title(p,title)
+    }
+    if s.headless {return}
+    regions:[NAMED_CAPACITY+1]platform.Window_Region
+    count:=shell_regions(s,regions[:])
+    window:=platform.input_frame(p).window
+    platform.window_set_regions(p,regions[:count],!window.maximized && !window.fullscreen)
+}
+
+@(private)
+shell_regions :: proc(s:^Session,regions:[]platform.Window_Region) -> int {
+    g:=s.gui
+    count:=0
+    bar:=g.rects.bar
+    for entry in g.named[:g.named_count] {
+        rect,found:=ui.widget_rect(g.ctx,entry.id)
+        if !found || rect.y>=g.ctx.theme.bar_height {continue}
+        if entry.clip!=0 {
+            clip,clipped:=ui.widget_rect(g.ctx,entry.clip)
+            if !clipped {continue}
+            rect=ui.rect_intersect(rect,clip)
+            if rect.w<=0 || rect.h<=0 {continue}
+        }
+        regions[count]={{rect.x,rect.y,rect.w,rect.h},entry.kind}
+        count+=1
+    }
+    regions[count]={{bar.x,bar.y,bar.w,g.ctx.theme.bar_height},.Drag}
+    count+=1
+    return count
+}
+
+@(private)
+width_of :: proc "contextless" (width:Panel_Width,window:f32) -> f32 {
+    return clamp(window*width.fraction,width.min,width.max)
+}
+
+// The tabs of the left panel the document in front has.
+library_tabs :: proc(s:^Session) -> Library_Tabs {
+    type:=document_type(s)
+    table:=DOCUMENT_LIBRARY_TABS
+    tabs:=table[type]
+    if d:=asset_document_active(s);type==.Asset && d!=nil && asset_document_hierarchy(s,d.kind) {tabs+={.Hierarchy}}
+    return tabs
+}
+
+// The tab the left panel shows: the one chosen, or the first the document in
+// front has when it does not have that one. The choice is kept for the others.
+library_tab_shown :: proc(s:^Session) -> Library_Tab {
+    tabs:=library_tabs(s)
+    if s.gui.layout.library_tab in tabs {return s.gui.layout.library_tab}
+    for tab in ([]Library_Tab{.Content,.Ai,.Git,.Editor,.Hierarchy,.World}) {if tab in tabs {return tab}}
+    return .Content
+}
+
+// The type of the document in front, for the modes of the side panels.
+document_type :: proc(s:^Session) -> Document_Type {
+    switch {
+    case asset_document_active(s)!=nil: return .Asset
+    case document_is_prefab(s):         return .Prefab
+    }
+    return .Scene
+}
+
+// Whether a side panel docks for a type of document: its own choice, or the global mode.
+panel_mode :: proc "contextless" (l:^Layout,side:Panel_Side,type:Document_Type) -> Panel_Mode {
+    switch side==.Left?l.left_modes[type]:l.right_modes[type] {
+    case .Floating: return .Floating
+    case .Docked:   return .Docked
+    case .Global:
+    }
+    return side==.Left?l.left_mode:l.right_mode
+}
+
+// What the docked side panels take of the window, in points on whole
+// pixels: the scene gets the rest. An asset document draws its own right
+// side, and in a Play or while picking the panels are not there.
+dock_widths :: proc(s:^Session) -> (left,right:f32) {
+    g:=s.gui
+    if g==nil || g.ctx==nil || play_shown(s) || player_processes_view(s) || s.viewport!=nil && s.viewport.pick.active {return}
+    l:=&g.layout
+    window:=g.ctx.size.x
+    density:=s.app!=nil && s.app.density>0?s.app.density:1
+    width :: proc(dragged,default,window,density:f32) -> f32 {
+        value:=clamp(dragged>0?dragged:default,DOCK_MIN,max(window*0.4,DOCK_MIN))
+        return math.round(value*density)/density
+    }
+    type:=document_type(s)
+    if l.left_open && panel_mode(l,.Left,type)==.Docked {left=width(l.left_width,width_of(LEFT_WIDTH,window),window,density)}
+    switch type {
+    case .Asset:
+    case .Scene,.Prefab:
+        if l.right_open && window>=760 && panel_mode(l,.Right,type)==.Docked {right=width(l.right_width,width_of(RIGHT_WIDTH,window),window,density)}
+    }
+    return
+}
+
+// The inner edge of a docked panel: a rule, which a drag moves to widen or narrow it.
+dock_edge :: proc(s:^Session,side:Panel_Side,width,top:f32) {
+    g:=s.gui;ctx:=g.ctx;l:=&g.layout
+    x:=side==.Left?width:ctx.size.x-width
+    height:=max(ctx.size.y-top,1)
+    if ui.box(ctx,{width=ui.fixed(1),height=ui.fixed(height),fill=ctx.theme.divider,float={to=.Surface,offset={side==.Left?x-1:x,top},layer=ui.LAYER_PANEL}}) {}
+    if value,changed:=splitter(s,side==.Left?.Left:.Right,{x-SPLITTER_WIDTH/2,top,SPLITTER_WIDTH,height},width,side==.Left?1:-1);changed {
+        value:=clamp(value,DOCK_MIN,max(ctx.size.x*0.4,DOCK_MIN))
+        if side==.Left {l.left_width=value} else {l.right_width=value}
+    }
+}
+
+bottom_toggle :: proc(g:^Editor_Ui,tab:Bottom_Tab) {
+    if g.layout.bottom_open && g.layout.bottom_tab==tab {
+        g.layout.bottom_open=false
+        return
+    }
+    g.layout.bottom_open,g.layout.bottom_tab=true,tab
+}
+
+// The edge of a panel that resizes it. sign: whether the size grows with the pointer (1) or against it (-1).
+@(private)
+splitter :: proc(s:^Session,which:Splitter,rect:ui.Rect,size,sign:f32) -> (value:f32,changed:bool) {
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    id:=shell_id(g,"splitter",int(which))
+    it:ui.Interaction
+    horizontal:=which==.Bottom
+    if ui.box(ctx,{width=ui.fixed(rect.w),height=ui.fixed(rect.h),float={to=.Surface,offset={rect.x,rect.y},layer=ui.LAYER_PANEL+1}}) {
+        it=ui.interact(ctx,id)
+        lit:=it.active || it.hot
+        if ui.box(ctx,{id=id,width=ui.GROW,height=ui.GROW,fill=lit?ui.color_alpha(th.accent,110):{}}) {}
+    }
+    if it.hot || it.active {g.cursor=horizontal?.Resize_Vertical:.Resize_Horizontal}
+    if it.pressed {
+        g.splitter,g.splitter_start,g.splitter_press=which,size,ctx.pointer
+    }
+    if g.splitter!=which {return size,false}
+    if !it.active {
+        g.splitter=.None
+        return size,false
+    }
+    delta:=horizontal?ctx.pointer.y-g.splitter_press.y:ctx.pointer.x-g.splitter_press.x
+    return g.splitter_start+delta*sign,true
+}
+
+// ---------------------------------------------------------------- bar
+
+@(private)
+divider_vertical :: proc(ctx:^ui.Context) {
+    if ui.box(ctx,{width=ui.FIT,height=ui.FIT,padding={4,0,4,0}}) {
+        if ui.box(ctx,{width=ui.fixed(1),height=ui.fixed(20),fill=ctx.theme.border}) {}
+    }
+}
+
+@(private)
+action_button :: proc(s:^Session,action:Action,b:ui.Button,index:int) -> bool {
+    g:=s.gui
+    state:=action_state(s,action)
+    id:=shell_id(g,"action",int(action)+1+index*64)
+    named_add(g,id)
+    button:=b
+    button.disabled=button.disabled || state.disabled
+    if button.tip=="" && button.label=="" {labels:=ACTION_LABELS;button.tip=labels[action]}
+    if button.label!="" && state.label!="" {button.label=state.label}
+    if button.style==.Tab || button.style==.Ghost {button.active=button.active || state.checked}
+    if ui.button(g.ctx,id,button).clicked {return action_run(s,action)}
+    return false
+}
+
+@(private)
+bar_build :: proc(s:^Session,w:core.World_Ref) {
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    v:=s.viewport
+    if ui.menu_bar(ctx,shell_id(g,"bar")) {
+        if !s.headless && platform.WINDOW_CONTROLS==.Left_Traffic_Lights {ui.spacer(ctx,78,0)}
+        ui.icon(ctx,ui.icon_user(u8(User_Icon.Mirai)),MARK_ARM,30)
+        ui.spacer(ctx,6,0)
+        if ui.box(ctx,{width=ui.FIT,height=ui.GROW,gap=2,align_y=.Center}) {
+            if s.mode==.Play && !s.play_input_released {
+                // Inset as the text of a menu is, so the tabs keep their distance.
+                if ui.box(ctx,{width=ui.FIT,height=ui.GROW,padding={10,0,10,0},align_y=.Center}) {ui.label(ctx,"Playing",th.font,th.accent)}
+            } else {menus_build(s,w)}
+        }
+        documents_build(s)
+        if !s.headless && platform.WINDOW_CONTROLS==.Right {window_controls(s)}
+    }
+    if ui.box(ctx,{id=shell_id(g,"document_toolbar"),width=ui.fixed(ctx.size.x),height=ui.fixed(toolbar_height(g)),padding={10,0,10,0},gap=4,align_y=.Center,float={to=.Surface,offset={0,th.bar_height},layer=ui.LAYER_BAR},fill=th.panel,block=true}) {
+        document:=asset_document_active(s)
+        if document!=nil {
+            // An asset document: its save, undo and redo, and what it plays after them.
+            if ui.box(ctx,{width=ui.FIT,height=ui.GROW,gap=4,align_y=.Center}) {
+                action_button(s,.Save,{icon=ui.icon_user(u8(User_Icon.Save)),style=.Ghost,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON},0)
+                action_button(s,.Undo,{icon=ui.icon_user(u8(User_Icon.Undo)),style=.Ghost,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON},0)
+                action_button(s,.Redo,{icon=ui.icon_user(u8(User_Icon.Redo)),style=.Ghost,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON},0)
+            }
+            if ui.box(ctx,{id=shell_id(g,"asset_toolbar"),width=ui.GROW,height=ui.GROW,gap=8,padding={10,0,0,0},align_y=.Center,track=true}) {
+                if material_document_shown(s) {ui.label(ctx,material_document_kind(s),th.font,th.text_muted)}
+            }
+        } else if ui.box(ctx,{width=ui.FIT,height=ui.GROW,gap=4,align_y=.Center}) {
+            action_button(s,.Save,{icon=ui.icon_user(u8(User_Icon.Save)),style=.Ghost,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON,disabled=!document_dirty(s)},0)
+            action_button(s,.Undo,{icon=ui.icon_user(u8(User_Icon.Undo)),style=.Ghost,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON},0)
+            action_button(s,.Redo,{icon=ui.icon_user(u8(User_Icon.Redo)),style=.Ghost,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON},0)
+        }
+        // The tools go at the left, after the document: Move, Rotate and Scale,
+        // the snaps and the axes, the camera, and the tools of the plugins.
+        if s.mode!=.Play && s.mode!=.Watch && !scene_covered(s) {
+            divider_vertical(ctx)
+            if ui.box(ctx,{width=ui.FIT,height=ui.GROW,gap=4,align_y=.Center}) {
+                tools:=[3]Action{.Tool_Move,.Tool_Rotate,.Tool_Scale}
+                icons:=[3]ui.Icon{.Move,.Rotate,.Scale}
+                // Up to 1050 points the prototype narrows them.
+                for action,i in tools {
+                    action_button(s,action,{icon=icons[i],style=.Tab,width=25 if ctx.size.x<=1050 else TOOLBAR_BUTTON,height=TOOLBAR_BUTTON,icon_size=16},0)
+                }
+                divider_vertical(ctx)
+                snap_menu_build(s)
+                action_button(s,.Space,{icon=v.space==.Local?.Relative:.Absolute,style=.Ghost,icon_color=th.text_muted,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON,active=v.space==.Local},0)
+                camera_speed_build(s)
+                divider_vertical(ctx)
+                // A prefab document: its variants and its light, just before the tools.
+                if document_is_prefab(s) {
+                    prefab_variants_build(s)
+                    if ui.button(ctx,shell_id(g,"prefab_sun"),{icon=.Sun,tip="Preview sunlight",style=.Tab,active=v.preview_sun,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON}).clicked {v.preview_sun=!v.preview_sun}
+                    divider_vertical(ctx)
+                }
+                tools_menu_build(s)
+            }
+        }
+        // One distance between every control of the right end.
+        if ui.box(ctx,{width=ui.GROW,height=ui.GROW,gap=8,align_x=.End,align_y=.Center}) {
+            switch s.mode {
+            case .Edit: if name:=presence_followed_name(s);name!="" && ctx.size.x>=900 {ui.label(ctx,ai_chat_menu_label(ctx,fmt.tprintf("Following %s",name),220,th.font),th.font,th.accent)}
+            case .Play:
+            case .Simulate: if ctx.size.x>=900 {ui.label(ctx,"Simulating",th.font,th.accent)}
+            case .Paused,.Simulation_Paused: if ctx.size.x>=900 {ui.label(ctx,"Paused",th.font,th.accent)}
+            case .Watch: if ctx.size.x>=900 {ui.label(ctx,ai_chat_menu_label(ctx,fmt.tprintf("Watching %s",watch_name(s)),220,th.font),th.font,th.accent)}
+            }
+            if (ctx.size.x>=900 || s.mode==.Watch) && !scene_covered(s) {watch_bar_build(s)}
+            // The finder looks for entities of the scene, which an asset document hides.
+            if s.mode!=.Play && !scene_covered(s) {
+                action_button(s,.Find,{icon=ui.icon_user(u8(User_Icon.Search)),style=.Field,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON,icon_size=14},0)
+            }
+            if !document_is_prefab(s) && (document==nil || !asset_document_flat(s,document.kind)) {
+                if document==nil && s.mode!=.Play {view_mode_build(s)}
+                // The rate of the frame goes with Graphics, where it is turned on.
+                if graphics:=graphics_settings(s);graphics!=nil && graphics.show_fps {
+                    if ui.box(ctx,{id=shell_id(g,"fps"),width=ui.fixed(54),height=ui.fixed(th.control),align_x=.End,align_y=.Center,track=true}) {ui.label(ctx,fmt.tprintf("%.0f fps",s.app.stats.fps),th.font_small,th.text_muted)}
+                }
+                graphics:=shell_id(g,"graphics")
+                if ui.button(ctx,graphics,{icon=ui.icon_user(u8(User_Icon.Graphics)),tip="Graphics",style=.Field,width=TOOLBAR_BUTTON,height=TOOLBAR_BUTTON,active=ui.popup_is_open(ctx,graphics_popup(g))}).clicked {action_run(s,.Graphics)}
+            }
+            if s.mode!=.Play && ctx.size.x>=900 {share_button(s,BAR_BUTTON_HEIGHT)}
+            if !document_is_prefab(s) && document==nil {play_controls(s)}
+        }
+    }
+    g.rects.bar={0,0,ctx.size.x,th.bar_height+toolbar_height(g)}
+    stats_build(s,w)
+    share_build(s)
+    presence_menu_build(s)
+    viewport_menu_build(s)
+    variant_prompt_build(s)
+}
+
+// One menu for the tools of the plugins and the panels of the project: the
+// one chosen takes the place of Details. As in the prototype: icon, name and
+// arrow, the name as wide as "Tools" so the button never grows and a longer
+// one is cut; below 900 points, the icon and the arrow.
+TOOLS_MENU_POPUP_WIDTH :: 240
+TOOLS_LABEL_WIDTH :: 28 // the width of "Tools" in the prototype
+TOOLS_MENU_PARTS :: 58  // the width of the button besides its name: paddings, icon, gaps and arrow
+@(private)
+tools_menu_build :: proc(s:^Session) {
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    panels:=s.panels
+    shown:=panel_shown(panels)
+    count:=panels!=nil?len(panels.list):0
+    label,icon:="Tools",ui.icon_user(u8(User_Icon.Hammer))
+    for &item in g.items[:g.item_count] {
+        if item.kind!=.Tool {continue}
+        count+=1
+        if item.active {label,icon=string(item.label[:item.label_length]),item.icon}
+    }
+    if count==0 {return}
+    if shown!=nil {label,icon=base.text_get(shown.title[:]),.Layers}
+    id,popup:=shell_id(g,"tools"),shell_id(g,"tools_popup")
+    wide:=ctx.size.x>=900
+    active:=shown!=nil || s.viewport.plugin_tool!=0
+    it:=ui.interact(ctx,id,{.Focusable})
+    color:=th.on_accent if active else th.text
+    // Drawn as a field, so it reads as a menu and not as a button.
+    fill:=th.accent if active else (th.field_hover if it.hot else th.field)
+    stroke:=th.accent if active else (th.well_stroke_hover if it.hot else th.border)
+    if ui.box(ctx,{id=id,width=ui.FIT,height=ui.fixed(TOOLBAR_BUTTON),padding={10,0,8,0},gap=6,align_y=.Center,fill=fill,stroke=stroke,radius=th.radius_control}) {
+        ui.icon(ctx,icon,color,16)
+        if wide {
+            room:=max(ui.text_width(&ctx.font,"Tools",th.font),TOOLS_LABEL_WIDTH)
+            // A fifth wider than the prototype, all of it for the name.
+            room+=(room+TOOLS_MENU_PARTS)*0.2
+            ui.label(ctx,ai_chat_menu_label(ctx,label,room,th.font),th.font,color,room)
+        }
+        ui.icon(ctx,.Chevron_Down,color,12)
+    }
+    if it.hot && (!wide || label!="Tools") {ui.tooltip(ctx,label)}
+    if it.clicked {
+        anchor,_:=ui.widget_rect(ctx,id)
+        ui.popup_open(ctx,popup,{anchor.x,anchor.y+anchor.h,anchor.w,0})
+    }
+    if ui.popup(ctx,popup,{min_width=TOOLS_MENU_POPUP_WIDTH}) {
+        ui.id_push(ctx,popup)
+        defer ui.id_pop(ctx)
+        // Select leaves the tool or the panel shown: the gizmo and Details again.
+        if ui.menu_item(ctx,ui.id(ctx,"select"),"Select",{icon=.Move,checked=!active}) {
+            if s.viewport.plugin_tool!=0 {tool_leave(s)}
+            panel_show(s,panels,-1,false)
+        }
+        header:=false
+        for &item in g.items[:g.item_count] {
+            if item.kind!=.Tool {continue}
+            if !header {ui.menu_header(ctx,"Plugin tools");header=true}
+            item.clicked=ui.menu_item(ctx,item.id,string(item.label[:item.label_length]),{icon=item.icon,shortcut=string(item.shortcut[:item.shortcut_length]),checked=item.active})
+        }
+        if panels!=nil && len(panels.list)>0 {
+            ui.menu_header(ctx,"Panels")
+            for &p,i in panels.list {
+                if ui.menu_item(ctx,ui.id(ctx,"panel",i+1),base.text_get(p.title[:]),{icon=.Layers,checked=p.open}) {panel_show(s,panels,i,!p.open)}
+            }
+        }
+    }
+}
+
+// A group of a menu: its title and a segmented control of choices. Returns
+// the choice clicked; -1: none.
+menu_choices :: proc(s:^Session,id:ui.Id,title:string,labels:[]string,current:int,disabled:=false) -> (chosen:int) {
+    ctx:=s.gui.ctx
+    th:=&ctx.theme
+    chosen=-1
+    ui.menu_header(ctx,title)
+    ui.id_push(ctx,id)
+    defer ui.id_pop(ctx)
+    if ui.box(ctx,{width=ui.GROW,height=ui.FIT,padding={6,0,6,4}}) {
+        if ui.segments(ctx,ui.GROW,26) {
+            for label,i in labels {
+                if ui.button(ctx,ui.id(ctx,"choice",i+1),{label=label,style=.Tab,active=i==current,width=-1,height=22,size=th.font_small,center=true,padding=2,disabled=disabled}).clicked {chosen=i}
+            }
+        }
+    }
+    return
+}
+
+@(private)
+toolbar_height :: proc(g:^Editor_Ui) -> f32 {return g.toolbar_height if g.toolbar_height>0 else DOCUMENT_TOOLBAR_HEIGHT}
+
+// Puts the bottom of the document bar and of the toolbar on whole pixels at
+// the density of the window: two edges inside a pixel would let what is
+// behind them through.
+@(private)
+bars_snap :: proc(g:^Editor_Ui,density:f32) {
+    d:=density if density>0 else 1
+    snap :: proc(points,d:f32) -> f32 {return max(math.round(points*d),1)/d}
+    g.ctx.theme.bar_height=snap(ui.THEME_EDITOR.bar_height,d)
+    g.toolbar_height=snap(ui.THEME_EDITOR.bar_height+DOCUMENT_TOOLBAR_HEIGHT,d)-g.ctx.theme.bar_height
+}
+
+// The snaps of the three tools behind the magnet: a click on it turns them
+// off and back on, its arrow opens them, each with its toggle and its
+// increment, whose arrow offers the usual ones.
+SNAP_POPUP_WIDTH :: 236
+@(private)
+snap_menu_build :: proc(s:^Session) {
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    v:=s.viewport
+    id,open,popup:=shell_id(g,"snap"),shell_id(g,"snap_open"),shell_id(g,"snap_popup")
+    chosen:=v.snap || v.snap_rotate || v.snap_scale
+    on:=chosen && !v.snap_off
+    color:=th.on_accent if on else th.text_label
+    // One button of the bar, lit while it snaps: the magnet and its arrow.
+    if ui.box(ctx,{width=ui.FIT,height=ui.fixed(TOOLBAR_BUTTON),align_y=.Center,fill=th.accent_soft if on else {},stroke=th.accent if on else {},radius=th.radius_control}) {
+        magnet:=ui.interact(ctx,id,{.Focusable})
+        if ui.box(ctx,{id=id,width=ui.fixed(TOOLBAR_BUTTON-2),height=ui.GROW,align_x=.Center,align_y=.Center,fill=th.field_hover if magnet.hot else {},radius=th.radius_control}) {ui.icon(ctx,.Magnet,color,16)}
+        if magnet.hot {ui.tooltip(ctx,"Snap")}
+        if magnet.clicked {
+            v.snap_off=on
+            if !on && !chosen {v.snap=true}
+        }
+        arrow:=ui.interact(ctx,open,{.Focusable})
+        if ui.box(ctx,{id=open,width=ui.fixed(14),height=ui.GROW,align_x=.Center,align_y=.Center,fill=th.field_hover if arrow.hot || ui.popup_is_open(ctx,popup) else {},radius=th.radius_control}) {ui.icon(ctx,.Chevron_Down,color,10)}
+        if arrow.clicked {
+            from,_:=ui.widget_rect(ctx,id)
+            to,_:=ui.widget_rect(ctx,open)
+            ui.popup_open(ctx,popup,{from.x,to.y+to.h,to.x+to.w-from.x,0})
+        }
+    }
+    if ui.popup(ctx,popup,{width=SNAP_POPUP_WIDTH,padding=12,gap=6}) {
+        icons:=[Tool]ui.Icon{.Move=.Grid,.Rotate=.Rotate,.Scale=.Scale}
+        names:=[Tool]string{.Move="Position",.Rotate="Rotation",.Scale="Scale"}
+        for tool in Tool {
+            enabled:^bool
+            value:^f32
+            choices:[]f32
+            field:=ui.Number_Field{height=22,min=0.001,has_min=true}
+            switch tool {
+            case .Move: enabled,value,field.unit,field.speed=&v.snap,&v.grid,"m",0.01;choices={0.1,0.25,0.5,1,5,10,25}
+            case .Rotate: enabled,value,field.unit,field.speed,field.max,field.has_max=&v.snap_rotate,&v.rotate_increment,"°",0.5,360,true;choices={1,5,10,15,30,45,90}
+            case .Scale: enabled,value,field.unit,field.speed=&v.snap_scale,&v.scale_increment,"×",0.005;choices={0.05,0.1,0.25,0.5,1}
+            }
+            // As narrow as the typed field of a slider: the increment and its unit.
+            field.width=ui.fixed(46+ui.text_width(&ctx.font,field.unit,ui.FIELD_UNIT)+4)
+            if ui.box(ctx,{width=ui.GROW,height=ui.fixed(th.row),gap=6,align_y=.Center}) {
+                if ui.button(ctx,shell_id(g,"snap_toggle",int(tool)+1),{icon=icons[tool],style=.Tab,active=enabled^,width=24,height=22,icon_size=14}).clicked {enabled^=!enabled^}
+                ui.label(ctx,names[tool],th.font,th.text,0)
+                value_id,presets_open,presets:=shell_id(g,"snap_value",int(tool)+1),shell_id(g,"snap_presets_open",int(tool)+1),shell_id(g,"snap_presets",int(tool)+1)
+                if ui.box(ctx,{width=ui.FIT,height=ui.FIT,gap=2,align_y=.Center}) {
+                    typed:=f64(value^)
+                    if ui.number_field(ctx,value_id,&typed,field).changed {value^=f32(typed)}
+                    if ui.button(ctx,presets_open,{icon=.Chevron_Down,icon_size=10,icon_color=th.text_muted,style=.Field,width=18,height=22,active=ui.popup_is_open(ctx,presets)}).clicked {
+                        from,_:=ui.widget_rect(ctx,value_id)
+                        to,_:=ui.widget_rect(ctx,presets_open)
+                        ui.popup_open(ctx,presets,{from.x,to.y+to.h,to.x+to.w-from.x,0})
+                    }
+                }
+                if ui.popup(ctx,presets,{min_width=72,gap=1}) {
+                    for choice,index in choices {
+                        label:=fmt.tprintf("%s %s",ui.number_text(ctx,f64(choice)),field.unit)
+                        if ui.button(ctx,shell_id(g,"snap_choice",int(tool)*16+index+1),{label=label,style=.Ghost,active=value^==choice,width=-1,height=22,size=th.font_small}).clicked {
+                            value^=choice
+                            ui.popup_close(ctx,presets)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@(private)
+camera_speed_build :: proc(s:^Session) {
+    g:=s.gui
+    ctx:=g.ctx
+    id:=shell_id(g,"camera_speed")
+    popup:=shell_id(g,"camera_speed_popup")
+    speed:=f64(s.viewport.fly_speed>0?s.viewport.fly_speed:VIEW_FLY_SPEED)
+    if ui.button(ctx,id,{label=ui.number_text(ctx,speed,1),icon=ui.icon_user(u8(User_Icon.Camera)),style=.Ghost,height=TOOLBAR_BUTTON,size=ctx.theme.font,tip="Camera speed"}).clicked {
+        anchor,_:=ui.widget_rect(ctx,id)
+        ui.popup_open(ctx,popup,anchor)
+    }
+    if ui.popup(ctx,popup,{width=200,padding=12,gap=5}) {
+        if ui.property(ctx,"Speed") {
+            if ui.number_field(ctx,shell_id(g,"camera_speed_value"),&speed,{min=f64(VIEW_FLY_SPEED)*0.2,max=f64(VIEW_FLY_SPEED)*2.5,has_min=true,has_max=true,decimals=1,speed=0.1}).changed {s.viewport.fly_speed=f32(speed)}
+        }
+    }
+}
+
+@(private)
+play_controls :: proc(s:^Session) {
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    stop:=ui.Button{icon=.Stop,style=.Tab,icon_color=th.accent,width=BAR_BUTTON_HEIGHT,height=BAR_BUTTON_HEIGHT}
+    if s.mode==.Watch {
+        if ui.segments(ctx,ui.FIT,30) {action_button(s,.Stop,stop,0)}
+        return
+    }
+    // Who has the keyboard and the mouse says how to get them back.
+    eject :: proc(s:^Session) {
+        if player_processes_captured(s) || s.mode==.Play && !s.play_input_released {
+            action_button(s,.Release_Input,{label="Eject (F1)",style=.Field,height=BAR_BUTTON_HEIGHT,size=s.gui.ctx.theme.font_small},0)
+        }
+    }
+    providers_:=providers(s)
+    plugin:=&providers_.play
+    plugin_label :: proc(s:^Session,plugin:^Play_Provider) -> string {return plugin.label!=nil?plugin.label(s):""}
+    if s.mode==.Edit && play_plugin_active(s) {
+        if label:=plugin_label(s,plugin);ctx.size.x>=900 && label!="" {ui.label(ctx,label,th.font,th.accent)}
+        eject(s)
+        if ui.segments(ctx,ui.FIT,30) {action_button(s,.Stop,stop,0)}
+        return
+    }
+    if s.mode==.Edit {
+        kind:=&g.layout.run_kind
+        players:=s.play_players
+        run:=RUN_ACTIONS[kind^]
+        // The mode keeps its icon whoever plays it: online players are said in the menu.
+        icon:=action_icon(run)
+        if ui.box(ctx,{width=ui.FIT,height=ui.fixed(th.control),gap=0,align_y=.Center,fill=th.accent,radius=th.radius_control}) {
+            action_button(s,run,{icon=icon,style=.Accent,width=28,height=ctx.theme.control,icon_size=14},0)
+            id:=shell_id(g,"run_menu")
+            if ui.button(ctx,id,{icon=.Chevron_Down,style=.Accent,width=18,height=ctx.theme.control,icon_size=10,tip="Execution mode"}).clicked {
+                anchor,_:=ui.widget_rect(ctx,id)
+                ui.popup_open(ctx,shell_id(g,"run_popup"),anchor)
+            }
+        }
+        if ui.popup(ctx,shell_id(g,"run_popup"),{align_right=true}) {
+            // Choosing a mode also runs it.
+            labels:=ACTION_LABELS
+            for k in Run_Kind {
+                action:=RUN_ACTIONS[k]
+                if ui.menu_item(ctx,shell_id(g,"run_kind",int(k)+1),labels[action],{icon=action_icon(action),shortcut=k==.Play?"F5":"",checked=kind^==k}) {
+                    kind^=k
+                    action_run(s,action)
+                }
+            }
+            if players!=nil {
+                // The players of Play split the screen; a plugin that plays
+                // them on the network shows them, and how they share, itself.
+                if providers_.plays && plugin.menu!=nil {plugin.menu(s)} else {
+                    labels:=[PLAYER_PROCESSES]string{"1","2","3","4"}
+                    if chosen:=menu_choices(s,shell_id(g,"run_players"),"Players",labels[:],players.players-1);chosen>=0 {players.players=chosen+1}
+                }
+            }
+        }
+        return
+    }
+    if simulating(s) && !camera_previewing(s) {action_button(s,.Apply_Simulation,{label="Apply transforms",style=.Field,height=BAR_BUTTON_HEIGHT},0)}
+    if camera_previewing(s) {
+        action_button(s,.Camera_Discard,{label="Discard",style=.Field,height=BAR_BUTTON_HEIGHT},0)
+        action_button(s,.Camera_Keep,{label="Keep",style=.Accent,height=BAR_BUTTON_HEIGHT},0)
+    }
+    if label:=plugin_label(s,plugin);play_plugin_active(s) && ctx.size.x>=900 && label!="" {ui.label(ctx,label,th.font,th.accent)}
+    eject(s)
+    if ui.segments(ctx,ui.FIT,30) {
+        pause:=play_paused(s)?ui.Icon.Play:ui.icon_user(u8(User_Icon.Pause))
+        action_button(s,.Pause,{icon=pause,style=.Tab,icon_color=th.text,width=BAR_BUTTON_HEIGHT,height=BAR_BUTTON_HEIGHT},0)
+        action_button(s,.Stop,stop,0)
+    }
+}
+
+@(private)
+bottom_toggle_open :: proc(g:^Editor_Ui,tab:Bottom_Tab) {g.layout.bottom_open,g.layout.bottom_tab=true,tab}
+
+@(private)
+window_controls :: proc(s:^Session) {
+    g:=s.gui
+    ctx:=g.ctx
+    p:=s.app.platform
+    th:=&ctx.theme
+    window:=platform.input_frame(p).window
+    // Flush with the top right corner of the window, past the 10 points of
+    // padding of the bar, so a pointer thrown at the corner lands on Close.
+    ui.spacer(ctx,3*WINDOW_CONTROL_WIDTH-10,0)
+    if ui.box(ctx,{width=ui.FIT,height=ui.fixed(th.bar_height),float={to=.Parent,anchor=.Top_Right,pivot=.Top_Right}}) {
+        for control in ([3]User_Icon{.Minimize,.Maximize,.Close}) {
+            id:=shell_id(g,"window_control",int(control)+1)
+            named_add(g,id,.Control)
+            if !ui.button(ctx,id,{icon=ui.icon_user(u8(control)),icon_color=th.text_muted,style=.Ghost,width=WINDOW_CONTROL_WIDTH,height=th.bar_height,center=true}).clicked {continue}
+            #partial switch control {
+            case .Minimize: platform.window_minimize(p)
+            case .Maximize: platform.window_set_maximized(p,!window.maximized)
+            case .Close:    quit_request(s)
+            }
+        }
+    }
+}
+
+@(private)
+Menu_Entry :: struct {action:Action,group:int}
+
+@(private)
+menus_build :: proc(s:^Session,w:core.World_Ref) {
+    g:=s.gui
+    ctx:=g.ctx
+    file:=[?]Menu_Entry{{.New,0},{.Open,0},{.Projects,0},{.Save,1},{.Save_All,1},{.Save_As,1},{.Import,2},{.Build,3},{.Settings,3},{.Quit,4}}
+    view:=[?]Menu_Entry{{.Focus,0},{.Reset_Camera,0},{.Scene_Thumbnail,0},{.Grid,1},{.Indicators,1},{.Output_Frame,1},{.Studio_Light,1},{.Graphics,1},{.Inspector_Panel,2},{.Console_Panel,2},{.Build_Panel,2}}
+    menu_entries(s,"File",1,file[:])
+    menu_entries(s,"View",4,view[:])
+}
+
+@(private)
+menu_entries :: proc(s:^Session,title:string,index:int,entries:[]Menu_Entry) {
+    g:=s.gui
+    ctx:=g.ctx
+    id:=shell_id(g,"menu",index)
+    named_add(g,id)
+    if ui.menu(ctx,id,title) {
+        labels,shortcuts:=ACTION_LABELS,ACTION_SHORTCUTS
+        group:=entries[0].group
+        for entry,at in entries {
+            if entry.group!=group {ui.menu_separator(ctx)}
+            group=entry.group
+            state:=action_state(s,entry.action)
+            label:=state.label!=""?state.label:labels[entry.action]
+            shortcut:=entry.action==.Deselect?"Esc":shortcut_text(shortcuts[entry.action])
+            if ui.menu_item(ctx,shell_id(g,"menu_item",index*100+at+1),label,{icon=action_icon(entry.action),shortcut=shortcut,checked=state.checked,disabled=state.disabled}) {action_run(s,entry.action)}
+        }
+        if title=="View" {
+            ui.menu_separator(ctx)
+            for &item in g.items[:g.item_count] {
+                if item.kind!=.View {continue}
+                item.clicked=ui.menu_item(ctx,item.id,string(item.label[:item.label_length]),{checked=item.active})
+            }
+            if ui.menu_item(ctx,shell_id(g,"stats"),"Stats",{icon=.Gauge}) {
+                anchor,_:=ui.widget_rect(ctx,id)
+                ui.popup_open(ctx,stats_popup(g),anchor)
+            }
+            ui.menu_separator(ctx)
+            if ui.menu_item(ctx,shell_id(g,"shortcuts"),labels[.Shortcuts],{icon=action_icon(.Shortcuts),shortcut=shortcut_text(shortcuts[.Shortcuts])}) {action_run(s,.Shortcuts)}
+        }
+    }
+}
+
+
+@(private)
+stats_popup :: proc(g:^Editor_Ui) -> ui.Id {return shell_id(g,"stats_popup")}
+
+// What the renderer and the editor are doing: the popup of the Stats button.
+@(private)
+stats_build :: proc(s:^Session,w:core.World_Ref) {
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    popup:=stats_popup(g)
+    if !ui.popup_is_open(ctx,popup) {return}
+    row :: proc(ctx:^ui.Context,name,value:string) {
+        th:=&ctx.theme
+        if ui.box(ctx,{width=ui.GROW,height=ui.fixed(th.row),gap=8,align_y=.Center}) {
+            ui.label(ctx,name,th.font_small,th.text_muted)
+            ui.spacer(ctx)
+            ui.label(ctx,value,th.font_small,th.text)
+        }
+    }
+    if ui.popup(ctx,popup,{width=260,align_right=true,padding=12,gap=2}) {
+        ui.label(ctx,"Stats",th.font_title,th.text,font=ui.FONT_SEMIBOLD)
+        app:=s.app
+        row(ctx,"Frames per second",fmt.tprintf("%.0f",s.app.stats.fps))
+        row(ctx,"Frame",fmt.tprintf("%.2f ms",app.stats.frame_ms))
+        row(ctx,"Game",fmt.tprintf("%.2f ms",app.stats.game_ms))
+        row(ctx,"Editor",fmt.tprintf("%.2f ms",app.stats.editor_ms))
+        row(ctx,"Entities",fmt.tprintf("%d",core.world_entities(w).alive))
+        row(ctx,"Undo steps",fmt.tprintf("%d",edits_undo_count(s.edits)))
+        if r:=app.renderer;r!=nil {
+            stats:=gpu.renderer_stats(r)
+            row(ctx,"Render",fmt.tprintf("%.2f ms",app.stats.render_ms))
+            row(ctx,"GPU",fmt.tprintf("%.2f ms",stats.gpu_ms))
+            row(ctx,"Resolution",fmt.tprintf("%d x %d",stats.render_width,stats.render_height))
+            row(ctx,"Instances",fmt.tprintf("%d of %d",stats.visible_instances,stats.instances))
+            row(ctx,"Device",stats.device_name)
+        } else {
+            row(ctx,"Renderer","None")
+        }
+    }
+}
+
+// ---------------------------------------------------------------- dialogs and notices
+
+@(private)
+modal_build :: proc(s:^Session) {
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    switch g.modal {
+    case .None:
+    case .Recovery:
+        if ui.modal(ctx,shell_id(g,"recovery"),{width=440}) {
+            ui.label(ctx,"Recover unsaved changes?",th.font_title,th.text,font=ui.FONT_SEMIBOLD)
+            if s.recovery.tabs {
+                ui.label(ctx,"Every tab of the editor that ended",th.font_small,th.text_muted)
+            } else {
+                for &found in s.recovery.found {
+                    path:=base.text_get(found.scene?found.info.source[:]:found.source[:])
+                    ui.label(ctx,path!=""?filepath.base(path):"Untitled",th.font_small,th.text_muted)
+                }
+            }
+            if s.recovery.assets {ui.label(ctx,"Assets with unsaved changes",th.font_small,th.text_muted)}
+            if ui.box(ctx,{width=ui.GROW,height=ui.fixed(28),gap=8,align_x=.End,align_y=.Center}) {
+                if ui.button(ctx,shell_id(g,"recover"),{label="Recover",style=.Accent,width=92,height=28,center=true}).clicked {s.requests+={.Recover}}
+                if ui.button(ctx,shell_id(g,"discard_recovery"),{label="Discard",style=.Field,width=92,height=28,center=true}).clicked {s.requests+={.Discard_Recovery}}
+            }
+        }
+    case .Confirm:
+        if ui.modal(ctx,shell_id(g,"confirm"),{width=380}) {
+            // Agents still working are asked about too, with nothing unsaved.
+            scene:=document_dirty(s) && !pending_plugin(g.pending) && g.pending!=.Asset_Close
+            unsaved:=scene || len(g.confirm_assets)>0
+            working,waiting:=ai_working_count(s),ai_review_waiting_count(s)
+            agents:=working==1?"An agent is working":fmt.tprintf("%d agents are working",working)
+            others:=scene_switch_others(s,g.pending)
+            ui.label(ctx,unsaved?"Unsaved changes":others!=""?"Change the scene?":agents,th.font_title,th.text,font=ui.FONT_SEMIBOLD)
+            if others!="" {ui.paragraph(ctx,others,th.font_small,th.text_muted)}
+            if pending_plugin(g.pending) {
+                ui.label(ctx,"The players read the saved files",th.font_small,th.text_muted)
+            } else if unsaved {
+                ui.label(ctx,len(g.confirm_assets)>0?"Save the changes before going on?":document_title(s.document),th.font_small,th.text_muted)
+            }
+            if unsaved {unsaved_list(s,scene)} else {ui.label(ctx,document_title(s.document),th.font_small,th.text_muted)}
+            if (unsaved || others!="") && working>0 {ui.label(ctx,fmt.tprintf("%s: %s",agents,working==1?"it stops":"they stop"),th.font_small,th.text_muted)}
+            if waiting>0 {ui.label(ctx,fmt.tprintf("%d agent %s waiting for review",waiting,waiting==1?"change":"changes"),th.font_small,th.text_muted)}
+            if ui.box(ctx,{width=ui.GROW,height=ui.fixed(28),gap=8,align_x=.End,align_y=.Center}) {
+                choices:=[3]Choice{.Save,.Discard,.Cancel}
+                labels:=[3]string{"Save","Discard","Cancel"}
+                widths:=[3]f32{92,92,92}
+                shown:=choices[:]
+                verb:="Play"
+                if p:=providers(s);g.pending==.Play_Plugin && p.plays && p.play.verb!=nil {verb=p.play.verb(s)}
+                if g.pending==.Play_Plugin {labels[0],labels[1],widths[1]=fmt.tprintf("Save and %s",strings.to_lower(verb,context.temp_allocator)),fmt.tprintf("%s without",verb),110}
+                if !unsaved {
+                    // Nothing to save: going on is all that is asked.
+                    pending_labels:=[Pending]string{.None="Continue",.New="New",.Close="Close",.Quit="Quit",.Play_Plugin="Play",.Asset_Close="Close",.Open_Scene="Open"}
+                    labels[1]=pending_labels[g.pending]
+                    if g.pending==.Play_Plugin {labels[1]=verb}
+                    shown=choices[1:]
+                }
+                for choice in shown {
+                    if ui.button(ctx,shell_id(g,"confirm_choice",int(choice)+1),{label=labels[int(choice)],style=choice==.Save || !unsaved && choice==.Discard?.Accent:.Field,width=widths[int(choice)],height=28,center=true}).clicked {confirm_resolve(s,choice)}
+                }
+            }
+        }
+    case .Save_Changes:
+        if ui.modal(ctx,shell_id(g,"save_changes"),{width=380}) {
+            ui.label(ctx,"Save changes",th.font_title,th.text,font=ui.FONT_SEMIBOLD)
+            ui.label(ctx,"The scene uses assets with unsaved changes.",th.font_small,th.text_muted)
+            unsaved_list(s,true)
+            if ui.box(ctx,{width=ui.GROW,height=ui.fixed(28),gap=8,align_x=.End,align_y=.Center}) {
+                if ui.button(ctx,shell_id(g,"save_changes_cancel"),{label="Cancel",style=.Field,width=92,height=28,center=true}).clicked {modal_close(g)}
+                if ui.button(ctx,shell_id(g,"save_changes_scene"),{label="Scene only",style=.Field,width=92,height=28,center=true}).clicked {save_changes_resolve(s,false)}
+                if ui.button(ctx,shell_id(g,"save_changes_all"),{label="Save all",style=.Accent,width=92,height=28,center=true}).clicked {save_changes_resolve(s,true)}
+            }
+        }
+    case .Shortcuts:
+        closed:=false
+        defer if closed {g.modal=.None}
+        if ui.modal(ctx,shell_id(g,"shortcuts"),{width=440,scroll=&g.modal_scroll,close=&closed}) {
+            ui.label(ctx,"Keyboard shortcuts",th.font_title,th.text,font=ui.FONT_SEMIBOLD)
+            labels,shortcuts:=ACTION_LABELS,ACTION_SHORTCUTS
+            row :: proc(ctx:^ui.Context,name,keys:string) {
+                th:=&ctx.theme
+                if ui.box(ctx,{width=ui.GROW,height=ui.fixed(th.row),align_y=.Center}) {
+                    ui.label(ctx,name,th.font_small,th.text)
+                    ui.spacer(ctx)
+                    ui.label(ctx,keys,th.font_small,th.text_muted)
+                }
+            }
+            for action in Action {
+                if !shortcuts[action].set {continue}
+                row(ctx,labels[action],shortcut_text(shortcuts[action]))
+            }
+        }
+    case .Settings: settings_modal(s)
+    case .Delete_Asset: asset_delete_modal(s)
+    case .Git_Discard:  git_discard_modal(s)
+    }
+}
+
+// What a question about unsaved changes saves or discards: the scene when
+// scene is set, and its assets, a row each with the kind of the file.
+@(private)
+unsaved_list :: proc(s:^Session,scene:bool) {
+    g:=s.gui
+    ctx:=g.ctx
+    if ui.box(ctx,{width=ui.GROW,height=ui.FIT,direction=.Column,gap=2,padding={0,6,0,6}}) {
+        if scene {modal_row(ctx,document_is_prefab(s)?.Prefab:.Scene,document_title(s.document),document_is_prefab(s)?"Prefab":"Scene")}
+        registry:=&s.app.assets.registry
+        for path in g.confirm_assets {
+            if asset.registry_outside(path) {
+                modal_row(ctx,.Material,asset_name(path),"Program")
+            } else if file,found:=asset.registry_find_path(registry,path);found && file.state==.Asset {
+                modal_asset_row(s,ctx,file)
+            } else {
+                modal_row(ctx,.None,asset_name(path),"File")
+            }
+        }
+    }
+}
+
+// A file a question names: its icon, its name and its kind.
+@(private)
+modal_row :: proc(ctx:^ui.Context,icon:ui.Icon,name,kind:string) {
+    th:=&ctx.theme
+    if ui.box(ctx,{width=ui.GROW,height=ui.fixed(th.control),gap=8,padding={8,0,8,0},align_y=.Center,fill=th.field,radius=4}) {
+        ui.icon(ctx,icon,th.text_muted,14)
+        ui.label(ctx,name,th.font_small,th.text,0)
+        ui.spacer(ctx)
+        ui.label(ctx,kind,th.font_small,th.text_muted)
+    }
+}
+
+@(private)
+modal_asset_row :: proc(s:^Session,ctx:^ui.Context,file:^asset.Registry_File) {
+    icon,_:=asset_icon(s,file.kind)
+    kind:="File"
+    if info,known:=asset.kind_info(file.kind);known {kind=strings.to_upper_camel_case(info.name,context.temp_allocator)}
+    modal_row(ctx,icon,asset_name(file.path),kind)
+}
+
+// A line around the window that sets it apart from what is behind it, as
+// the panels have theirs; not while it fills the screen.
+WINDOW_RULE :: ui.Color{86,89,99,255}
+// The border of the panels at the sides of the viewport: lighter than that of
+// the theme, so they stand apart from the scene.
+SIDE_PANEL_RULE :: ui.Color{72,72,84,255}
+
+@(private)
+window_outline :: proc(s:^Session) {
+    if s.headless || s.app==nil {return}
+    window:=platform.input_frame(s.app.platform).window
+    if window.maximized || window.fullscreen {return}
+    ctx:=s.gui.ctx
+    if ui.box(ctx,{width=ui.fixed(ctx.size.x),height=ui.fixed(ctx.size.y),stroke=WINDOW_RULE,stroke_width=1,float={to=.Surface,layer=ui.LAYER_MODAL+1}}) {}
+}
+
+@(private)
+toast_build :: proc(s:^Session) {
+    if s.toast_seconds<=0 || s.toast_length==0 {return}
+    g:=s.gui
+    ctx:=g.ctx
+    th:=&ctx.theme
+    offset:=-2*th.margin
+    if g.layout.bottom_open {offset-=g.rects.bottom.h+th.margin}
+    if ui.panel(ctx,shell_id(g,"toast"),{width=ui.FIT,height=ui.FIT,padding={12,8,12,8},anchor=.Bottom_Center,pivot=.Bottom_Center,offset={0,offset},layer=ui.LAYER_TOAST,popup=true}) {
+        ui.label(ctx,string(s.toast[:s.toast_length]),th.font,th.text)
+    }
+}

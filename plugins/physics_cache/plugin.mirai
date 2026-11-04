@@ -1,0 +1,6 @@
+{
+  "name": "physics_cache",
+  "version": "0.1.0",
+  "dependencies": ["physics", "destruct"],
+  "parts": ["Runtime"]
+}

@@ -1,0 +1,123 @@
+package main
+
+import "core:fmt"
+import "mirai:core"
+import game "mirai:demo/game"
+import destruct "plugins:destruct/runtime"
+import phys "plugins:physics/runtime"
+import render "mirai:engine/render"
+import "mirai:host"
+import sim "plugins:physics/runtime/sim"
+import "mirai:std/base"
+import "mirai:std/jobs"
+import mm "mirai:std/math"
+import cache "plugins:physics_cache/runtime"
+
+@(private)
+Physics_Bake :: struct {
+    entities:core.Entities,
+    transforms:core.Table(core.Transform),
+    parents:core.Table(core.Parent),
+    meshes:core.Table(render.Mesh_Renderer),
+    tints:core.Table(render.Tint),
+    configs:core.Table(destruct.Destructible),
+    colliders:core.Table(phys.Collider),
+    states:core.Table(destruct.Destructible_State),
+    groups:core.Table(destruct.Destructible_Group),
+    elsewhere:core.Table(render.Drawn_Elsewhere),
+    ids:core.Table(core.Id),
+}
+
+@(private)
+physics_bake_settle :: proc(world,shared,editor:rawptr) {
+    w:=cast(^Physics_Bake)world
+    core.table_settle(&w.transforms,&w.entities);core.table_settle(&w.parents,&w.entities)
+    core.table_settle(&w.meshes,&w.entities);core.table_settle(&w.tints,&w.entities)
+    core.table_settle(&w.configs,&w.entities);core.table_settle(&w.colliders,&w.entities);core.table_settle(&w.states,&w.entities);core.table_settle(&w.groups,&w.entities)
+    core.table_settle(&w.elsewhere,&w.entities);core.table_settle(&w.ids,&w.entities)
+    core.entities_settle(&w.entities)
+}
+
+@(private)
+physics_bake_free :: proc(w:^Physics_Bake) {
+    core.table_destroy(&w.transforms);core.table_destroy(&w.parents);core.table_destroy(&w.meshes);core.table_destroy(&w.tints)
+    core.table_destroy(&w.configs);core.table_destroy(&w.colliders);core.table_destroy(&w.states);core.table_destroy(&w.groups)
+    core.table_destroy(&w.elsewhere);core.table_destroy(&w.ids);core.entities_destroy(&w.entities)
+}
+
+@(private)
+physics_cache_bake :: proc(o:^Out,fracture,mesh:base.Asset_Id) -> base.Asset_Id {
+    id:=id_of("physics_cache","recorded")
+    assets:host.Assets
+    if !host.assets_init(&assets,{root=path(o,"assets"),capacity=128}) {o.failed=true;return id}
+    defer host.assets_destroy(&assets)
+    app:=host.App{allocator=context.allocator,assets=&assets}
+    if !jobs.system_init(&app.jobs,{threads=0}) {o.failed=true;return id}
+    defer jobs.system_destroy(&app.jobs)
+    world:Physics_Bake;core.entities_init(&world.entities);defer physics_bake_free(&world)
+    tables:=[3]core.Table_Info{
+        {name="Mesh_Renderer",type=render.Mesh_Renderer,info=type_info_of(render.Mesh_Renderer),offset=offset_of(Physics_Bake,meshes)},
+        {name="Parent",type=core.Parent,info=type_info_of(core.Parent),offset=offset_of(Physics_Bake,parents)},
+        {name="Tint",type=render.Tint,info=type_info_of(render.Tint),offset=offset_of(Physics_Bake,tints)},
+    }
+    info:=core.World_Info{entities=offset_of(Physics_Bake,entities),tables=tables[:],settle=physics_bake_settle}
+    physics:phys.Physics_State;wd:=sim.world_desc_default()
+    wd.body_capacity,wd.shape_capacity,wd.contact_capacity,wd.joint_capacity=128,256,1024,1
+    wd.hull_capacity=128
+    wd.gravity={}
+    if !sim.world_init(&physics.world,wd) {o.failed=true;return id}
+    physics.ready=true;defer phys.state_destroy(&physics)
+    fractures:destruct.Fracture_State;defer destruct.fracture_state_destroy(&fractures)
+    fracture_settings:=destruct.Destruct_Settings{destructibles=1,pieces=128,connections=512}
+    geometry:destruct.Destruct_Cache;defer destruct.cache_destroy(&app,&geometry)
+    requests:destruct.Destruct_Requests;events:destruct.Destruct_Events
+    alone:core.Network
+    defer core.value_free(&requests,type_info_of(destruct.Destruct_Requests))
+    defer core.value_free(&events,type_info_of(destruct.Destruct_Events))
+    floor:=sim.body_create(&physics.world,{type=.Static,position={0,-.25,0}})
+    floor_shape:=sim.SHAPE_DESC_DEFAULT;floor_shape.geometry=sim.Box{{4,.25,4}}
+    sim.shape_create(&physics.world,floor,floor_shape)
+    owner:=core.create(&world.entities)
+    core.add(&world.transforms,owner,core.Transform{position={0,2,0},rotation=1,scale={1,1,1}})
+    core.add(&world.meshes,owner,render.Mesh_Renderer{mesh=mesh})
+    config:=destruct.destructible();config.fracture=fracture;config.impact_damage=false;config.debris_volume=0
+    config.interior=game.material_asset("Cobblestone");core.add(&world.configs,owner,config);core.add(&world.colliders,owner,destruct.collider_fracture())
+    physics_bake_settle(&world,nil,nil)
+    record:cache.Cache_Recorder
+    if error:=cache.record_init(&record,{frames=151,tracks=128,samples=151*128,vertices=32768,indices=65536,origin=mm.TRANSFORM_IDENTITY});error!=.None {o.failed=true;return id}
+    defer cache.record_destroy(&record)
+    source:=[1]cache.Capture_Source{{entity=owner,object=1}}
+    source[0].materials[0],source[0].materials[1]=game.material_asset("Bricks"),game.material_asset("Cobblestone")
+    source[0].materials[2]=game.material_asset("Cobblestone")
+    for frame in 0..=150 {
+        if frame==15 || frame==30 {
+            pieces:[128]destruct.Piece_Info
+            count:=destruct.pieces(destruct.Destruct_View{core.ref(&physics),core.ref(&fractures),core.read(&world.states),core.read(&world.groups)},owner,pieces[:])
+            for piece in pieces[:min(count,len(pieces))] {
+                if piece.body==0 {continue}
+                point:=sim.body_transform(&physics.world,piece.body)
+                center:=point.p+mm.quat_rotate(point.q,piece.center)
+                destruct.slice(&requests,owner,center,{0,0,1} if frame==15 else {0,1,0})
+                break
+            }
+        }
+        if frame==45 {
+            sim.world_set_gravity(&physics.world,{0,-9.81,0})
+            destruct.strain(&requests,owner,{0,2,0},10,10000,{0,3,2})
+        }
+        if frame==120 {
+            for e in world.groups.entities {
+                if e!=owner && destruct.remove(&requests,core.read(&world.groups),e)==.None {break}
+            }
+        }
+        destruct.destruct_step(&physics,&fractures,core.ref(&fracture_settings),&geometry,&requests,&events,core.ref(&alone),&app,{playing=true,dt=1.0/30,tick=u64(frame)},core.commands(&world,&info),
+            core.read(&world.configs),&world.meshes,&world.tints,core.read(&world.parents),&world.states,&world.groups,&world.elsewhere,&world.transforms,&world.ids,core.read(&world.colliders),{},nil)
+        physics_bake_settle(&world,nil,nil)
+        if frame==15 || frame==30 {sim.world_apply_radial(&physics.world,{0,2.5,0},4,.6,.Constant,true,true)}
+        error:=cache.capture_destructible(&record,f32(frame)/30,source[:],destruct.Destruct_View{core.ref(&physics),core.ref(&fractures),core.read(&world.states),core.read(&world.groups)},core.ref(&geometry))
+        if error!=.None {fmt.eprintfln("demo_content: geometry bake frame %d: %v",frame,error);o.failed=true;return id}
+        if frame<150 {sim.world_step(&physics.world,1.0/30)}
+    }
+    check(o,"recorded.physics_cache",cache.cache_save(path(o,"assets/physics/recorded.physics_cache"),&o.types,id,cache.record_view(&record)))
+    return id
+}

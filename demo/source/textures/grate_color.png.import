@@ -1,0 +1,11 @@
+{
+  "max_texture_size": 0,
+  "textures": "Blocks",
+  "image": "Color",
+  "alpha_coverage": 0.5,
+  "lods": "Auto",
+  "max_triangles": 0,
+  "collision": "None",
+  "collision_hulls": 0,
+  "parts": "Auto"
+}

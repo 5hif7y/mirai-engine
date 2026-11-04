@@ -1,0 +1,2010 @@
+package build
+
+import "core:fmt"
+import "core:odin/ast"
+import "core:odin/parser"
+import "core:odin/tokenizer"
+import "core:os"
+import "core:slice"
+import "core:strconv"
+import "core:strings"
+import "mirai:core"
+import "mirai:project"
+import "mirai:std/base"
+
+// The world of a project, generated from the attributes of its packages:
+//
+//   @(component) @(component,shared) @(component,locks="core.Transform")
+//   @(component,replicated) @(component,replicated="owner") @(component,replicated="others")
+//   @(storage) @(storage,host) @(storage,setting) @(storage,setting="machine")
+//   @(storage,queue) @(storage,events) @(storage,shared) @(storage,keep)
+//   @(storage,copy="state_copy") @(storage,free="state_free") @(storage,reset="state_reset")
+//   @(step="fixed late",loops="game editor",stage="end",after="a b",before="c",server)
+//   @(net_message) @(net_message,from="client",reliable) @(net_message,from="owner")
+//   @(params)
+//
+// The engine's libraries (core, engine/*), the runtime/ of the active plugins
+// and the game/ of the project go into World and Shared; the editor and the
+// editor/ of plugins and of the project into Editor_World.
+
+CUSTOM_ATTRIBUTES :: "component,storage,step,loops,stage,after,before,server,shared,locks,host,by_world,copy,copy_kept,swap,free,replicated,setting,description,queue,events,keep,persist,single,far,reset,net_message,from,reliable,params,names,name_bits,name,name_requires,presentation,record"
+
+PHASES :: [7]string{"input","fixed","frame","late","ui","render","release"}
+PHASE_TITLES :: [len(PHASES)]string{"Input","Fixed","Frame","Late","Ui","Render","Release"}
+RELEASE_PHASE :: 6 // runs when a World is freed: from the game loop, never in a frame
+LOOPS :: [2]string{"game","editor"}
+// Every phase runs its steps by stage, in this order; a step that names none is in intent.
+STAGES :: [7]string{"begin","input","intent","apply","simulate","react","end"}
+STAGE_DEFAULT :: 2
+
+@(private="file")
+Package :: struct {
+    path:string,   // import path: mirai:engine/render
+    folder:string,
+    name:string,   // declared
+    alias:string,  // in the generated file
+    editor:bool,
+    plugin:int,    // into the plugins of the project; -1: not of a plugin
+    used:bool,     // declares a type or a step
+    files:[]^ast.File,
+    names:map[string]bool, // what the package declares: where the defaults of its components are found
+}
+
+@(private="file")
+Kind :: enum u8 {Component,Storage}
+
+
+@(private="file")
+Type :: struct {
+    key:string, // path.Name
+    name:string,
+    pkg:^Package,
+    kind:Kind,
+    description:string,
+    fields:[dynamic]core.Field_Description, // a component: the comments on the lines of its fields
+    shared,host,by_world:bool,
+    single:bool, // a component the world uses one of at a time: its table keeps one row on
+    far:bool,    // a component that draws a far form of its own: its entity stays when its section unloads
+    replication:core.Replication,
+    queue,events:bool, // a storage of requests that many push and one library takes; of what one library reports and the others read
+    keep:bool,         // a storage of the World that survives clearing it: the state of the run, not of its entities
+    persist:bool,      // a keep storage that the save library writes to the profile of the player and reads back
+    presentation:bool, // what comes back from the GPU: it decides nothing a rollback runs again, so no function of fixed reads it
+    reset:string,      // procedure that gives a storage of the World its start when the World is cleared
+    setting:core.Setting_Kind,
+    locks:[dynamic]string, // keys, resolved later
+    copy:string,
+    copy_kept:string, // procedure of the copy a history keeps, which copy_changed makes; copy otherwise
+    swap:string,
+    free:string, // procedure that releases what the storage holds; core.value_free otherwise
+    field:string,
+    place:core.Place,
+    lock_id:int,
+    file:^ast.File,   // where it is declared
+    value:^ast.Expr,  // its struct
+}
+
+// A struct of game data, @(record): the row of the tables of .records assets.
+@(private="file")
+Record_Type :: struct {
+    key,name:string,
+    pkg:^Package,
+    description:string,
+    fields:[dynamic]core.Field_Description, // the comments on the lines of its fields
+    file:^ast.File,
+    value:^ast.Expr,
+    where_:string,
+}
+
+// A structure the network sends, @(net_message).
+@(private="file")
+Message :: struct {
+    name:string,
+    pkg:^Package,
+    from:core.Message_From,
+    reliable:bool,
+}
+
+@(private="file")
+Param_Kind :: enum u8 {Table_Write,Table_Read,Storage_Write,Storage_Ref,Storage_Value,Entities,Entities_Read,Commands,World_Ref,App,Records}
+
+@(private="file")
+Param :: struct {
+    kind:Param_Kind,
+    type:^Type,
+    record:^Record_Type, // Records
+    bundle:^Bundle, // the @(params) the step receives it in; nil when it receives it by itself
+    name:string,    // of the field in the bundle, or of the parameter
+    arg:int,        // the parameter of the step it binds, by position
+}
+
+// A struct whose fields are parameters of a step, @(params): a step receives
+// it by value and each field is bound as that parameter alone would be.
+@(private="file")
+Bundle :: struct {
+    key,name:string,
+    pkg:^Package,
+    file:^ast.File,
+    record:^ast.Struct_Type,
+    where_:string,
+    fields:[dynamic]Param,
+    valid:bool,
+}
+
+// A distinct integer whose constants are its values with names, @(names), or
+// a mask whose bits are the values of one, @(name_bits).
+@(private="file")
+Named_Type :: struct {
+    key,name:string,
+    pkg:^Package,
+    prefix:string,  // taken off the identifiers of its constants
+    bits_of:string, // @(name_bits): the key of the type of its bits
+    where_:string,
+}
+
+// A constant whose type may have names: kept until every type is read.
+@(private="file")
+Named_Value :: struct {
+    type_key,ident,name:string,
+    type:^Named_Type,
+    pkg:^Package,
+    file:string, // relative to the project, or to the engine for its packages and plugins
+    line:int,
+    explicit:bool, // @(name="...")
+    requires:string, // @(name_requires="C"): the key of the component an entity needs to take this value
+    requires_type:^Type,
+    where_:string,
+}
+
+@(private="file")
+Step :: struct {
+    name:string,
+    pkg:^Package,
+    phases:[len(PHASES)]bool,
+    loops:[2]bool,
+    stage:int,
+    after,before:[dynamic]string,
+    server:bool, // runs only where the rules are decided: core.Network.role is not .Client
+    params:[dynamic]Param,
+    rank:int, // libraries, then declarations
+    where_:string,
+}
+
+@(private="file")
+Generator :: struct {
+    packages:[dynamic]^Package,
+    types:[dynamic]^Type,
+    messages:[dynamic]Message,
+    by_key:map[string]^Type,
+    bundles:map[string]^Bundle,
+    bundle_list:[dynamic]^Bundle, // in the order they are declared
+    named_types:map[string]^Named_Type,
+    named_type_list:[dynamic]^Named_Type,
+    named_values:[dynamic]Named_Value, // the constants of named types, once names_settle kept them
+    records:[dynamic]^Record_Type,
+    record_by_key:map[string]^Record_Type,
+    steps:[dynamic]^Step,
+    errors:[dynamic]string,
+    engine_root,root:string,
+}
+
+// Play is built from game_world, which has no editor package; the editor from
+// editor_world; the game that ships from shipped_world, game_world without the
+// development plugins. The editor and play are the libraries the editor and
+// the player load; game is the program that ships, with the engine in it.
+Generated :: struct {
+    game_world,editor_world,shipped_world,editor_main,play_main,game_main:string,
+    errors:[]string,
+    machine_settings:[]string, // the names of the @(storage,setting="machine"): the sections the file of the engine gives a shipped game
+}
+
+// The source of the world packages and of the main packages. The world of
+// the game that ships is generated only when shipped is asked for.
+world_generate :: proc(p:^project.Project,allocator:=context.allocator,shipped:=false) -> (out:Generated) {
+    context.allocator=allocator
+    g:Generator
+    g.by_key=make(map[string]^Type)
+    g.bundles=make(map[string]^Bundle)
+    g.named_types=make(map[string]^Named_Type)
+    g.record_by_key=make(map[string]^Record_Type)
+    g.engine_root,g.root=p.engine_root,p.root
+    packages_find(&g,p)
+    for pkg in g.packages {package_read(&g,pkg)}
+    for pkg in g.packages {plugin_imports_check(&g,p,pkg)}
+    types_settle(&g)
+    names_settle(&g)
+    bundles_settle(&g)
+    for pkg in g.packages {steps_read(&g,pkg)}
+    rules_check(&g)
+    out.errors=g.errors[:]
+    if len(g.errors)>0 {return}
+    out.game_world=world_write(&g,false)
+    out.editor_world=world_write(&g,true)
+    out.shipped_world=out.game_world
+    // Without the development plugins the world of the game that ships is generated again.
+    kept:=make([dynamic]int,context.temp_allocator)
+    for index in p.active {
+        if !p.plugins[index].manifest.development {append(&kept,index)}
+    }
+    if shipped && len(kept)<len(p.active) {
+        q:=p^
+        q.active=kept[:]
+        out.shipped_world=world_generate_world(&q)
+    }
+    out.editor_main=library_entry("editor_world")
+    out.play_main=library_entry("game_world")
+    machine:=make([dynamic]string)
+    for t in g.types {
+        if t.setting==.Machine {append(&machine,t.name)}
+    }
+    out.machine_settings=machine[:]
+    out.game_main="// Generated by mirai. Do not edit.\npackage main\n\nimport \"core:os\"\nimport \"mirai:host\"\nimport world \"generated:shipped_world\"\n\nmain :: proc() {\n    info:=world.info()\n    root,_:=os.get_executable_directory(context.allocator)\n    os.exit(host.player_run(&info,root,\"\",os.args[1:]))\n}\n"
+    return
+}
+
+// The game world of a project, for the world of the game that ships.
+@(private="file")
+world_generate_world :: proc(p:^project.Project) -> string {
+    g:Generator
+    g.by_key=make(map[string]^Type)
+    g.bundles=make(map[string]^Bundle)
+    g.named_types=make(map[string]^Named_Type)
+    g.record_by_key=make(map[string]^Record_Type)
+    g.engine_root,g.root=p.engine_root,p.root
+    packages_find(&g,p)
+    for pkg in g.packages {package_read(&g,pkg)}
+    types_settle(&g)
+    names_settle(&g)
+    bundles_settle(&g)
+    for pkg in g.packages {steps_read(&g,pkg)}
+    rules_check(&g)
+    return world_write(&g,false)
+}
+
+// The package a library of the project is built from: what the editor or the
+// player asks it for when they load it.
+@(private="file")
+library_entry :: proc(world_package:string) -> string {
+    return fmt.aprintf("// Generated by mirai. Do not edit.\npackage mirai_project\n\nimport \"mirai:core\"\nimport world \"generated:%s\"\n\n@(export,link_name=%q)\nproject_info :: proc() -> core.World_Info {{return world.info()}}\n",world_package,PROJECT_INFO_SYMBOL)
+}
+
+// The procedure a library of a project exports: it returns the core.World_Info of its world.
+PROJECT_INFO_SYMBOL :: "mirai_project_info"
+
+// Writes the generated packages under <project>/.mirai/gen when they changed.
+// out has what was generated, in the temp allocator.
+world_write_files :: proc(p:^project.Project,shipped:=false) -> (out:Generated,ok:bool) {
+    out=world_generate(p,context.temp_allocator,shipped)
+    if len(out.errors)>0 {return}
+    gen:=project.path(project.folder_path(p.root,.Generated,context.temp_allocator),"gen",allocator=context.temp_allocator)
+    files:=[6][2]string{{"game_world/world.odin",out.game_world},{"editor_world/world.odin",out.editor_world},{"shipped_world/world.odin",out.shipped_world},{"editor/main.odin",out.editor_main},{"play/main.odin",out.play_main},{"game/main.odin",out.game_main}}
+    for f in files {
+        if f[0]=="shipped_world/world.odin" && !shipped {continue}
+        file:=project.path(gen,f[0],allocator=context.temp_allocator)
+        if current,error:=os.read_entire_file(file,context.temp_allocator);error==nil && string(current)==f[1] {continue}
+        folder:=file[:strings.last_index_byte(file,'/')]
+        if os.make_directory_all(folder)!=nil && !os.is_dir(folder) {return}
+        if os.write_entire_file(file,f[1])!=nil {return}
+    }
+    return out,true
+}
+
+@(private="file")
+packages_find :: proc(g:^Generator,p:^project.Project) {
+    add_tree :: proc(g:^Generator,folder,path:string,editor:bool,plugin:=-1) {
+        if !os.is_dir(folder) {return}
+        if has_sources(folder) {
+            pkg:=new(Package)
+            pkg.folder,pkg.path,pkg.editor,pkg.plugin=folder,path,editor,plugin
+            append(&g.packages,pkg)
+        }
+        entries,error:=os.read_all_directory_by_path(folder,context.temp_allocator)
+        if error!=nil {return}
+        slice.sort_by(entries,proc(a,b:os.File_Info) -> bool {return a.name<b.name})
+        for entry in entries {
+            if strings.has_prefix(entry.name,".") || entry.name=="testdata" || !os.is_dir(entry.fullpath) {continue}
+            add_tree(g,project.path(folder,entry.name),fmt.aprintf("%s/%s",path,entry.name),editor,plugin)
+        }
+    }
+    e:=p.engine_root
+    add_tree(g,project.path(e,"core"),"mirai:core",false)
+    add_tree(g,project.path(e,"engine"),"mirai:engine",false)
+    names:=project.FOLDER_NAMES
+    parts:=project.PART_NAMES
+    for index in p.active {
+        plugin:=&p.plugins[index]
+        name:=base.text_get(plugin.manifest.name[:])
+        add_tree(g,project.path(plugin.folder,parts[.Runtime]),plugin_import(p.root,plugin,name,parts[.Runtime]),false,index)
+    }
+    add_tree(g,project.path(p.root,names[.Game]),fmt.aprintf("project:%s",names[.Game]),false)
+    add_tree(g,project.path(e,"editor"),"mirai:editor",true)
+    for index in p.active {
+        plugin:=&p.plugins[index]
+        name:=base.text_get(plugin.manifest.name[:])
+        add_tree(g,project.path(plugin.folder,parts[.Editor]),plugin_import(p.root,plugin,name,parts[.Editor]),true,index)
+    }
+    add_tree(g,project.path(p.root,names[.Editor]),fmt.aprintf("project:%s",names[.Editor]),true)
+}
+
+// How a part of a plugin is imported: plugins:<name>/<part> for one of the
+// engine; project:<its folder in the project>/<part> for one of the project:
+// plugins/<name>, or plugins/<plugin>/plugins/<name> for a companion.
+plugin_import :: proc(root:string,plugin:^project.Plugin,name,part:string,allocator:=context.allocator) -> string {
+    if plugin.origin==.Engine {return fmt.aprintf("plugins:%s/%s",name,part,allocator=allocator)}
+    folder:=strings.trim_prefix(strings.trim_prefix(plugin.folder,root),"/")
+    return fmt.aprintf("project:%s/%s",folder,part,allocator=allocator)
+}
+
+// A plugin imports only itself and what it depends on: what it does not name
+// in its plugin.mirai is not active with it.
+@(private="file")
+plugin_imports_check :: proc(g:^Generator,p:^project.Project,pkg:^Package) {
+    if pkg.plugin<0 {return}
+    for file in pkg.files {
+        for decl in file.imports {
+            imported:=strings.trim(decl.fullpath,"\"`")
+            other:=project.import_plugin(imported)
+            if other=="" || project.plugin_reaches(p.plugins,pkg.plugin,other,false) {continue}
+            append(&g.errors,fmt.aprintf("%s: imports %s, a plugin %s does not depend on; add %q to the dependencies of its plugin.mirai, or take the import out",file.fullpath,imported,base.text_get(p.plugins[pkg.plugin].manifest.name[:]),other))
+        }
+    }
+}
+
+@(private="file")
+has_sources :: proc(folder:string) -> bool {
+    entries,error:=os.read_all_directory_by_path(folder,context.temp_allocator)
+    if error!=nil {return false}
+    for entry in entries {
+        if entry.type!=.Directory && strings.has_suffix(entry.name,".odin") && !strings.has_suffix(entry.name,"_test.odin") {return true}
+    }
+    return false
+}
+
+@(private="file")
+package_read :: proc(g:^Generator,pkg:^Package) {
+    collected,ok:=parser.collect_package(pkg.folder)
+    if !ok {
+        append(&g.errors,fmt.aprintf("%s: the package could not be read",pkg.folder))
+        return
+    }
+    for path,file in collected.files {
+        if strings.has_suffix(path,"_test.odin") {delete_key(&collected.files,path)}
+    }
+    p:=parser.default_parser()
+    p.err=proc(pos:tokenizer.Pos,format:string,args:..any) {}
+    if !parser.parse_package(collected,&p) {
+        append(&g.errors,fmt.aprintf("%s: the package does not parse; the compiler says where",pkg.folder))
+        return
+    }
+    pkg.name=collected.name
+    files:=make([dynamic]^ast.File)
+    for _,file in collected.files {append(&files,file)}
+    slice.sort_by(files[:],proc(a,b:^ast.File) -> bool {return a.fullpath<b.fullpath})
+    pkg.files=files[:]
+    pkg.names=make(map[string]bool)
+    for file in pkg.files {
+        for stmt in file.decls {
+            decl,is_value:=stmt.derived.(^ast.Value_Decl)
+            if !is_value || len(decl.names)!=1 || len(decl.values)!=1 {continue}
+            name:=ident_name(decl.names[0])
+            pkg.names[name]=true
+            options:=attributes_read(decl.attributes[:])
+            _,is_names:=options["names"]
+            _,is_bits:=options["name_bits"]
+            if is_names || is_bits {
+                named_type_read(g,file,pkg,decl,name,options)
+                continue
+            }
+            if !decl.is_mutable {named_value_read(g,file,pkg,decl,name,options)}
+            _,is_component:=options["component"]
+            _,is_storage:=options["storage"]
+            _,is_message:=options["net_message"]
+            _,is_bundle:=options["params"]
+            if _,is_record:=options["record"];is_record {
+                record_read(g,file,pkg,decl,name,options,is_component || is_storage || is_message || is_bundle)
+                continue
+            }
+            if is_bundle {
+                bundle_read(g,file,pkg,decl,name,is_component || is_storage || is_message)
+                continue
+            }
+            if is_message {
+                message_read(g,pkg,name,options,is_component || is_storage)
+                continue
+            }
+            if !is_component && !is_storage {continue}
+            t:=new(Type)
+            t.name,t.pkg=name,pkg
+            t.file,t.value=file,decl.values[0]
+            t.key=fmt.aprintf("%s.%s",pkg.path,name)
+            t.kind=is_component?.Component:.Storage
+            _,t.shared=options["shared"]
+            _,t.host=options["host"]
+            _,t.by_world=options["by_world"]
+            if replicated,has:=options["replicated"];has {
+                switch replicated {
+                case "":       t.replication=.All
+                case "owner":  t.replication=.Owner
+                case "others": t.replication=.Others
+                case:
+                    append(&g.errors,fmt.aprintf("%s: %s has replicated=%q: write @(component,replicated) for every end that has the entity, replicated=\"owner\" for its owner or replicated=\"others\" for the rest",pkg.folder,name,replicated))
+                    continue
+                }
+                if !is_component {
+                    append(&g.errors,fmt.aprintf("%s: %s is a storage and says replicated: the network replicates components of entities; make it a @(component,replicated), or send it as a @(net_message)",pkg.folder,name))
+                    continue
+                }
+            }
+            _,t.single=options["single"]
+            if _,scene:=options["scene"];scene {
+                append(&g.errors,fmt.aprintf("%s: %s says scene: a setting of the scene is a component on an entity of the root scene, which saves, replicates and changes while the game runs; make it a @(component), with single if the world uses one at a time",pkg.folder,name))
+                continue
+            }
+            if t.single && !is_component {
+                append(&g.errors,fmt.aprintf("%s: %s says single, which is of a component the world uses one of at a time: write @(component,single)",pkg.folder,name))
+                continue
+            }
+            _,t.far=options["far"]
+            if t.far && !is_component {
+                append(&g.errors,fmt.aprintf("%s: %s says far, which is of a component whose entity draws a far form of its own and stays when its section unloads: write @(component,far)",pkg.folder,name))
+                continue
+            }
+            _,t.queue=options["queue"]
+            _,t.events=options["events"]
+            if (t.queue || t.events) && (t.kind!=.Storage || t.queue && t.events) {
+                append(&g.errors,fmt.aprintf("%s: %s says queue or events: a storage of requests is @(storage,queue), one of what a library reports is @(storage,events), and none is both",pkg.folder,name))
+                continue
+            }
+            if kind,is_setting:=options["setting"];is_setting {
+                switch kind {
+                case "":        t.setting=.Project
+                case "machine": t.setting=.Machine
+                case:
+                    append(&g.errors,fmt.aprintf("%s: %s has setting=%q, which is not a kind of setting: write @(storage,setting) for a setting of the project or @(storage,setting=\"machine\") for a preference of whoever uses the engine on this machine",pkg.folder,name,kind))
+                    continue
+                }
+            }
+            t.copy=options["copy"] or_else ""
+            t.copy_kept=options["copy_kept"] or_else ""
+            t.swap=options["swap"] or_else ""
+            t.free=options["free"] or_else ""
+            _,t.keep=options["keep"]
+            _,t.persist=options["persist"]
+            _,t.presentation=options["presentation"]
+            t.reset=options["reset"] or_else ""
+            t.description=options["description"] or_else ""
+            if t.kind==.Component {field_comments(&t.fields,decl.values[0])}
+            if locks,has_locks:=options["locks"];has_locks {
+                for lock in strings.fields(locks) {append(&t.locks,qualified(g,file,pkg,lock))}
+            }
+            t.place=pkg.editor?.Editor:(t.host?.Shared:.World)
+            if t.setting!=.None && (t.kind!=.Storage || t.place==.Editor) {
+                append(&g.errors,fmt.aprintf("%s: %s is a setting: mark it @(storage,setting) or @(storage,setting=\"machine\") in a library",pkg.folder,name))
+                continue
+            }
+            if t.by_world && (t.kind!=.Storage || t.place!=.Shared || t.setting!=.None) {
+                append(&g.errors,fmt.aprintf("%s: %s is by_world: a storage of the application with a value for each World is @(storage,host,by_world) in a library, and is not a setting",pkg.folder,name))
+                continue
+            }
+            if t.persist && (t.kind!=.Storage || t.place!=.World || t.queue || t.events || t.setting!=.None || t.copy=="false" || t.reset!="") {
+                append(&g.errors,fmt.aprintf("%s: %s says persist: the progress of the player is a plain @(storage,persist) of a library; not a component, a storage of the application, a queue, events, a setting, nor one that resets or is not copied",pkg.folder,name))
+                continue
+            }
+            if t.copy_kept!="" && (t.kind!=.Storage || t.place!=.World || t.copy=="false") {
+                append(&g.errors,fmt.aprintf("%s: %s says copy_kept, the copy of a storage of the World that a history keeps: write it on a @(storage) of a library that is copied",pkg.folder,name))
+                continue
+            }
+            if t.persist {t.keep=true}
+            if (t.keep || t.reset!="") && (t.kind!=.Storage || t.place!=.World) {
+                append(&g.errors,fmt.aprintf("%s: %s says keep or reset, which are of a storage of the World: clearing a World resets its storages, and the others have no World to follow",pkg.folder,name))
+                continue
+            }
+            if (t.keep || t.reset!="") && (t.setting!=.None || t.copy=="false") || t.keep && t.reset!="" {
+                append(&g.errors,fmt.aprintf("%s: %s says keep or reset and survives clearing the World already as a setting or with copy=false, or says both: a storage that the World resets says reset=\"proc\" when it needs more than its default, one that survives says keep",pkg.folder,name))
+                continue
+            }
+            if t.key in g.by_key {
+                append(&g.errors,fmt.aprintf("%s: %s is declared twice",pkg.folder,name))
+                continue
+            }
+            g.by_key[t.key]=t
+            append(&g.types,t)
+            pkg.used=true
+        }
+    }
+}
+
+@(private="file")
+record_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,decl:^ast.Value_Decl,name:string,options:map[string]string,also:bool) {
+    where_:=fmt.aprintf("%s(%d)",file.fullpath,decl.pos.line)
+    if also {
+        append(&g.errors,fmt.aprintf("%s: %s is a @(record), the row of tables of game data, and also a component, a storage, a message or a @(params): keep @(record) alone, and name its rows from components with core.Record(%s)",where_,name,name))
+        return
+    }
+    if pkg.editor {
+        append(&g.errors,fmt.aprintf("%s: %s is a @(record) in a package of the editor: the game reads its rows, so declare it in a library or in game/",where_,name))
+        return
+    }
+    if _,is_struct:=decl.values[0].derived.(^ast.Struct_Type);!is_struct {
+        append(&g.errors,fmt.aprintf("%s: %s is a @(record) and not a struct: a row of a table is a struct of fields",where_,name))
+        return
+    }
+    r:=new(Record_Type)
+    r.name,r.pkg,r.where_=name,pkg,where_
+    r.key=fmt.aprintf("%s.%s",pkg.path,name)
+    r.file,r.value=file,decl.values[0]
+    r.description=options["description"] or_else ""
+    field_comments(&r.fields,decl.values[0])
+    for other in g.records {
+        if other.key==r.key {
+            append(&g.errors,fmt.aprintf("%s: %s is declared twice",where_,name))
+            return
+        }
+        if other.name==name && other.pkg.name==pkg.name {
+            append(&g.errors,fmt.aprintf("%s: %s.%s is also a @(record) of %s: a .records names the type of its rows by its package and name, so rename one of them",where_,pkg.name,name,other.where_))
+            return
+        }
+    }
+    g.record_by_key[r.key]=r
+    append(&g.records,r)
+    pkg.used=true
+}
+
+@(private="file")
+named_type_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,decl:^ast.Value_Decl,name:string,options:map[string]string) {
+    where_:=fmt.aprintf("%s(%d)",file.fullpath,decl.pos.line)
+    _,is_names:=options["names"]
+    _,is_bits:=options["name_bits"]
+    // A mask may be an alias of a distinct integer of a package below the one that names its bits.
+    _,distinct_type:=decl.values[0].derived.(^ast.Distinct_Type)
+    #partial switch _ in decl.values[0].derived {
+    case ^ast.Ident,^ast.Selector_Expr: distinct_type ||= is_bits
+    }
+    if !distinct_type || is_names && is_bits {
+        append(&g.errors,fmt.aprintf("%s: %s says names or name_bits: @(names) marks a distinct integer whose constants have names (%s :: distinct u16), and @(name_bits=\"T\") a distinct integer whose bits are the values of T; it is one of them",where_,name,name))
+        return
+    }
+    t:=new(Named_Type)
+    t.key,t.name,t.pkg,t.where_=fmt.aprintf("%s.%s",pkg.path,name),name,pkg,where_
+    t.prefix=options["names"] or_else ""
+    if of,bits:=options["name_bits"];bits {
+        if of=="" {
+            append(&g.errors,fmt.aprintf("%s: %s says name_bits without a type: write @(name_bits=\"T\") with the @(names) type whose values its bits are",where_,name))
+            return
+        }
+        t.bits_of=qualified(g,file,pkg,of)
+    }
+    if t.key in g.named_types {
+        append(&g.errors,fmt.aprintf("%s: %s is declared twice",where_,name))
+        return
+    }
+    g.named_types[t.key]=t
+    append(&g.named_type_list,t)
+}
+
+// A constant of a type it names, X :: T(...) or X : T : ..., for names_settle to keep if T has names.
+@(private="file")
+named_value_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,decl:^ast.Value_Decl,name:string,options:map[string]string) {
+    type:=decl.type
+    if type==nil {
+        call,is_call:=decl.values[0].derived.(^ast.Call_Expr)
+        if !is_call || len(call.args)!=1 {return}
+        type=call.expr
+    }
+    #partial switch _ in type.derived {
+    case ^ast.Ident,^ast.Selector_Expr:
+    case: return
+    }
+    explicit,has_name:=options["name"]
+    requires:=options["name_requires"] or_else ""
+    root:=slashes(strings.has_prefix(pkg.path,"project:")?g.root:g.engine_root,context.temp_allocator)
+    path:=slashes(file.fullpath,context.temp_allocator)
+    if strings.has_prefix(path,root) && len(path)>len(root) && path[len(root)]=='/' {path=path[len(root)+1:]}
+    append(&g.named_values,Named_Value{
+        type_key=qualified(g,file,pkg,expr_text(file,type)),ident=name,name=explicit,explicit=has_name,pkg=pkg,
+        requires=requires!=""?qualified(g,file,pkg,requires):"",
+        file=strings.clone(path),line=decl.pos.line,where_=fmt.aprintf("%s(%d)",file.fullpath,decl.pos.line),
+    })
+}
+
+// Keeps the constants whose types have names, with the name each takes:
+// its @(name), or its identifier without the prefix of its type, in lower case.
+@(private="file")
+names_settle :: proc(g:^Generator) {
+    for t in g.named_type_list {
+        if t.bits_of=="" {continue}
+        of,found:=g.named_types[t.bits_of]
+        if !found || of.bits_of!="" {
+            append(&g.errors,fmt.aprintf("%s: %s says name_bits=%q, which is not a type @(names); name the distinct integer whose values its bits are",t.where_,t.name,t.bits_of))
+        }
+        t.pkg.used=true
+    }
+    kept:=make([dynamic]Named_Value)
+    for &value in g.named_values {
+        t,found:=g.named_types[value.type_key]
+        if !found || t.bits_of!="" {continue}
+        value.type=t
+        if !value.explicit {
+            ident:=value.ident
+            if t.prefix!="" && strings.has_prefix(ident,t.prefix) {ident=ident[len(t.prefix):]}
+            value.name=strings.to_lower(ident)
+        }
+        if value.name=="" {
+            append(&g.errors,fmt.aprintf("%s: %s has an empty name; give it one with @(name=\"...\") or an identifier longer than the prefix %q of %s",value.where_,value.ident,t.prefix,t.name))
+            continue
+        }
+        for other in kept {
+            if other.type==t && other.name==value.name {
+                append(&g.errors,fmt.aprintf("%s: %s and %s (%s) are both named %q in %s; give one another name with @(name=\"...\")",value.where_,value.ident,other.ident,other.where_,value.name,t.name))
+            }
+        }
+        if value.requires!="" {
+            needed,known:=g.by_key[value.requires]
+            if !known || needed.kind!=.Component {
+                append(&g.errors,fmt.aprintf("%s: %s says name_requires=%q, which is not a component; name the component an entity needs to take this value",value.where_,value.ident,value.requires))
+                continue
+            }
+            value.requires_type=needed
+            needed.pkg.used=true
+        }
+        t.pkg.used,value.pkg.used=true,true
+        append(&kept,value)
+    }
+    // Together by type, in the order they are declared.
+    slice.stable_sort_by(kept[:],proc(a,b:Named_Value) -> bool {return a.type.key<b.type.key})
+    g.named_values=kept
+}
+
+@(private="file")
+message_read :: proc(g:^Generator,pkg:^Package,name:string,options:map[string]string,also:bool) {
+    if also {
+        append(&g.errors,fmt.aprintf("%s: %s is a @(net_message) and a component or storage: a message is a structure of its own, sent once",pkg.folder,name))
+        return
+    }
+    if pkg.editor {
+        append(&g.errors,fmt.aprintf("%s: %s is a @(net_message) of the editor: messages are of the game, declared in a library or in game/",pkg.folder,name))
+        return
+    }
+    m:=Message{name=name,pkg=pkg}
+    switch options["from"] or_else "" {
+    case "","server": m.from=.Server
+    case "client":    m.from=.Client
+    case "owner":     m.from=.Owner
+    case:
+        append(&g.errors,fmt.aprintf("%s: %s has from=%q: a message is sent from the \"server\" (the default), a \"client\" or the \"owner\" of the entity it is about",pkg.folder,name,options["from"]))
+        return
+    }
+    _,m.reliable=options["reliable"]
+    append(&g.messages,m)
+    pkg.used=true
+}
+
+@(private="file")
+bundle_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,decl:^ast.Value_Decl,name:string,also:bool) {
+    where_:=fmt.aprintf("%s(%d)",file.fullpath,decl.pos.line)
+    record,is_struct:=decl.values[0].derived.(^ast.Struct_Type)
+    switch {
+    case also:
+        append(&g.errors,fmt.aprintf("%s: %s is @(params) and a component, storage or message: a @(params) struct only groups parameters of steps; declare the data apart and put a field that receives it",where_,name))
+        return
+    case !is_struct || record.poly_params!=nil:
+        append(&g.errors,fmt.aprintf("%s: @(params) on %s, which is not a struct without parameters: write @(params) %s :: struct {{...}} with a parameter of a step in each field",where_,name,name))
+        return
+    }
+    b:=new(Bundle)
+    b.key=fmt.aprintf("%s.%s",pkg.path,name)
+    b.name,b.pkg,b.file,b.record,b.where_=name,pkg,file,record,where_
+    g.bundles[b.key]=b
+    append(&g.bundle_list,b)
+}
+
+// The fields of every @(params), once the tables and storages are known.
+@(private="file")
+bundles_settle :: proc(g:^Generator) {
+    for b in g.bundle_list {
+        b.valid=true
+        if b.record.fields==nil || len(b.record.fields.list)==0 {
+            append(&g.errors,fmt.aprintf("%s: %s is @(params) and has no fields: give it a field for each parameter it groups, or take it out",b.where_,b.name))
+            b.valid=false
+            continue
+        }
+        for field in b.record.fields.list {
+            if inner:=bundle_of(g,b.file,b.pkg,field.type);inner!=nil {
+                append(&g.errors,fmt.aprintf("%s: %s has a field of %s, another @(params): they do not nest; put the fields of %s in %s, or have the step receive %s by itself",b.where_,b.name,inner.name,inner.name,b.name,inner.name))
+                b.valid=false
+                continue
+            }
+            param,ok:=param_read(g,b.file,b.pkg,field.type)
+            for n in field.names {
+                if !ok {
+                    append(&g.errors,fmt.aprintf("%s: the field %s of %s is %s: no table, storage or service of the engine has that type. A @(params) struct holds parameters of steps: ^core.Table(T), core.Read(T), ^S, core.Ref(S), S, ^core.Entities, core.Ref(core.Entities), core.Commands, core.World_Ref or ^host.App",b.where_,ident_name(n),b.name,expr_text(b.file,field.type)))
+                    b.valid=false
+                    continue
+                }
+                param.bundle,param.name=b,ident_name(n)
+                append(&b.fields,param)
+            }
+        }
+    }
+}
+
+// The @(params) a parameter names, also through a pointer; nil for another type.
+@(private="file")
+bundle_of :: proc(g:^Generator,file:^ast.File,pkg:^Package,expr:^ast.Expr) -> ^Bundle {
+    e:=expr
+    if p,is_pointer:=e.derived.(^ast.Pointer_Type);is_pointer {e=p.elem}
+    return g.bundles[type_key(g,file,pkg,e)] or_else nil
+}
+
+// The key of a type named in a file: Name in its package, or alias.Name.
+@(private="file")
+qualified :: proc(g:^Generator,file:^ast.File,pkg:^Package,text:string) -> string {
+    dot:=strings.index_byte(text,'.')
+    if dot<0 {return fmt.aprintf("%s.%s",pkg.path,text)}
+    path,found:=import_path(g,file,text[:dot])
+    if !found {return text}
+    return fmt.aprintf("%s.%s",path,text[dot+1:])
+}
+
+@(private="file")
+import_path :: proc(g:^Generator,file:^ast.File,alias:string) -> (path:string,found:bool) {
+    for imp in file.imports {
+        full:=strings.trim(imp.relpath.text,"\"`")
+        name:=imp.name.text
+        if name=="" {
+            cut:=max(strings.last_index_any(full,"/:"),-1)
+            name=full[cut+1:]
+        }
+        if name!=alias {continue}
+        return full,true
+    }
+    return "",false
+}
+
+@(private="file")
+types_settle :: proc(g:^Generator) {
+    used:=make(map[string]int)
+    for t in g.types {used[snake(t.name)]+=1}
+    lock_id:=0
+    for t in g.types {
+        field:=snake(t.name)
+        if used[field]>1 || is_keyword(field) || field=="entities" {field=fmt.aprintf("%s_%s",t.pkg.name,field)}
+        t.field=field
+        if len(t.locks)>0 {
+            lock_id+=1
+            t.lock_id=lock_id
+        }
+        for lock in t.locks {
+            target,found:=g.by_key[lock]
+            if !found || target.kind!=.Component {
+                append(&g.errors,fmt.aprintf("%s: %s locks %s, which is not a component",t.pkg.folder,t.name,lock))
+            } else if !target.shared {
+                append(&g.errors,fmt.aprintf("%s: %s locks %s, which is not @(component,shared): only a table with several writers has owners by entity",t.pkg.folder,t.name,target.name))
+            } else if target.place!=t.place {
+                append(&g.errors,fmt.aprintf("%s: %s locks %s, which is in another place of the world: a row owns rows of its own World, Shared or Editor",t.pkg.folder,t.name,target.name))
+            }
+        }
+    }
+    aliases:=make(map[string]int)
+    for pkg in g.packages {
+        alias:=fmt.aprintf("p_%s",pkg.name)
+        if n:=aliases[pkg.name];n>0 {alias=fmt.aprintf("%s%d",alias,n)}
+        aliases[pkg.name]+=1
+        pkg.alias=alias
+    }
+}
+
+@(private="file")
+steps_read :: proc(g:^Generator,pkg:^Package) {
+    phases:=PHASES
+    loops:=LOOPS
+    stages:=STAGES
+    for file in pkg.files {
+        for stmt in file.decls {
+            decl,is_value:=stmt.derived.(^ast.Value_Decl)
+            if !is_value || len(decl.names)!=1 || len(decl.values)!=1 {continue}
+            options:=attributes_read(decl.attributes[:])
+            phase_text,is_step:=options["step"]
+            if !is_step {continue}
+            literal,is_proc:=decl.values[0].derived.(^ast.Proc_Lit)
+            name:=ident_name(decl.names[0])
+            where_:=fmt.aprintf("%s(%d)",file.fullpath,decl.pos.line)
+            if !is_proc {
+                append(&g.errors,fmt.aprintf("%s: @(step) on %s, which is not a procedure",where_,name))
+                continue
+            }
+            s:=new(Step)
+            s.name,s.pkg,s.where_=name,pkg,where_
+            pkg.used=true
+            s.rank=len(g.steps)
+            for part in strings.fields(phase_text) {
+                found:=false
+                for phase,i in phases {
+                    if phase==part {s.phases[i],found=true,true}
+                }
+                if !found {append(&g.errors,fmt.aprintf("%s: %s has the phase %q; the phases are input fixed frame late ui render release",where_,name,part))}
+            }
+            if loop_text,has_loops:=options["loops"];has_loops {
+                for part in strings.fields(loop_text) {
+                    found:=false
+                    for loop,i in loops {
+                        if loop==part {s.loops[i],found=true,true}
+                    }
+                    if !found {append(&g.errors,fmt.aprintf("%s: %s has the loop %q; the loops are game editor",where_,name,part))}
+                }
+            } else {
+                s.loops[pkg.editor?1:0]=true
+            }
+            if pkg.editor && s.loops[0] {append(&g.errors,fmt.aprintf("%s: %s is in an editor package and asks for the game loop: the game has no editor code",where_,name))}
+            s.stage=STAGE_DEFAULT
+            if stage,has_stage:=options["stage"];has_stage {
+                found:=false
+                for known,i in stages {
+                    if known==stage {s.stage,found=i,true}
+                }
+                if !found {append(&g.errors,fmt.aprintf("%s: %s has the stage %q; the stages are begin input intent apply simulate react end, and a step without one is in intent",where_,name,stage))}
+            }
+            if after,has_after:=options["after"];has_after {names_split(&s.after,after)}
+            if before,has_before:=options["before"];has_before {names_split(&s.before,before)}
+            _,s.server=options["server"]
+            if order,has_order:=options["order"];has_order {
+                append(&g.errors,fmt.aprintf("%s: %s has order=%s, and steps are not ordered by number: give it a stage (begin input intent apply simulate react end; intent when it names none) and order it inside the stage with after=\"step\" or before=\"step\"",where_,name,order))
+            }
+            if literal.type.params!=nil {
+                defaulted:=strings.builder_make(context.temp_allocator)
+                for field in literal.type.params.list {
+                    if field.default_value==nil {continue}
+                    for n in field.names {fmt.sbprintf(&defaulted,"%s%s",strings.builder_len(defaulted)>0?", ":"",ident_name(n))}
+                }
+                if strings.builder_len(defaulted)>0 {
+                    append(&g.errors,fmt.aprintf("%s: %s gives a default to %s, and the generator binds every parameter: take the defaults out; code outside the loop runs the function with core.world_run, or passes every parameter",where_,name,strings.to_string(defaulted)))
+                }
+                arg:=0
+                for field in literal.type.params.list {
+                    if b:=bundle_of(g,file,pkg,field.type);b!=nil {
+                        if _,is_pointer:=field.type.derived.(^ast.Pointer_Type);is_pointer {
+                            append(&g.errors,fmt.aprintf("%s: %s receives %s, a @(params) struct, by pointer: receive it by value, %s; its fields already point at what they write",where_,name,expr_text(file,field.type),expr_text(file,field.type)[1:]))
+                            continue
+                        }
+                        if b.pkg.editor && !pkg.editor {
+                            append(&g.errors,fmt.aprintf("%s: %s receives %s, a @(params) of an editor package: the game has no editor code; declare it in a library",where_,name,b.name))
+                            continue
+                        }
+                        b.pkg.used=true
+                        for _ in field.names {
+                            for param in b.fields {
+                                bound:=param
+                                bound.arg=arg
+                                append(&s.params,bound)
+                            }
+                            arg+=1
+                        }
+                        continue
+                    }
+                    param,ok:=param_read(g,file,pkg,field.type)
+                    for n in field.names {
+                        if !ok {
+                            append(&g.errors,fmt.aprintf("%s: the parameter %s of %s is %s: no table, storage or service of the engine has that type. Mark the type with @(component) or @(storage), receive ^core.Table(T), core.Read(T), ^S, core.Ref(S), S, ^core.Entities, core.Ref(core.Entities), core.Commands, core.World_Ref or ^host.App, or a struct marked @(params) whose fields are those",where_,ident_name(n),name,expr_text(file,field.type)))
+                            arg+=1
+                            continue
+                        }
+                        param.name,param.arg=ident_name(n),arg
+                        append(&s.params,param)
+                        arg+=1
+                    }
+                }
+            }
+            if literal.type.results!=nil && len(literal.type.results.list)>0 {
+                append(&g.errors,fmt.aprintf("%s: %s returns something; a step returns nothing",where_,name))
+            }
+            append(&g.steps,s)
+        }
+    }
+}
+
+@(private="file")
+param_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,expr:^ast.Expr) -> (param:Param,ok:bool) {
+    pointer:=false
+    e:=expr
+    if p,is_pointer:=e.derived.(^ast.Pointer_Type);is_pointer {
+        pointer=true
+        e=p.elem
+    }
+    if call,is_call:=e.derived.(^ast.Call_Expr);is_call && len(call.args)==1 {
+        wrapper:=type_key(g,file,pkg,call.expr)
+        inner_key:=type_key(g,file,pkg,call.args[0])
+        if wrapper=="mirai:core.Records" {
+            r,found:=g.record_by_key[inner_key]
+            return {kind=.Records,record=r},found && !pointer
+        }
+        if wrapper=="mirai:core.Ref" && inner_key=="mirai:core.Entities" {return {kind=.Entities_Read,type=nil},!pointer}
+        inner,found:=g.by_key[inner_key]
+        if !found {return}
+        switch {
+        case wrapper=="mirai:core.Table" && pointer && inner.kind==.Component: return {kind=.Table_Write,type=inner},true
+        case wrapper=="mirai:core.Read" && !pointer && inner.kind==.Component: return {kind=.Table_Read,type=inner},true
+        case wrapper=="mirai:core.Ref" && !pointer && inner.kind==.Storage: return {kind=.Storage_Ref,type=inner},true
+        }
+        return
+    }
+    key:=type_key(g,file,pkg,e)
+    switch key {
+    case "mirai:core.Entities": return {kind=.Entities,type=nil},pointer
+    case "mirai:core.Commands": return {kind=.Commands,type=nil},!pointer
+    case "mirai:core.World_Ref": return {kind=.World_Ref,type=nil},!pointer
+    case "mirai:host.App": return {kind=.App,type=nil},pointer
+    }
+    t,found:=g.by_key[key]
+    if !found || t.kind!=.Storage {return}
+    return {kind=pointer?.Storage_Write:.Storage_Value,type=t},true
+}
+
+@(private="file")
+type_key :: proc(g:^Generator,file:^ast.File,pkg:^Package,expr:^ast.Expr) -> string {
+    #partial switch v in expr.derived {
+    case ^ast.Ident:
+        return fmt.aprintf("%s.%s",pkg.path,v.name)
+    case ^ast.Selector_Expr:
+        alias:=ident_name(v.expr)
+        if path,found:=import_path(g,file,alias);found {return fmt.aprintf("%s.%s",path,v.field.name)}
+    }
+    return ""
+}
+
+@(private="file")
+rules_check :: proc(g:^Generator) {
+    for t in g.types {
+        if t.by_world && "mirai:core.World_Id" not_in g.by_key {
+            append(&g.errors,fmt.aprintf("%s: %s is by_world, and the world has no core.World_Id to know whose value a function gets",t.pkg.folder,t.name))
+        }
+        if !t.persist {continue}
+        if field,what,fix:=persist_unkept(g,t.file,t.pkg,t.value,"",0);what!="" {
+            at:=field==""?t.name:fmt.aprintf("%s.%s",t.name,field)
+            append(&g.errors,fmt.aprintf("%s: %s says persist and %s is %s, which the profile of the player does not keep: the profile holds plain data; %s",t.pkg.folder,t.name,at,what,fix))
+        }
+    }
+    for r in g.records {
+        if field,what,fix:=persist_unkept(g,r.file,r.pkg,r.value,"",0);what!="" {
+            at:=field==""?r.name:fmt.aprintf("%s.%s",r.name,field)
+            append(&g.errors,fmt.aprintf("%s: %s says record and %s is %s, which a table of game data does not keep: a row is plain data the game reads in every run; %s",r.where_,r.name,at,what,fix))
+        }
+    }
+    names:=make(map[string]^Step)
+    for s in g.steps {
+        if other,taken:=names[s.name];taken {
+            append(&g.errors,fmt.aprintf("%s: a step %s already exists in %s; names of steps are unique",s.where_,s.name,other.where_))
+        }
+        names[s.name]=s
+    }
+    stages:=STAGES
+    network,has_network:=g.by_key["mirai:core.Network"]
+    for s in g.steps {
+        if s.server && (!has_network || network.kind!=.Storage) {
+            append(&g.errors,fmt.aprintf("%s: %s is server, and the world has no core.Network to know whether this end decides the rules",s.where_,s.name))
+        }
+        for list,i in ([2][]string{s.after[:],s.before[:]}) {
+            word:=i==0?"after":"before"
+            for name in list {
+                other,found:=names[name]
+                if !found {
+                    append(&g.errors,fmt.aprintf("%s: %s runs %s %s, and no step has that name in this project; name a step of the engine or of a plugin this one depends on, or take it out of %s",s.where_,s.name,word,name,word))
+                    continue
+                }
+                if !together(s,other) {continue}
+                if i==0 && other.stage>s.stage || i==1 && other.stage<s.stage {
+                    append(&g.errors,fmt.aprintf("%s: %s is in the stage %s and runs %s %s, which is in the stage %s: give %s a stage that runs %s %s, or take %s out of %s",s.where_,s.name,stages[s.stage],word,name,stages[other.stage],s.name,i==0?"at or after":"at or before",stages[other.stage],name,word))
+                }
+            }
+        }
+        for param in s.params {
+            if param.type==nil {continue}
+            if param.type.place==.Editor && s.loops[0] {
+                append(&g.errors,fmt.aprintf("%s: %s runs in the game and receives %s, which is of the editor",s.where_,s.name,param.type.name))
+            }
+            if s.phases[1] && param.type.place==.Editor {
+                append(&g.errors,fmt.aprintf("%s: %s runs in fixed, which a rollback runs again, and receives %s of the editor",s.where_,s.name,param.type.name))
+            }
+            if s.phases[1] && param.type.presentation {
+                append(&g.errors,fmt.aprintf("%s: %s runs in fixed and receives %s, which came back from the GPU: it is presentation alone, neither deterministic nor in the rollback, and decides nothing of the game; read it in frame or late",s.where_,s.name,param.type.name))
+            }
+            if param.type.by_world && param.kind==.Storage_Value {
+                append(&g.errors,fmt.aprintf("%s: %s receives %s, which has a value for each World, by value: receive ^%s or core.Ref(%s)",s.where_,s.name,param.type.name,param.type.name,param.type.name))
+            }
+        }
+        // What a step writes reaches it once: in a @(params) and by itself, or
+        // in two, it would be written through one and read stale through the other.
+        for a,i in s.params {
+            for b in s.params[i+1:] {
+                if a.bundle==nil && b.bundle==nil || !same_datum(a,b) || !writes(a) && !writes(b) {continue}
+                what:=a.type!=nil?a.type.name:"Entities"
+                fix:="receive the two @(params) in different steps, or declare one without that field"
+                if a.bundle==b.bundle && a.arg==b.arg {fix=fmt.tprintf("take %s or %s out of %s",a.name,b.name,a.bundle.name)}
+                else if a.bundle==b.bundle {fix=fmt.tprintf("receive %s once",a.bundle.name)}
+                else if a.bundle==nil {fix=fmt.tprintf("take its parameter %s out and use %s.%s",a.name,b.bundle.name,b.name)}
+                else if b.bundle==nil {fix=fmt.tprintf("take its parameter %s out and use %s.%s",b.name,a.bundle.name,a.name)}
+                append(&g.errors,fmt.aprintf("%s: %s receives %s as %s and as %s, and writes it: a step receives what it writes once; %s",s.where_,s.name,what,param_text(a),param_text(b),fix))
+            }
+        }
+        if s.phases[RELEASE_PHASE] && !s.loops[0] {
+            append(&g.errors,fmt.aprintf("%s: %s runs in release, which the application runs from the game loop when it frees a World: release what a library keeps by World in a library, with the game loop",s.where_,s.name))
+        }
+    }
+    // One writer of a table that is not shared, in each loop.
+    loops:=LOOPS
+    for loop in 0..<2 {
+        writers:=make(map[^Type]^Step,context.temp_allocator)
+        for s in g.steps {
+            if !s.loops[loop] {continue}
+            for param in s.params {
+                if param.kind!=.Table_Write || param.type.shared {continue}
+                if other,taken:=writers[param.type];taken && other!=s {
+                    append(&g.errors,fmt.aprintf("%s: %s and %s write %s in the %s loop; a table that is not @(component,shared) has one writer: the other sends a request through a storage",s.where_,other.name,s.name,param.type.name,loops[loop]))
+                }
+                writers[param.type]=s
+            }
+        }
+        // A storage is the state of one library: the functions of another
+        // push to it when it is a queue, or write it in the order of the loop
+        // when it says it is shared.
+        owners:=make(map[^Type]^Step,context.temp_allocator)
+        for s in g.steps {
+            if !s.loops[loop] {continue}
+            for param in s.params {
+                if param.kind!=.Storage_Write || param.type.queue || param.type.shared {continue}
+                if other,taken:=owners[param.type];taken && other.pkg!=s.pkg {
+                    append(&g.errors,fmt.aprintf("%s: %s of %s and %s of %s write %s in the %s loop; a storage is the state of one library: the other sends a request through a storage marked @(storage,queue), or the storage says @(storage,shared) when several libraries write it in the order of the loop",s.where_,other.name,other.pkg.name,s.name,s.pkg.name,param.type.name,loops[loop]))
+                }
+                owners[param.type]=s
+            }
+        }
+    }
+    // A dedicated server runs neither ui nor render: what only those phases
+    // do is for whoever watches, and the game has to decide the same without it.
+    shown_writer:=make(map[^Type]^Step,context.temp_allocator)
+    run_written:=make(map[^Type]bool,context.temp_allocator)
+    for s in g.steps {
+        if !s.loops[0] {continue}
+        shown:=step_shown(s)
+        if shown && s.server {
+            append(&g.errors,fmt.aprintf("%s: %s is server and runs only in ui or render, which a dedicated server does not run: decide the rules in input, fixed, frame or late",s.where_,s.name))
+        }
+        for param in s.params {
+            if shown {
+                #partial switch param.kind {
+                case .Table_Write:
+                    if param.type.replication!=.None {
+                        append(&g.errors,fmt.aprintf("%s: %s runs only in ui or render and writes %s, which is replicated: a dedicated server runs neither and would send what the scene says; write it in input, fixed, frame or late",s.where_,s.name,param.type.name))
+                    }
+                case .Entities,.Commands:
+                    append(&g.errors,fmt.aprintf("%s: %s runs only in ui or render and creates or destroys entities, which a dedicated server would not: create them in input, fixed, frame or late",s.where_,s.name))
+                }
+            }
+            if param.type==nil || !writes(param) {continue}
+            if shown {shown_writer[param.type]=s} else {run_written[param.type]=true}
+        }
+    }
+    for s in g.steps {
+        if !s.loops[0] || step_shown(s) {continue}
+        for param in s.params {
+            if param.type==nil || param.type.queue || param.type.events || run_written[param.type] {continue}
+            writer,shown_only:=shown_writer[param.type]
+            if !shown_only {continue}
+            append(&g.errors,fmt.aprintf("%s: %s reads %s, which only %s writes, in ui or render: a dedicated server runs neither and there %s keeps the value it starts with; write it in input, fixed, frame or late, or read it in ui or render",s.where_,s.name,param.type.name,writer.name,param.type.name))
+        }
+    }
+    // A cycle of after and before is reported once, also when its steps share several phases.
+    reported:=make(map[string]bool,context.temp_allocator)
+    phases:=PHASES
+    for loop in 0..<2 {
+        for phase in 0..<len(PHASES) {
+            _,cycle:=phase_order(g,loop,phase)
+            if len(cycle)==0 {continue}
+            path:=strings.builder_make(context.temp_allocator)
+            for s in cycle {fmt.sbprintf(&path,"%s -> ",s.name)}
+            strings.write_string(&path,cycle[0].name)
+            text:=strings.to_string(path)
+            if reported[text] {continue}
+            reported[text]=true
+            append(&g.errors,fmt.aprintf("%s: the steps %s of %s in the %s loop wait for each other through after and before: take one of those names out",cycle[0].where_,text,phases[phase],loops[loop]))
+        }
+    }
+}
+
+// Whether two steps run in a same phase of a same loop, where after and before order them.
+@(private="file")
+together :: proc(a,b:^Step) -> bool {
+    loop:=a.loops[0] && b.loops[0] || a.loops[1] && b.loops[1]
+    for on,phase in a.phases {
+        if on && b.phases[phase] && loop {return true}
+    }
+    return false
+}
+
+// Whether a step runs only in ui or render (release aside), which a dedicated server does not run.
+@(private="file")
+step_shown :: proc(s:^Step) -> bool {
+    return !s.phases[0] && !s.phases[1] && !s.phases[2] && !s.phases[3] && (s.phases[4] || s.phases[5])
+}
+
+// The names of steps of after or before: separated by spaces or commas.
+@(private="file")
+names_split :: proc(names:^[dynamic]string,text:string) {
+    rest:=text
+    for part in strings.split_iterator(&rest,",") {
+        for name in strings.fields(part) {append(names,name)}
+    }
+}
+
+@(private="file")
+same_datum :: proc(a,b:Param) -> bool {
+    if a.type!=nil || b.type!=nil {return a.type==b.type}
+    entities :: proc(p:Param) -> bool {return p.kind==.Entities || p.kind==.Entities_Read}
+    return entities(a) && entities(b)
+}
+
+// A queue is pushed by many: pushing to it is not writing it.
+@(private="file")
+writes :: proc(p:Param) -> bool {
+    return p.kind==.Table_Write || p.kind==.Entities || p.kind==.Storage_Write && !p.type.queue
+}
+
+@(private="file")
+param_text :: proc(p:Param) -> string {
+    if p.bundle!=nil {return fmt.tprintf("the field %s of the @(params) %s",p.name,p.bundle.name)}
+    return fmt.tprintf("its parameter %s",p.name)
+}
+
+// The steps of a loop and phase in the order they run: stage by stage, and
+// inside a stage in the order of the libraries, where a step runs first the
+// ones it waits for (its after, and the before that name it), in that same
+// order. cycle has the steps that wait for each other, if some do.
+@(private="file")
+phase_order :: proc(g:^Generator,loop,phase:int) -> (ordered,cycle:[]^Step) {
+    o:Ordering
+    o.chosen=make([dynamic]^Step,context.temp_allocator)
+    for s in g.steps {
+        if s.loops[loop] && s.phases[phase] {append(&o.chosen,s)}
+    }
+    slice.sort_by(o.chosen[:],proc(a,b:^Step) -> bool {
+        if a.stage!=b.stage {return a.stage<b.stage}
+        return a.rank<b.rank
+    })
+    o.waits=make(map[^Step][dynamic]^Step,context.temp_allocator)
+    o.state=make(map[^Step]u8,context.temp_allocator)
+    o.ordered=make([dynamic]^Step,context.temp_allocator)
+    o.path=make([dynamic]^Step,context.temp_allocator)
+    for s in o.chosen {
+        for name in s.after {
+            for other in o.chosen {
+                if other.name==name && other.stage==s.stage {wait_add(&o,s,other)}
+            }
+        }
+        for name in s.before {
+            for other in o.chosen {
+                if other.name==name && other.stage==s.stage {wait_add(&o,other,s)}
+            }
+        }
+    }
+    for _,waited in o.waits {
+        slice.sort_by(waited[:],proc(a,b:^Step) -> bool {return a.rank<b.rank})
+    }
+    for s in o.chosen {
+        if !order_visit(&o,s) {return o.ordered[:],o.cycle}
+    }
+    return o.ordered[:],nil
+}
+
+@(private="file")
+Ordering :: struct {
+    chosen,ordered,path:[dynamic]^Step,
+    waits:map[^Step][dynamic]^Step, // what each step runs after, in its stage
+    state:map[^Step]u8,             // 1 while its waits are visited, 2 once ordered
+    cycle:[]^Step,
+}
+
+@(private="file")
+wait_add :: proc(o:^Ordering,s,first:^Step) {
+    waited:=o.waits[s]
+    if waited==nil {waited=make([dynamic]^Step,context.temp_allocator)}
+    append(&waited,first)
+    o.waits[s]=waited
+}
+
+@(private="file")
+order_visit :: proc(o:^Ordering,s:^Step) -> bool {
+    switch o.state[s] {
+    case 2: return true
+    case 1:
+        at,_:=slice.linear_search(o.path[:],s)
+        o.cycle=o.path[at:]
+        return false
+    }
+    o.state[s]=1
+    append(&o.path,s)
+    for first in o.waits[s] {
+        if !order_visit(o,first) {return false}
+    }
+    pop(&o.path)
+    o.state[s]=2
+    append(&o.ordered,s)
+    return true
+}
+
+// What a step touches, for the steps that may run at once: each datum by
+// the key of its type, true when the step writes it, or the whole World.
+@(private="file")
+Access :: struct {
+    data:map[string]bool,
+    whole:bool, // creates or destroys entities, or changes what is off: after it, a settle of every table
+    main:bool,  // runs on the thread of the loop: it touches the application or the editor
+}
+
+// The application and what holds it: every storage of Shared or of the
+// editor may lead to it (the renderer, the mixer, the assets, the session).
+@(private="file") APP_DATUM :: "app"
+// The entities and their index by Id, which the settle of the table Id follows.
+@(private="file") ENTITIES_DATUM :: "entities"
+
+@(private="file")
+step_whole :: proc(g:^Generator,s:^Step) -> bool {
+    disabled,parent:=g.by_key["mirai:core.Disabled"],g.by_key["mirai:core.Parent"]
+    for param in s.params {
+        if param.kind==.Entities || param.kind==.Commands || param.kind==.World_Ref {return true}
+        if param.kind==.Table_Write && (param.type==disabled || param.type==parent) {return true}
+    }
+    return false
+}
+
+// A queue is written by whoever pushes to it, and the order of what it holds
+// is the order of the loop. A storage of Shared or of the editor is one datum
+// whatever a step does with it, and all of them meet in the application.
+@(private="file")
+step_access :: proc(g:^Generator,s:^Step) -> (a:Access) {
+    a.data=make(map[string]bool,context.temp_allocator)
+    a.whole=step_whole(g,s)
+    touch :: proc(a:^Access,key:string,write:bool) {a.data[key]=write || a.data[key]}
+    for param in s.params {
+        switch param.kind {
+        case .Table_Write:
+            touch(&a,param.type.key,true)
+            for lock in param.type.locks {touch(&a,lock,true)}
+            if param.type.key=="mirai:core.Id" {touch(&a,ENTITIES_DATUM,true)}
+        case .Table_Read: touch(&a,param.type.key,false)
+        case .Storage_Write,.Storage_Ref,.Storage_Value:
+            if param.type.place!=.World {
+                touch(&a,param.type.key,true)
+                touch(&a,APP_DATUM,false)
+                a.main=true
+            } else {
+                touch(&a,param.type.key,param.kind==.Storage_Write)
+            }
+        case .Entities_Read: touch(&a,ENTITIES_DATUM,false)
+        case .Entities,.Commands,.World_Ref:
+        case .App,.Records:
+            touch(&a,APP_DATUM,true)
+            a.main=true
+        }
+    }
+    return
+}
+
+@(private="file")
+accesses_conflict :: proc(a,b:^Access) -> bool {
+    if a.whole || b.whole {return true}
+    for key,write in a.data {
+        if other,found:=b.data[key];found && (write || other) {return true}
+    }
+    return false
+}
+
+// The edges of a loop and phase, by position in its order: a step waits for
+// an earlier one when it is of a later stage, when after or before say so,
+// or when they conflict, and only for those no other path of edges orders
+// already. Conflicting steps keep the order of the loop, so any run of the
+// graph gives the World the sequential order gives.
+@(private="file")
+phase_edges :: proc(g:^Generator,steps:[]^Step) -> [][2]i32 {
+    n:=len(steps)
+    words:=(n+63)/64
+    accesses:=make([]Access,n,context.temp_allocator)
+    for s,i in steps {accesses[i]=step_access(g,s)}
+    waits:=make([]bool,n*n,context.temp_allocator) // [first*n+then]
+    for s,j in steps {
+        for name in s.after {
+            for other,i in steps[:j] {
+                if other.name==name {waits[i*n+j]=true}
+            }
+        }
+        for name in s.before {
+            for other,k in steps[j+1:] {
+                if other.name==name {waits[j*n+j+1+k]=true}
+            }
+        }
+    }
+    for i in 0..<n {
+        for j in i+1..<n {
+            if steps[i].stage<steps[j].stage || accesses_conflict(&accesses[i],&accesses[j]) {waits[i*n+j]=true}
+        }
+    }
+    // reach[i]: what waits for i through any path, which the order lists after i.
+    reach:=make([]u64,n*words,context.temp_allocator)
+    #reverse for _,i in steps {
+        mine:=reach[i*words:][:words]
+        for j in i+1..<n {
+            if !waits[i*n+j] {continue}
+            mine[j/64]|=u64(1)<<uint(j%64)
+            for &word,k in mine {word|=reach[j*words+k]}
+        }
+    }
+    edges:=make([dynamic][2]i32,context.temp_allocator)
+    covered:=make([]u64,words,context.temp_allocator)
+    for i in 0..<n {
+        for &word in covered {word=0}
+        for j in i+1..<n {
+            if !waits[i*n+j] || covered[j/64]&(u64(1)<<uint(j%64))!=0 {continue}
+            append(&edges,[2]i32{i32(i),i32(j)})
+            for &word,k in covered {word|=reach[j*words+k]}
+        }
+    }
+    return edges[:]
+}
+
+@(private="file")
+world_write :: proc(g:^Generator,editor:bool) -> string {
+    b:=strings.builder_make()
+    w:=&b
+    included :: proc(t:^Type,editor:bool) -> bool {return editor || t.place!=.Editor}
+    fmt.sbprint(w,"// Generated by mirai. Do not edit.\npackage world\n\nimport \"base:runtime\"\nimport gen_slice \"core:slice\"\nimport gen_time \"core:time\"\n")
+    imported:=make(map[string]bool,context.temp_allocator)
+    for pkg in g.packages {
+        if pkg.path in imported || !pkg.used || pkg.editor && !editor {continue}
+        imported[pkg.path]=true
+        fmt.sbprintf(w,"import %s \"%s\"\n",pkg.alias,pkg.path)
+    }
+    core_alias:=alias_of(g,"mirai:core")
+    if core_alias=="" {
+        core_alias="p_core"
+        fmt.sbprint(w,"import p_core \"mirai:core\"\n")
+    }
+    host_alias:=alias_of(g,"mirai:host")
+    if host_alias=="" {
+        host_alias="p_host"
+        fmt.sbprint(w,"import p_host \"mirai:host\"\n")
+    }
+    for t in g.types {
+        if t.kind==.Storage && included(t,editor) && for_device_value(t)!="" {
+            fmt.sbprint(w,"import gen_rhi \"mirai:rhi\"\n")
+            break
+        }
+    }
+    fmt.sbprint(w,"\n")
+
+    places:=[3]core.Place{.World,.Shared,.Editor}
+    struct_names:=[3]string{"World","Shared","Editor"}
+    for place,pi in places {
+        fmt.sbprintf(w,"%s :: struct {{\n",struct_names[pi])
+        if place==.World {fmt.sbprintf(w,"    entities:%s.Entities,\n",core_alias)}
+        for t in g.types {
+            if t.place!=place || !included(t,editor) {continue}
+            if t.kind==.Component {fmt.sbprintf(w,"    %s:%s.Table(%s.%s),\n",t.field,core_alias,t.pkg.alias,t.name)}
+            else if t.by_world {fmt.sbprintf(w,"    %s:%s.By_World(%s.%s),\n",t.field,core_alias,t.pkg.alias,t.name)}
+            else {fmt.sbprintf(w,"    %s:%s.%s,\n",t.field,t.pkg.alias,t.name)}
+        }
+        if place!=.World {fmt.sbprint(w,"    _:u8,\n")}
+        fmt.sbprint(w,"}\n\n")
+    }
+
+    // Who holds each lock, by id.
+    fmt.sbprint(w,"@(rodata)\nLOCK_NAMES := [?]string{\"\"")
+    for t in g.types {
+        if t.lock_id>0 {fmt.sbprintf(w,",\"%s.%s\"",t.pkg.name,t.name)}
+    }
+    fmt.sbprint(w,"}\n\n")
+
+    // init
+    for place,pi in places {
+        fmt.sbprintf(w,"init_%s :: proc(data:rawptr,allocator:runtime.Allocator) -> bool {{\n    w:=cast(^%s)data\n    context.allocator=allocator\n",struct_names[pi],struct_names[pi])
+        if place==.World {fmt.sbprintf(w,"    if !%s.entities_init(&w.entities,allocator) {{return false}}\n",core_alias)}
+        for t in g.types {
+            if t.place!=place || t.kind!=.Component || !included(t,editor) {continue}
+            fmt.sbprintf(w,"    %s.table_init(&w.%s,\"%s\",allocator)\n",core_alias,t.field,t.name)
+            // The components of core are the base of every entity: on while it is disabled.
+            if t.pkg.path=="mirai:core" {fmt.sbprintf(w,"    w.%s.base=true\n",t.field)}
+            if t.single {fmt.sbprintf(w,"    w.%s.single=true\n",t.field)}
+        }
+        for t in g.types {
+            if t.place!=place || t.kind!=.Storage || t.by_world || !included(t,editor) {continue}
+            if value,found:=default_value(t);found {fmt.sbprintf(w,"    w.%s=%s\n",t.field,value)}
+        }
+        for t in g.types {
+            if t.place!=place || t.kind!=.Component || len(t.locks)==0 || !included(t,editor) {continue}
+            fmt.sbprintf(w,"    {{\n    locks,error:=make([]%s.Lock,%d,allocator)\n    if error!=nil || raw_data(locks)==nil {{return false}}\n    w.%s.locks=locks\n",core_alias,len(t.locks),t.field)
+            for lock,li in t.locks {
+                target:=g.by_key[lock]
+                fmt.sbprintf(w,"    w.%s.locks[%d]={{%s.lock_offset(&w.%s,&w.%s),%d,LOCK_NAMES[:],\"%s\"}}\n",t.field,li,core_alias,t.field,target.field,t.lock_id,target.name)
+            }
+            fmt.sbprint(w,"    }\n")
+        }
+        fmt.sbprint(w,"    return true\n}\n\n")
+        fmt.sbprintf(w,"destroy_%s :: proc(data:rawptr) {{\n    w:=cast(^%s)data\n",struct_names[pi],struct_names[pi])
+        for t in g.types {
+            if t.place!=place || !included(t,editor) {continue}
+            if t.kind==.Component {
+                if len(t.locks)>0 {fmt.sbprintf(w,"    delete(w.%s.locks)\n",t.field)}
+                fmt.sbprintf(w,"    %s.table_destroy(&w.%s)\n",core_alias,t.field)
+            } else if t.by_world {
+                fmt.sbprintf(w,"    for &entry in w.%s.entries {{\n        if entry.value==nil {{continue}}\n        %s\n        %s.by_world_release(&w.%s,entry.value)\n    }}\n    delete(w.%s.entries)\n",t.field,value_free_call(t,core_alias,"entry.value"),core_alias,t.field,t.field)
+            } else if t.free!="" {
+                fmt.sbprintf(w,"    %s.%s(&w.%s)\n",t.pkg.alias,t.free,t.field)
+            } else {
+                fmt.sbprintf(w,"    %s.value_free(&w.%s,type_info_of(%s.%s))\n",core_alias,t.field,t.pkg.alias,t.name)
+            }
+        }
+        if place==.World {fmt.sbprintf(w,"    %s.entities_destroy(&w.entities)\n",core_alias)}
+        fmt.sbprint(w,"}\n\n")
+    }
+
+    // copy and clear of World; the index of the entities by Id comes with
+    // them and goes on following the table of Id that comes with it. The
+    // copy of what changed takes again only the tables that changed since the
+    // marks, one per table by its index in info.tables, and is the copy a
+    // history keeps: it takes the copy_kept of the storages that have one
+    identity:=g.by_key["mirai:core.Id"]
+    tables:=count_kind(g,.Component,editor)
+    for changed in ([2]bool{false,true}) {
+        if changed {
+            fmt.sbprintf(w,"copy_changed_world :: proc(dst_data,src_data:rawptr,marks:[]%s.Copy_Mark) -> bool {{\n    if dst_data==src_data {{return true}}\n    if len(marks)<%d {{return copy_world(dst_data,src_data)}}\n",core_alias,tables)
+        } else {
+            fmt.sbprint(w,"copy_world :: proc(dst_data,src_data:rawptr) -> bool {\n    if dst_data==src_data {return true}\n")
+        }
+        fmt.sbprint(w,"    dst:=cast(^World)dst_data\n    src:=cast(^World)src_data\n    context.allocator=dst.entities.generation.allocator\n")
+        if identity!=nil {fmt.sbprintf(w,"    synced:=%s.ids_synced(&src.entities,%s.read(&src.%s))\n",core_alias,core_alias,identity.field)}
+        fmt.sbprintf(w,"    if !%s.entities_copy(&dst.entities,&src.entities) {{return false}}\n",core_alias)
+        index:=0
+        for t in g.types {
+            at:=index
+            if t.kind==.Component && included(t,editor) {index+=1}
+            if t.place!=.World {continue}
+            if t.kind==.Component {
+                if changed {fmt.sbprintf(w,"    if !%s.table_copy_changed(&dst.%s,&src.%s,&marks[%d]) {{return false}}\n",core_alias,t.field,t.field,at)}
+                else {fmt.sbprintf(w,"    if !%s.table_copy(&dst.%s,&src.%s) {{return false}}\n",core_alias,t.field,t.field)}
+            } else if t.copy=="false" {
+                continue
+            } else if changed && t.copy_kept!="" {
+                fmt.sbprintf(w,"    if !%s.%s(&dst.%s,&src.%s) {{return false}}\n",t.pkg.alias,t.copy_kept,t.field,t.field)
+            } else if t.copy!="" {
+                fmt.sbprintf(w,"    if !%s.%s(&dst.%s,&src.%s) {{return false}}\n",t.pkg.alias,t.copy,t.field,t.field)
+            } else {
+                fmt.sbprintf(w,"    if !%s.value_copy(&dst.%s,&src.%s,type_info_of(%s.%s)) {{return false}}\n",core_alias,t.field,t.field,t.pkg.alias,t.name)
+            }
+        }
+        if identity!=nil {fmt.sbprintf(w,"    %s.ids_moved(&dst.entities,%s.read(&dst.%s),synced)\n",core_alias,core_alias,identity.field)}
+        fmt.sbprint(w,"    return true\n}\n\n")
+    }
+    // Through memory: a multiple assignment of storages of kilobytes keeps
+    // LLVM optimizing for a minute (odin-lang/Odin#7937), and a local copy of
+    // each one is the large copy of ODIN_WORKAROUNDS.
+    fmt.sbprint(w,"swap_world :: proc(a_data,b_data:rawptr) {\n    if a_data==b_data {return}\n    a:=cast(^World)a_data\n    b:=cast(^World)b_data\n")
+    if identity!=nil {fmt.sbprintf(w,"    a_synced,b_synced:=%s.ids_synced(&a.entities,%s.read(&a.%s)),%s.ids_synced(&b.entities,%s.read(&b.%s))\n",core_alias,core_alias,identity.field,core_alias,core_alias,identity.field)}
+    fmt.sbprint(w,"    gen_slice.ptr_swap_non_overlapping(&a.entities,&b.entities,size_of(a.entities))\n")
+    for t in g.types {
+        if t.place!=.World {continue}
+        if t.kind==.Component {fmt.sbprintf(w,"    %s.table_swap(&a.%s,&b.%s)\n",core_alias,t.field,t.field)}
+        else if t.copy=="false" {continue}
+        else if t.swap!="" {fmt.sbprintf(w,"    %s.%s(&a.%s,&b.%s)\n",t.pkg.alias,t.swap,t.field,t.field)}
+        else {fmt.sbprintf(w,"    gen_slice.ptr_swap_non_overlapping(&a.%s,&b.%s,size_of(a.%s))\n",t.field,t.field,t.field)}
+    }
+    if identity!=nil {fmt.sbprintf(w,"    %s.ids_moved(&a.entities,%s.read(&a.%s),b_synced)\n    %s.ids_moved(&b.entities,%s.read(&b.%s),a_synced)\n",core_alias,core_alias,identity.field,core_alias,core_alias,identity.field)}
+    fmt.sbprint(w,"}\n\n")
+    // Clearing a World takes its entities, and the storages derived from them
+    // go back to their start: what is kept are the settings, the storages
+    // that say keep and those that are not copied.
+    fmt.sbprint(w,"clear_world :: proc(data:rawptr) {\n    w:=cast(^World)data\n")
+    fmt.sbprintf(w,"    %s.entities_clear(&w.entities)\n",core_alias)
+    for t in g.types {
+        if t.place==.World && t.kind==.Component {fmt.sbprintf(w,"    %s.table_clear(&w.%s)\n",core_alias,t.field)}
+    }
+    for t in g.types {
+        if t.place!=.World || t.kind!=.Storage || t.keep || t.setting!=.None || t.copy=="false" {continue}
+        if t.reset!="" {
+            fmt.sbprintf(w,"    %s.%s(&w.%s)\n",t.pkg.alias,t.reset,t.field)
+            continue
+        }
+        fmt.sbprintf(w,"    %s\n",value_free_call(t,core_alias,fmt.tprintf("&w.%s",t.field)))
+        value,found:=default_value(t)
+        fmt.sbprintf(w,"    w.%s=%s\n",t.field,found?value:"{}")
+    }
+    fmt.sbprint(w,"}\n\n")
+
+    // The values of the by_world storages of a World, by its id
+    world_id:=g.by_key["mirai:core.World_Id"]
+    fmt.sbprint(w,"attach_World :: proc(world,shared:rawptr,allocator:runtime.Allocator) -> bool {\n    w:=cast(^World)world\n    s:=cast(^Shared)shared\n    _,_=w,s\n    context.allocator=allocator\n")
+    for t in g.types {
+        if !t.by_world || world_id==nil {continue}
+        value,found:=default_value(t)
+        if !found {value=fmt.tprintf("%s.%s{{}}",t.pkg.alias,t.name)}
+        fmt.sbprintf(w,"    if !%s.by_world_attach(&s.%s,w.%s,%s,allocator) {{return false}}\n",core_alias,t.field,world_id.field,value)
+    }
+    fmt.sbprint(w,"    return true\n}\n\n")
+    fmt.sbprint(w,"detach_World :: proc(world,shared:rawptr) {\n    w:=cast(^World)world\n    s:=cast(^Shared)shared\n    _,_=w,s\n")
+    for t in g.types {
+        if !t.by_world || world_id==nil {continue}
+        fmt.sbprintf(w,"    if value:=%s.by_world_detach(&s.%s,w.%s);value!=nil {{\n        %s\n        %s.by_world_release(&s.%s,value)\n    }}\n",core_alias,t.field,world_id.field,value_free_call(t,core_alias,"value"),core_alias,t.field)
+    }
+    fmt.sbprint(w,"}\n\n")
+
+    // settle: the tables of every place follow the entities of the world;
+    // Disabled, Parent and its Hierarchy first, which say what of them is off
+    disabled:=g.by_key["mirai:core.Disabled"]
+    parent:=g.by_key["mirai:core.Parent"]
+    hierarchy:=g.by_key["mirai:core.Hierarchy"]
+    fmt.sbprint(w,"settle :: proc(world,shared,editor:rawptr) {\n    w:=cast(^World)world\n")
+    fmt.sbprint(w,"    e:=cast(^Editor)editor\n    _=e\n")
+    if disabled!=nil && parent!=nil && hierarchy!=nil {
+        fmt.sbprintf(w,"    %s.table_settle(&w.%s,&w.entities)\n    %s.table_settle(&w.%s,&w.entities)\n",core_alias,disabled.field,core_alias,parent.field)
+        fmt.sbprintf(w,"    _=%s.hierarchy_settle(&w.%s,%s.read(&w.%s),&w.entities)\n",core_alias,hierarchy.field,core_alias,parent.field)
+        fmt.sbprintf(w,"    _=%s.entities_activity(&w.entities,%s.read(&w.%s),%s.ref(&w.%s))\n",core_alias,core_alias,disabled.field,core_alias,hierarchy.field)
+    }
+    for t in g.types {
+        if t.kind!=.Component || !included(t,editor) {continue}
+        switch t.place {
+        case .World: fmt.sbprintf(w,"    %s.table_settle(&w.%s,&w.entities)\n",core_alias,t.field)
+        case .Editor: fmt.sbprintf(w,"    if e!=nil {{%s.table_settle(&e.%s,&w.entities)}}\n",core_alias,t.field)
+        case .Shared:
+        }
+    }
+    fmt.sbprintf(w,"    %s.entities_settle(&w.entities)\n}}\n\n",core_alias)
+
+    // The functions as info.steps lists them: where each one adds its time.
+    kept:=make([dynamic]^Step,context.temp_allocator)
+    index_of:=make(map[^Step]int,context.temp_allocator)
+    for s in g.steps {
+        if editor || !s.pkg.editor {
+            index_of[s]=len(kept)
+            append(&kept,s)
+        }
+    }
+
+    // Each function as the loops call it, with its binding, its settle and
+    // its time: the loops call these in order, and core.world_run a part of them.
+    for step,si in kept {
+        args:=strings.builder_make(context.temp_allocator)
+        for param,pi in step.params {
+            first:=pi==0 || step.params[pi-1].arg!=param.arg
+            if first && pi>0 {
+                if step.params[pi-1].bundle!=nil {strings.write_string(&args,"}")}
+                strings.write_string(&args,",")
+            }
+            if param.bundle!=nil {
+                if first {fmt.sbprintf(&args,"%s.%s{{",param.bundle.pkg.alias,param.bundle.name)} else {strings.write_string(&args,",")}
+                fmt.sbprintf(&args,"%s=",param.name)
+            }
+            holder:="w"
+            if param.type!=nil {
+                switch param.type.place {
+                case .World: holder="w"
+                case .Shared: holder="s"
+                case .Editor: holder="e"
+                }
+            }
+            switch param.kind {
+            case .Table_Write: fmt.sbprintf(&args,"&%s.%s",holder,param.type.field)
+            case .Table_Read: fmt.sbprintf(&args,"%s.read(&%s.%s)",core_alias,holder,param.type.field)
+            case .Storage_Write:
+                if param.type.by_world {fmt.sbprintf(&args,"%s.by_world_get(&%s.%s,w.%s)",core_alias,holder,param.type.field,world_id.field)} else {fmt.sbprintf(&args,"&%s.%s",holder,param.type.field)}
+            case .Storage_Ref:
+                if param.type.by_world {fmt.sbprintf(&args,"%s.ref(%s.by_world_get(&%s.%s,w.%s))",core_alias,core_alias,holder,param.type.field,world_id.field)} else {fmt.sbprintf(&args,"%s.ref(&%s.%s)",core_alias,holder,param.type.field)}
+            case .Storage_Value: fmt.sbprintf(&args,"%s.%s",holder,param.type.field)
+            case .Entities: fmt.sbprint(&args,"&w.entities")
+            case .Entities_Read: fmt.sbprintf(&args,"%s.ref(&w.entities)",core_alias)
+            case .Commands: fmt.sbprintf(&args,"%s.commands(w,app.info)",core_alias)
+            case .World_Ref: fmt.sbprintf(&args,"%s.world_ref(w,app.info)",core_alias)
+            case .App: fmt.sbprint(&args,"app")
+            case .Records:
+                index,_:=slice.linear_search(g.records[:],param.record)
+                fmt.sbprintf(&args,"%s.Records(%s.%s){{%s.app_record_set(app,%d)}}",core_alias,param.record.pkg.alias,param.record.name,host_alias,index)
+            }
+        }
+        if len(step.params)>0 && step.params[len(step.params)-1].bundle!=nil {strings.write_string(&args,"}")}
+        call:=fmt.tprintf("%s.%s(%s)",step.pkg.alias,step.name,strings.to_string(args))
+        checks:=strings.builder_make(context.temp_allocator)
+        for param in step.params {
+            if param.kind!=.Table_Write {continue}
+            holder:=param.type.place==.Editor?"e":"w"
+            if strings.builder_len(checks)>0 {strings.write_string(&checks,",")}
+            fmt.sbprintf(&checks,"%s.write_check_begin(%s.raw(&%s.%s),size_of(%s.%s))",core_alias,core_alias,holder,param.type.field,param.type.pkg.alias,param.type.name)
+        }
+        fmt.sbprintf(w,"call_%s :: proc(world,shared,editor:rawptr,app_data:rawptr,worker:int) {{\n",step.name)
+        fmt.sbprintf(w,"    w:=cast(^World)world\n    s:=cast(^Shared)shared\n    e:=cast(^Editor)editor\n    app:=cast(^%s.App)app_data\n    _,_,_=s,e,app\n",host_alias)
+        // A client neither runs nor resimulates what the server or a game alone decides.
+        if step.server {fmt.sbprintf(w,"    if w.%s.role==.Client {{return}}\n",g.by_key["mirai:core.Network"].field)}
+        fmt.sbprintf(w,"    started:=gen_time.tick_now()\n    zone:=%s.profile_step_begin(app,%d,worker)\n",host_alias,si)
+        if strings.builder_len(checks)>0 {
+            fmt.sbprintf(w,"    when %s.CHECK_WRITES {{\n        checks:=[?]%s.Write_Check{{%s}}\n        %s\n        %s.write_check_end(checks[:],\"%s\")\n    }} else {{%s}}\n",core_alias,core_alias,strings.to_string(checks),call,core_alias,step.name,call)
+        } else {
+            fmt.sbprintf(w,"    %s\n",call)
+        }
+        // What it adds and removes applies to the tables it could write;
+        // to all of them when it can create or destroy entities, or
+        // change what is disabled.
+        whole:=step_whole(g,step)
+        for param in step.params {
+            if param.kind!=.Table_Write || whole {continue}
+            holder:=param.type.place==.Editor?"e":"w"
+            fmt.sbprintf(w,"    %s.table_settle(&%s.%s,&w.entities)\n",core_alias,holder,param.type.field)
+        }
+        if whole {fmt.sbprint(w,"    settle(w,s,e)\n")}
+        fmt.sbprintf(w,"    %s.profile_step_end(zone)\n",host_alias)
+        fmt.sbprintf(w,"    if %d<len(app.step_ns) {{app.step_ns[%d]+=u64(gen_time.tick_since(started))}}\n}}\n\n",si,si)
+    }
+
+    // loops, and their order as info.order gives it
+    phases:=PHASES
+    titles:=PHASE_TITLES
+    loops:=LOOPS
+    defined,edged:[2][len(PHASES)]bool
+    for loop in 0..<(editor?2:1) {
+        for phase in 0..<len(PHASES) {
+            steps,_:=phase_order(g,loop,phase)
+            if len(steps)==0 {continue}
+            defined[loop][phase]=true
+            fmt.sbprintf(w,"%s_%s :: proc(world,shared,editor:rawptr,app_data:rawptr) {{\n",loops[loop],phases[phase])
+            for step in steps {fmt.sbprintf(w,"    call_%s(world,shared,editor,app_data,%s.PROFILE_MAIN)\n",step.name,host_alias)}
+            fmt.sbprint(w,"}\n")
+            fmt.sbprintf(w,"@(rodata) order_%s_%s:=[%d]i32{{",loops[loop],phases[phase],len(steps))
+            for step,k in steps {fmt.sbprintf(w,"%s%d",k>0?",":"",index_of[step])}
+            fmt.sbprint(w,"}\n")
+            edges:=phase_edges(g,steps)
+            edged[loop][phase]=len(edges)>0
+            if len(edges)>0 {
+                fmt.sbprintf(w,"@(rodata) edges_%s_%s:=[%d]%s.Step_Edge{{",loops[loop],phases[phase],len(edges),core_alias)
+                for edge,k in edges {fmt.sbprintf(w,"%s{{%d,%d}}",k>0?",":"",edge[0],edge[1])}
+                fmt.sbprint(w,"}\n")
+            }
+            fmt.sbprint(w,"\n")
+        }
+    }
+
+    // Defaults are also metadata for storage providers and project settings.
+    defaults:=make(map[^Type]string,context.temp_allocator)
+    for t in g.types {
+        if !included(t,editor) {continue}
+        value:=default_value(t) or_continue
+        name:=fmt.aprintf("default_%s",t.field)
+        fmt.sbprintf(w,"%s :: proc(dst:rawptr) {{(cast(^%s.%s)dst)^=%s}}\n",name,t.pkg.alias,t.name,value)
+        defaults[t]=name
+    }
+    for_device:=make(map[^Type]string,context.temp_allocator)
+    for t in g.types {
+        if t.kind!=.Storage || !included(t,editor) {continue}
+        maker:=for_device_value(t)
+        if maker=="" {continue}
+        name:=fmt.aprintf("for_device_%s",t.field)
+        fmt.sbprintf(w,"%s :: proc(dst:rawptr,device:rawptr) {{(cast(^%s.%s)dst)^=%s((cast(^gen_rhi.Device_Info)device)^)}}\n",name,t.pkg.alias,t.name,maker)
+        for_device[t]=name
+    }
+    fmt.sbprint(w,"\n")
+
+    // The descriptions of the fields of the components, read only.
+    for t in g.types {
+        if t.kind!=.Component || !included(t,editor) || len(t.fields)==0 {continue}
+        fmt.sbprintf(w,"@(rodata) fields_%s:=[%d]%s.Field_Description{{",t.field,len(t.fields),core_alias)
+        for field,k in t.fields {fmt.sbprintf(w,"%s{{%q,%q}}",k>0?",":"",field.name,field.text)}
+        fmt.sbprint(w,"}\n")
+    }
+    fmt.sbprint(w,"\n")
+
+    // What a new row of each record type starts as, and the descriptions of their fields.
+    for r in g.records {
+        tag:=fmt.tprintf("%s_%s",snake(r.pkg.name),snake(r.name))
+        if value,found:=record_default(r);found {fmt.sbprintf(w,"record_default_%s :: proc(dst:rawptr) {{(cast(^%s.%s)dst)^=%s}}\n",tag,r.pkg.alias,r.name,value)}
+        if len(r.fields)==0 {continue}
+        fmt.sbprintf(w,"@(rodata) record_fields_%s:=[%d]%s.Field_Description{{",tag,len(r.fields),core_alias)
+        for field,k in r.fields {fmt.sbprintf(w,"%s{{%q,%q}}",k>0?",":"",field.name,field.text)}
+        fmt.sbprint(w,"}\n")
+    }
+    fmt.sbprint(w,"\n")
+
+    // Two constants of a type with names have two values: the compiler knows them.
+    for value,vi in g.named_values {
+        if (value.pkg.editor || value.type.pkg.editor) && !editor {continue}
+        for other in g.named_values[vi+1:] {
+            if other.type!=value.type || (other.pkg.editor || other.type.pkg.editor) && !editor {continue}
+            fmt.sbprintf(w,"#assert(%s.%s!=%s.%s,%q)\n",value.pkg.alias,value.ident,other.pkg.alias,other.ident,fmt.tprintf("%s and %s have one value of %s: give one of them another",value.where_,other.where_,value.type.name))
+        }
+    }
+    fmt.sbprint(w,"\n")
+
+    // info
+    fmt.sbprintf(w,"info :: proc() -> %s.World_Info {{\n",core_alias)
+    fmt.sbprintf(w,"    tables:=make([]%s.Table_Info,%d)\n",core_alias,count_kind(g,.Component,editor))
+    i:=0
+    for t in g.types {
+        if t.kind!=.Component || !included(t,editor) {continue}
+        fields:=len(t.fields)>0?fmt.tprintf("fields_%s[:]",t.field):"nil"
+        game:=strings.has_prefix(t.pkg.path,"project:") && !strings.has_prefix(t.pkg.path,"project:plugins/")
+        fmt.sbprintf(w,"    tables[%d]={{\"%s\",\"%s\",typeid_of(%s.%s),type_info_of(%s.%s),offset_of(%s,%s),.%v,%v,.%v,%v,%s,%q,%s,%v,%v}}\n",i,t.name,t.pkg.name,t.pkg.alias,t.name,t.pkg.alias,t.name,struct_names[int(t.place)],t.field,t.place,t.shared,t.replication,game,defaults[t] or_else "nil",t.description,fields,t.single,t.far)
+        i+=1
+    }
+    fmt.sbprintf(w,"    storages:=make([]%s.Storage_Info,%d)\n",core_alias,count_kind(g,.Storage,editor))
+    i=0
+    for t in g.types {
+        if t.kind!=.Storage || !included(t,editor) {continue}
+        fmt.sbprintf(w,"    storages[%d]={{\"%s\",\"%s\",typeid_of(%s.%s),type_info_of(%s.%s),offset_of(%s,%s),.%v,.%v,%s,%v,%s,%v,%v,%q,%v}}\n",i,t.name,t.pkg.name,t.pkg.alias,t.name,t.pkg.alias,t.name,struct_names[int(t.place)],t.field,t.place,t.setting,defaults[t] or_else "nil",t.by_world,for_device[t] or_else "nil",t.persist,t.keep,project.import_plugin(t.pkg.path),strings.has_prefix(t.pkg.path,"project:") && !strings.has_prefix(t.pkg.path,"project:plugins/"))
+        i+=1
+    }
+    fmt.sbprintf(w,"    messages:=make([]%s.Message_Info,%d)\n",core_alias,len(g.messages))
+    for m,mi in g.messages {
+        fmt.sbprintf(w,"    messages[%d]={{\"%s\",\"%s\",typeid_of(%s.%s),type_info_of(%s.%s),.%v,%v}}\n",mi,m.name,m.pkg.name,m.pkg.alias,m.name,m.pkg.alias,m.name,m.from,m.reliable)
+    }
+    named_count,bits_count:=0,0
+    for value in g.named_values {
+        if editor || !value.pkg.editor && !value.type.pkg.editor {named_count+=1}
+    }
+    for t in g.named_type_list {
+        if t.bits_of!="" && (editor || !t.pkg.editor) {bits_count+=1}
+    }
+    fmt.sbprintf(w,"    names:=make([]%s.Name_Info,%d)\n",core_alias,named_count)
+    i=0
+    for value in g.named_values {
+        if (value.pkg.editor || value.type.pkg.editor) && !editor {continue}
+        fmt.sbprintf(w,"    names[%d]={{typeid_of(%s.%s),i64(%s.%s),%q,\"%s\",%q,%d,%v,%v,%s}}\n",i,value.type.pkg.alias,value.type.name,value.pkg.alias,value.ident,value.name,value.pkg.name,value.file,value.line,value.explicit,strings.has_prefix(value.pkg.path,"project:"),value.requires_type!=nil && (editor || value.requires_type.place!=.Editor)?fmt.tprintf("typeid_of(%s.%s)",value.requires_type.pkg.alias,value.requires_type.name):"nil")
+        i+=1
+    }
+    types_count:=0
+    for t in g.named_type_list {
+        if t.bits_of=="" && (editor || !t.pkg.editor) {types_count+=1}
+    }
+    fmt.sbprintf(w,"    named_types:=make([]%s.Named_Type_Info,%d)\n",core_alias,types_count)
+    i=0
+    for t in g.named_type_list {
+        if t.bits_of!="" || t.pkg.editor && !editor {continue}
+        limit:=fmt.tprintf("i64(1)<<uint(min(8*size_of(%s.%s),63))",t.pkg.alias,t.name)
+        for mask in g.named_type_list {
+            if mask.bits_of==t.key {limit=fmt.tprintf("min(%s,i64(8*size_of(%s.%s)))",limit,mask.pkg.alias,mask.name)}
+        }
+        fmt.sbprintf(w,"    named_types[%d]={{typeid_of(%s.%s),%q,%q,%q,%s}}\n",i,t.pkg.alias,t.name,t.name,t.pkg.path,t.prefix,limit)
+        i+=1
+    }
+    fmt.sbprintf(w,"    name_bits:=make([]%s.Name_Bits_Info,%d)\n",core_alias,bits_count)
+    i=0
+    for t in g.named_type_list {
+        if t.bits_of=="" || t.pkg.editor && !editor {continue}
+        of:=g.named_types[t.bits_of]
+        fmt.sbprintf(w,"    name_bits[%d]={{typeid_of(%s.%s),typeid_of(%s.%s)}}\n",i,t.pkg.alias,t.name,of.pkg.alias,of.name)
+        i+=1
+    }
+    fmt.sbprintf(w,"    records:=make([]%s.Record_Info,%d)\n",core_alias,len(g.records))
+    for r,ri in g.records {
+        tag:=fmt.tprintf("%s_%s",snake(r.pkg.name),snake(r.name))
+        _,has_default:=record_default(r)
+        game:=strings.has_prefix(r.pkg.path,"project:") && !strings.has_prefix(r.pkg.path,"project:plugins/")
+        fmt.sbprintf(w,"    records[%d]={{\"%s\",\"%s\",typeid_of(%s.%s),type_info_of(%s.%s),typeid_of(%s.Record(%s.%s)),%s,%q,%s,%v}}\n",ri,r.name,r.pkg.name,r.pkg.alias,r.name,r.pkg.alias,r.name,core_alias,r.pkg.alias,r.name,has_default?fmt.tprintf("record_default_%s",tag):"nil",r.description,len(r.fields)>0?fmt.tprintf("record_fields_%s[:]",tag):"nil",game)
+    }
+    fmt.sbprintf(w,"    steps:=make([]%s.Step_Info,%d)\n",core_alias,len(kept))
+    for s,si in kept {
+        phase_set:=strings.builder_make(context.temp_allocator)
+        for on,p in s.phases {
+            if on {fmt.sbprintf(&phase_set,".%s,",titles[p])}
+        }
+        loop_set:=strings.builder_make(context.temp_allocator)
+        if s.loops[0] {strings.write_string(&loop_set,".Game,")}
+        if s.loops[1] {strings.write_string(&loop_set,".Editor,")}
+        fmt.sbprintf(w,"    steps[%d]={{\"%s\",\"%s\",{{%s}},{{%s}},call_%s,%v}}\n",si,s.name,s.pkg.name,strings.to_string(phase_set),strings.to_string(loop_set),s.name,step_access(g,s).main)
+    }
+    fmt.sbprintf(w,"    info:%s.World_Info\n",core_alias)
+    fmt.sbprint(w,"    info.sizes={.World=size_of(World),.Shared=size_of(Shared),.Editor=size_of(Editor)}\n")
+    fmt.sbprint(w,"    info.aligns={.World=align_of(World),.Shared=align_of(Shared),.Editor=align_of(Editor)}\n")
+    fmt.sbprint(w,"    info.entities=offset_of(World,entities)\n")
+    fmt.sbprint(w,"    info.tables,info.storages,info.messages,info.steps=tables,storages,messages,steps\n")
+    fmt.sbprint(w,"    info.named_types,info.names,info.name_bits=named_types,names,name_bits\n")
+    fmt.sbprint(w,"    info.records=records\n")
+    fmt.sbprint(w,"    info.init={.World=init_World,.Shared=init_Shared,.Editor=init_Editor}\n")
+    fmt.sbprint(w,"    info.destroy={.World=destroy_World,.Shared=destroy_Shared,.Editor=destroy_Editor}\n")
+    fmt.sbprint(w,"    info.copy,info.copy_changed=copy_world,copy_changed_world\n    info.swap=swap_world\n    info.clear=clear_world\n    info.settle=settle\n    info.attach,info.detach=attach_World,detach_World\n")
+    for loop in 0..<(editor?2:1) {
+        for phase in 0..<len(PHASES) {
+            if defined[loop][phase] {fmt.sbprintf(w,"    info.loops[.%s][.%s],info.order[.%s][.%s]=%s_%s,order_%s_%s[:]\n",loop==0?"Game":"Editor",titles[phase],loop==0?"Game":"Editor",titles[phase],loops[loop],phases[phase],loops[loop],phases[phase])}
+            if edged[loop][phase] {fmt.sbprintf(w,"    info.edges[.%s][.%s]=edges_%s_%s[:]\n",loop==0?"Game":"Editor",titles[phase],loops[loop],phases[phase])}
+        }
+    }
+    fmt.sbprint(w,"    info.parallel=true\n")
+    fmt.sbprintf(w,"    %s.world_info_index(&info)\n",core_alias)
+    fmt.sbprint(w,"    return info\n}\n")
+    return strings.to_string(b)
+}
+
+@(private="file")
+alias_of :: proc(g:^Generator,path:string) -> string {
+    for pkg in g.packages {
+        if pkg.path==path {return pkg.alias}
+    }
+    return ""
+}
+
+@(private="file")
+count_kind :: proc(g:^Generator,kind:Kind,editor:bool) -> (n:int) {
+    for t in g.types {
+        if t.kind==kind && (editor || t.place!=.Editor) {n+=1}
+    }
+    return
+}
+
+@(private="file")
+is_keyword :: proc(name:string) -> bool {
+    switch name {
+    case "asm","auto_cast","bit_field","bit_set","break","case","cast","context","continue","defer","distinct","do","dynamic","else","enum","fallthrough","for","foreign","if","import","in","map","matrix","not_in","or_break","or_continue","or_else","or_return","package","proc","return","struct","switch","transmute","typeid","union","using","when","where","world","shared","editor","app","w","s","e":
+        return true
+    }
+    return false
+}
+
+// The call that frees what the value of a storage at pointer holds.
+@(private="file")
+value_free_call :: proc(t:^Type,core_alias,pointer:string) -> string {
+    if t.free!="" {return fmt.tprintf("%s.%s(%s)",t.pkg.alias,t.free,pointer)}
+    return fmt.tprintf("%s.value_free(%s,type_info_of(%s.%s))",core_alias,pointer,t.pkg.alias,t.name)
+}
+
+// What a component row or a storage starts as: <NAME>_DEFAULT or <name>_default() of its package.
+@(private="file")
+default_value :: proc(t:^Type) -> (value:string,found:bool) {
+    constant:=fmt.aprintf("%s_DEFAULT",strings.to_upper(snake(t.name),context.temp_allocator))
+    maker:=fmt.aprintf("%s_default",snake(t.name))
+    switch {
+    case t.pkg.names[constant]: return fmt.aprintf("%s.%s",t.pkg.alias,constant),true
+    case t.pkg.names[maker]:    return fmt.aprintf("%s.%s()",t.pkg.alias,maker),true
+    }
+    return "",false
+}
+
+// What a new row of a record type starts as: <NAME>_DEFAULT or <name>_default() of its package.
+@(private="file")
+record_default :: proc(r:^Record_Type) -> (value:string,found:bool) {
+    return default_value(&Type{name=r.name,pkg=r.pkg})
+}
+
+// The default of a storage on a GPU: <name>_for_device(device:rhi.Device_Info) of its package; "" without one.
+@(private="file")
+for_device_value :: proc(t:^Type) -> string {
+    maker:=fmt.tprintf("%s_for_device",snake(t.name))
+    return t.pkg.names[maker]?fmt.aprintf("%s.%s",t.pkg.alias,maker):""
+}
+
+// The options of the attributes of a declaration: name, or name="value", or name=number.
+@(private="file")
+attributes_read :: proc(attributes:[]^ast.Attribute) -> map[string]string {
+    options:=make(map[string]string,context.temp_allocator)
+    for attribute in attributes {
+        for elem in attribute.elems {
+            #partial switch v in elem.derived {
+            case ^ast.Ident:
+                options[v.name]=""
+            case ^ast.Field_Value:
+                name:=ident_name(v.field)
+                if lit,is_lit:=v.value.derived.(^ast.Basic_Lit);is_lit {
+                    if name=="description" {
+                        options[name],_,_=strconv.unquote_string(lit.tok.text,context.temp_allocator)
+                    } else {options[name]=strings.trim(lit.tok.text,"\"`")}
+                } else if neg,is_unary:=v.value.derived.(^ast.Unary_Expr);is_unary {
+                    if lit,inner:=neg.expr.derived.(^ast.Basic_Lit);inner {options[name]=fmt.tprintf("%s%s",neg.op.text,lit.tok.text)}
+                } else if ident,is_ident:=v.value.derived.(^ast.Ident);is_ident {
+                    options[name]=ident.name
+                } else {
+                    options[name]=""
+                }
+            }
+        }
+    }
+    return options
+}
+
+// The comment on the line of each field of the struct of a component: what
+// component.list and the inspector show of the field.
+@(private="file")
+field_comments :: proc(fields:^[dynamic]core.Field_Description,value:^ast.Expr) {
+    record,is_struct:=value.derived.(^ast.Struct_Type)
+    if !is_struct || record.fields==nil {return}
+    for field in record.fields.list {
+        if field.comment==nil || len(field.comment.list)==0 {continue}
+        text:=strings.builder_make()
+        for token in field.comment.list {
+            line:=strings.trim_space(strings.trim_prefix(token.text,"//"))
+            if line=="" {continue}
+            if strings.builder_len(text)>0 {strings.write_byte(&text,' ')}
+            strings.write_string(&text,line)
+        }
+        if strings.builder_len(text)==0 {continue}
+        for name in field.names {append(fields,core.Field_Description{ident_name(name),strings.to_string(text)})}
+    }
+}
+
+// Where a type holds what the profile of the player does not keep: the field,
+// what it is and how to keep it instead; what is "" for plain data. A type
+// of a package the world does not read is taken as plain.
+@(private="file")
+persist_unkept :: proc(g:^Generator,file:^ast.File,pkg:^Package,expr:^ast.Expr,path:string,depth:int) -> (field,what,fix:string) {
+    if expr==nil || depth>32 {return}
+    LIST :: "give it a fixed array ([N]T) and a count"
+    POINTER :: "keep the value it points at, or an id of it"
+    #partial switch v in expr.derived {
+    case ^ast.Dynamic_Array_Type: return path,"a dynamic array",LIST
+    case ^ast.Map_Type:           return path,"a map","give it a fixed array of its pairs and a count"
+    case ^ast.Union_Type:         return path,"a union","give it an enum of what it holds and the fields of each"
+    case ^ast.Pointer_Type,^ast.Multi_Pointer_Type,^ast.Proc_Type: return path,"a pointer",POINTER
+    case ^ast.Array_Type:
+        if v.len==nil {return path,"a slice",LIST}
+        return persist_unkept(g,file,pkg,v.elem,path,depth+1)
+    case ^ast.Distinct_Type: return persist_unkept(g,file,pkg,v.type,path,depth+1)
+    case ^ast.Paren_Expr:    return persist_unkept(g,file,pkg,v.expr,path,depth+1)
+    case ^ast.Call_Expr:     return persist_unkept(g,file,pkg,v.expr,path,depth+1)
+    case ^ast.Struct_Type:
+        if v.fields==nil {return}
+        for f in v.fields.list {
+            name:=len(f.names)>0?ident_name(f.names[0]):""
+            inner:=path==""?name:fmt.aprintf("%s.%s",path,name)
+            if field,what,fix=persist_unkept(g,file,pkg,f.type,inner,depth+1);what!="" {return}
+        }
+    case ^ast.Ident:
+        switch v.name {
+        case "string","cstring":      return path,"a string","make it a [N]u8 that base.text_set writes"
+        case "rawptr","any","typeid": return path,"a pointer",POINTER
+        }
+        if at,value,found:=type_decl(pkg,v.name);found {return persist_unkept(g,at,pkg,value,path,depth+1)}
+    case ^ast.Selector_Expr:
+        imported,found:=import_path(g,file,ident_name(v.expr))
+        if !found {return}
+        if v.field.name=="Entity" && (imported=="mirai:std/base" || imported=="mirai:core") {
+            return path,"an Entity, which names nothing in another run","keep the Entity_Id of what it names (core.id_of)"
+        }
+        for other in g.packages {
+            if other.path!=imported {continue}
+            if at,value,ok:=type_decl(other,v.field.name);ok {return persist_unkept(g,at,other,value,path,depth+1)}
+        }
+    }
+    return
+}
+
+// The value of the constant declaration of a name in a package.
+@(private="file")
+type_decl :: proc(pkg:^Package,name:string) -> (file:^ast.File,value:^ast.Expr,found:bool) {
+    for f in pkg.files {
+        for stmt in f.decls {
+            decl,is_value:=stmt.derived.(^ast.Value_Decl)
+            if !is_value || decl.is_mutable || len(decl.names)!=1 || len(decl.values)!=1 || ident_name(decl.names[0])!=name {continue}
+            return f,decl.values[0],true
+        }
+    }
+    return
+}
+
+@(private="file")
+ident_name :: proc(expr:^ast.Expr) -> string {
+    if ident,ok:=expr.derived.(^ast.Ident);ok {return ident.name}
+    return ""
+}
+
+@(private="file")
+expr_text :: proc(file:^ast.File,expr:^ast.Expr) -> string {
+    if expr==nil {return ""}
+    start,end:=expr.pos.offset,expr.end.offset
+    if start<0 || end>len(file.src) || start>=end {return "?"}
+    return file.src[start:end]
+}
+
+@(private="file")
+snake :: proc(name:string) -> string {
+    b:=strings.builder_make()
+    for c,i in name {
+        if c>='A' && c<='Z' {
+            // A capital after a capital is in the same word: UI_Settings is ui_settings.
+            if i>0 && name[i-1]!='_' && !(name[i-1]>='A' && name[i-1]<='Z') {strings.write_byte(&b,'_')}
+            strings.write_rune(&b,c+('a'-'A'))
+        } else {
+            strings.write_rune(&b,c)
+        }
+    }
+    text:=strings.to_string(b)
+    text,_=strings.replace_all(text,"__","_")
+    return text
+}

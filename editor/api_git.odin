@@ -1,0 +1,299 @@
+package editor
+
+import "core:fmt"
+import "core:strings"
+import "mirai:asset"
+import "mirai:editor/api"
+import "mirai:platform"
+import "mirai:std/base"
+import "mirai:std/serial"
+
+// Git through the agent API (git.odin). An operation starts and the call
+// returns: git.status says while it runs ("busy") and what it left.
+
+Api_Git_Init_Params :: struct {
+    remote:[GIT_PATH_BYTES]u8 `mirai:"text,optional,label=The url of the remote origin; empty for none"`,
+    lfs:bool `mirai:"optional,label=Keep textures and meshes and sounds and their sources in Git LFS"`,
+}
+
+Api_Git_Commit_Params :: struct {
+    message:[GIT_MESSAGE_BYTES]u8 `mirai:"text,label=The message of the commit"`,
+    push:bool `mirai:"optional,label=Push the commit after"`,
+}
+
+Api_Git_Choose_Params :: struct {
+    conflict:int `mirai:"optional,label=A conflict of a value or a row by its index in git.conflicts"`,
+    item:int `mirai:"optional,label=A file merged whole by the index of its item in git.conflicts"`,
+    choice:[16]u8 `mirai:"text,label=ours or theirs; for a file merged whole also folder: as it is in the work tree"`,
+}
+
+Api_Git_Accept_Params :: struct {
+    item:int `mirai:"optional,label=The item to accept by its index; omitted: every item"`,
+    reject:bool `mirai:"optional,label=Keep ours for every conflict of the item instead"`,
+}
+
+Api_Git_Started :: struct {started:bool}
+Api_Git_Chosen :: struct {chosen:bool}
+Api_Git_Accept_Result :: struct {left:int `mirai:"label=Items that still wait to be accepted"`}
+
+Api_Git_Status :: struct {
+    available:bool `mirai:"label=Whether git was found"`,
+    checked:bool `mirai:"label=Whether the repository was read once"`,
+    repository:bool `mirai:"label=Whether the project is in a repository"`,
+    busy:[16]u8 `mirai:"text,label=The operation that runs (init commit push pull fetch discard abort finish...); empty when none"`,
+    error:[512]u8 `mirai:"text,label=What the last operation that failed said"`,
+    root:[GIT_PATH_BYTES]u8 `mirai:"text,label=The work tree"`,
+    branch:[96]u8 `mirai:"text"`,
+    upstream:bool `mirai:"label=Whether the branch has an upstream; ahead and behind count against it"`,
+    ahead,behind:int,
+    remote:[GIT_PATH_BYTES]u8 `mirai:"text,label=The url of origin"`,
+    merging:bool `mirai:"label=A pull left conflicts: git.conflicts lists them"`,
+    changes:[1]Api_Git_Change `mirai:"list,label=Every file changed under the project"`,
+    history:[1]Api_Git_Commit `mirai:"list,label=The last commits"`,
+}
+Api_Git_Change :: struct {
+    path:[GIT_PATH_BYTES]u8 `mirai:"text,label=From the root of the repository; git.discard takes it"`,
+    status:[1]u8 `mirai:"text,label=M changed; A added; D removed; U in conflict"`,
+    included:bool `mirai:"label=Whether the next commit takes it"`,
+}
+Api_Git_Commit :: struct {
+    hash:[16]u8 `mirai:"text"`,
+    author:[48]u8 `mirai:"text"`,
+    age:[32]u8 `mirai:"text,label=How long ago as git says it"`,
+    subject:[128]u8 `mirai:"text"`,
+}
+
+Api_Git_Conflicts :: struct {
+    merging:bool,
+    loaded:bool `mirai:"label=Whether the conflicts of the merge were read"`,
+    items:[1]Api_Git_Item `mirai:"list"`,
+}
+Api_Git_Item :: struct {
+    index:int `mirai:"label=What git.choose and git.accept take as item"`,
+    file:[GIT_PATH_BYTES]u8 `mirai:"text,label=From the folder of the project"`,
+    name:[64]u8 `mirai:"text"`,
+    entity:base.Entity_Id `mirai:"optional,label=The entity of a scene the item merges"`,
+    accepted:bool,
+    whole:[8]u8 `mirai:"text,optional,label=Of a file merged whole: the version chosen (ours theirs or folder)"`,
+    text:bool `mirai:"optional,label=Of a file merged whole: whether it is text"`,
+    conflicts:[1]Api_Git_Conflict `mirai:"list"`,
+}
+Api_Git_Conflict :: struct {
+    index:int `mirai:"label=What git.choose takes as conflict"`,
+    kind:[8]u8 `mirai:"text,label=value: both changed it; removed: one side removed the row; table: both changed a table"`,
+    path:[GIT_PATH_BYTES]u8 `mirai:"text,label=Where in the asset"`,
+    component:[64]u8 `mirai:"text,label=The component or the table"`,
+    field:[160]u8 `mirai:"text"`,
+    ours:u8 `mirai:"any,optional,label=Of a value: ours as JSON"`,
+    theirs:u8 `mirai:"any,optional,label=Of a value: theirs as JSON"`,
+    ours_has:bool `mirai:"optional,label=Of a row: whether ours has it"`,
+    theirs_has:bool `mirai:"optional,label=Of a row: whether theirs has it"`,
+    choice:[8]u8 `mirai:"text,label=ours or theirs; theirs until chosen"`,
+}
+
+@(private)
+git_api_register :: proc(s:^Session,st:^Api_State) {
+    init:Api_Git_Init_Params
+    commit:Api_Git_Commit_Params
+    choose:=Api_Git_Choose_Params{conflict=-1,item=-1}
+    accept:=Api_Git_Accept_Params{item=-1}
+    api_register(s,st,{name="git.status",summary="The repository of the project as the Git tab shows it: branch, remote, changed files, last commits and the operation that runs. Reading it refreshes it.",result=Api_Git_Status,writes_result=true,flags={.Read_Only},run=api_git_status})
+    api_register(s,st,{name="git.init",summary="Makes the project a repository whose assets merge entity by entity with Mirai, with Git LFS for heavy binaries when asked.",params=Api_Git_Init_Params,result=Api_Git_Started,defaults=&init,run=api_git_init})
+    api_register(s,st,{name="git.commit",summary="Commits the included changes of the project as they are saved and pushes them when asked. Fails with unsaved changes.",params=Api_Git_Commit_Params,result=Api_Git_Started,defaults=&commit,run=api_git_commit})
+    api_register(s,st,{name="git.push",summary="Pushes the commits of the branch to origin, setting its upstream the first time.",result=Api_Git_Started,run=api_git_push})
+    api_register(s,st,{name="git.pull",summary="Merges origin into the branch, assets entity by entity; what both sides changed leaves a merge with conflicts. Needs every change committed.",result=Api_Git_Started,run=api_git_pull})
+    api_register(s,st,{name="git.conflicts",summary="The items of a merge that waits (an entity of a scene or a whole file) with their conflicts. Every conflict takes theirs until chosen.",result=Api_Git_Conflicts,writes_result=true,flags={.Read_Only},run=api_git_conflicts})
+    api_register(s,st,{name="git.choose",summary="Chooses the side of a conflict or the version of a file merged whole; its item waits to be accepted again.",params=Api_Git_Choose_Params,result=Api_Git_Chosen,defaults=&choose,run=api_git_choose})
+    api_register(s,st,{name="git.accept",summary="Accepts an item as chosen, or every item; with reject, keeps ours for its conflicts.",params=Api_Git_Accept_Params,result=Api_Git_Accept_Result,defaults=&accept,run=api_git_accept})
+    api_register(s,st,{name="git.finish",summary="Once every item is accepted: writes each file as chosen and commits the merge.",result=Api_Git_Started,run=api_git_finish})
+    api_register(s,st,{name="git.discard",summary="Puts a changed file, or every change, back as the last commit has it; an untracked file goes to the trash. Refused with unsaved work or in a merge.",params=Api_Git_Discard_Params,result=Api_Git_Started,flags={.Destructive},run=api_git_discard})
+    api_register(s,st,{name="git.abort",summary="Leaves a merge with conflicts: the files go back to the commit before the pull.",result=Api_Git_Started,flags={.Destructive},run=api_git_abort})
+}
+
+@(private)
+api_git_started :: proc(call:^api.Call,message:string) {
+    if message!="" {api.call_fail(call,api.SERVER_ERROR,message);return}
+    api.call_result(call,Api_Git_Started).started=true
+}
+
+@(private)
+api_git_status :: proc(s:^Session,call:^api.Call) {
+    g:=s.git
+    if !git_busy(g) && (!g.checked || platform.clock_seconds()-g.refreshed>1) {git_refresh(s)}
+    out:=call.out
+    serial.write_u8(out,'{')
+    api.write_bool(out,"available",g.available,true)
+    api.write_bool(out,"checked",g.checked)
+    api.write_bool(out,"repository",g.repository)
+    operations:=[Git_Operation]string{.None="",.Check="check",.Refresh="refresh",.Init="init",.Commit="commit",.Commit_Push="commit",.Push="push",.Pull="pull",.Abort="abort",.Finish="finish",.Load="load",.Fetch="fetch",.Discard="discard"}
+    api.write_text(out,"busy",operations[g.operation])
+    api.write_text(out,"error",base.text_get(g.error[:]))
+    api.write_text(out,"root",base.text_get(g.root[:]))
+    api.write_text(out,"branch",base.text_get(g.branch[:]))
+    api.write_bool(out,"upstream",g.upstream)
+    api.write_int(out,"ahead",i64(g.ahead))
+    api.write_int(out,"behind",i64(g.behind))
+    api.write_text(out,"remote",base.text_get(g.remote[:]))
+    api.write_bool(out,"merging",g.merging)
+    api.write_key(out,"changes")
+    serial.write_u8(out,'[')
+    for &change,i in g.changes {
+        if i>0 {serial.write_u8(out,',')}
+        serial.write_u8(out,'{')
+        api.write_text(out,"path",git_change_path(g,&change),true)
+        status:=[1]u8{change.status}
+        api.write_text(out,"status",string(status[:]))
+        api.write_bool(out,"included",!change.left_out)
+        serial.write_u8(out,'}')
+    }
+    serial.text_write_raw(out,"]")
+    api.write_key(out,"history")
+    serial.write_u8(out,'[')
+    for &commit,i in g.history {
+        if i>0 {serial.write_u8(out,',')}
+        serial.write_u8(out,'{')
+        api.write_text(out,"hash",base.text_get(commit.hash[:]),true)
+        api.write_text(out,"author",base.text_get(commit.author[:]))
+        api.write_text(out,"age",base.text_get(commit.age[:]))
+        api.write_text(out,"subject",base.text_get(commit.subject[:]))
+        serial.write_u8(out,'}')
+    }
+    serial.text_write_raw(out,"]}")
+}
+
+@(private)
+api_git_init :: proc(s:^Session,call:^api.Call) {
+    p:=api.call_params(call,Api_Git_Init_Params)
+    g:=s.git
+    base.text_set(g.remote_field[:],base.text_get(p.remote[:]))
+    g.remote_length=len(base.text_get(g.remote_field[:]))
+    g.lfs=p.lfs
+    api_git_started(call,git_init(s))
+}
+
+@(private)
+api_git_commit :: proc(s:^Session,call:^api.Call) {
+    p:=api.call_params(call,Api_Git_Commit_Params)
+    g:=s.git
+    base.text_set(g.message[:],base.text_get(p.message[:]))
+    g.message_length=len(base.text_get(g.message[:]))
+    api_git_started(call,git_commit(s,p.push))
+}
+
+@(private)
+api_git_push :: proc(s:^Session,call:^api.Call) {api_git_started(call,git_push(s))}
+@(private)
+api_git_pull :: proc(s:^Session,call:^api.Call) {api_git_started(call,git_pull(s))}
+@(private)
+api_git_abort :: proc(s:^Session,call:^api.Call) {api_git_started(call,git_abort(s))}
+
+Api_Git_Discard_Params :: struct {
+    path:[GIT_PATH_BYTES]u8 `mirai:"text,optional,label=The file to put back from the root of the repository as git.status lists it; every change without it"`,
+}
+
+@(private)
+api_git_discard :: proc(s:^Session,call:^api.Call) {
+    path:=base.text_get(api.call_params(call,Api_Git_Discard_Params).path[:])
+    paths:=[1]string{path}
+    api_git_started(call,git_discard(s,path!=""?paths[:]:nil))
+}
+
+@(private)
+api_git_conflicts :: proc(s:^Session,call:^api.Call) {
+    g:=s.git
+    m:=&g.merge
+    out:=call.out
+    serial.write_u8(out,'{')
+    api.write_bool(out,"merging",g.merging,true)
+    api.write_bool(out,"loaded",m.loaded)
+    api.write_key(out,"items")
+    serial.write_u8(out,'[')
+    for &item,i in m.items {
+        if i>0 {serial.write_u8(out,',')}
+        file:=&m.files[item.file]
+        serial.write_u8(out,'{')
+        api.write_int(out,"index",i64(i),true)
+        api.write_text(out,"file",strings.trim_prefix(base.text_get(file.path[:]),base.text_get(g.prefix[:])))
+        api.write_text(out,"name",base.text_get(item.name[:]))
+        if item.key!=0 {api.write_text(out,"entity",fmt.tprintf("0x%016x",u64(item.key)))}
+        api.write_bool(out,"accepted",item.accepted)
+        if file.merged==nil {
+            wholes:=[Git_Whole]string{.Theirs="theirs",.Ours="ours",.Folder="folder"}
+            api.write_text(out,"whole",wholes[file.whole])
+            api.write_bool(out,"text",file.text)
+        }
+        api.write_key(out,"conflicts")
+        serial.write_u8(out,'[')
+        for &conflict,c in m.conflicts[item.first:][:item.count] {
+            if c>0 {serial.write_u8(out,',')}
+            kinds:=[asset.Merge_Kind]string{.Value="value",.Removed="removed",.Table="table"}
+            serial.write_u8(out,'{')
+            api.write_int(out,"index",i64(item.first+c),true)
+            api.write_text(out,"kind",kinds[conflict.kind])
+            api.write_text(out,"path",base.text_get(conflict.path[:]))
+            api.write_text(out,"component",base.text_get(conflict.table[:]))
+            api.write_text(out,"field",base.text_get(conflict.field[:]))
+            if conflict.kind==.Value {
+                api.write_key(out,"ours");serial.text_write_raw(out,base.text_get(conflict.ours[:]))
+                api.write_key(out,"theirs");serial.text_write_raw(out,base.text_get(conflict.theirs[:]))
+            } else {
+                api.write_bool(out,"ours_has",conflict.ours_has)
+                api.write_bool(out,"theirs_has",conflict.theirs_has)
+            }
+            api.write_text(out,"choice",conflict.take_ours?"ours":"theirs")
+            serial.write_u8(out,'}')
+        }
+        serial.text_write_raw(out,"]}")
+    }
+    serial.text_write_raw(out,"]}")
+}
+
+@(private)
+api_git_merge_ready :: proc(s:^Session,call:^api.Call) -> bool {
+    g:=s.git
+    if !g.merging || !g.merge.loaded {api.call_fail(call,api.SERVER_ERROR,"No merge waits for its conflicts");return false}
+    return true
+}
+
+@(private)
+api_git_choose :: proc(s:^Session,call:^api.Call) {
+    if !api_git_merge_ready(s,call) {return}
+    p:=api.call_params(call,Api_Git_Choose_Params)
+    g:=s.git
+    choice:=base.text_get(p.choice[:])
+    if p.conflict>=0 {
+        if p.conflict>=len(g.merge.conflicts) {api.call_failf(call,api.INVALID_PARAMS,"conflict %d does not exist; git.conflicts lists %d",p.conflict,len(g.merge.conflicts));return}
+        if choice!="ours" && choice!="theirs" {api.call_fail(call,api.INVALID_PARAMS,"choice is ours or theirs for a conflict");return}
+        git_conflict_choose(s,p.conflict,choice=="ours")
+    } else if p.item>=0 && p.item<len(g.merge.items) {
+        item:=&g.merge.items[p.item]
+        file:=&g.merge.files[item.file]
+        if file.merged!=nil {api.call_fail(call,api.INVALID_PARAMS,"the item merges entity by entity: choose its conflicts");return}
+        switch choice {
+        case "ours": file.whole=.Ours
+        case "theirs": file.whole=.Theirs
+        case "folder": file.whole=.Folder
+        case: api.call_fail(call,api.INVALID_PARAMS,"choice is ours, theirs or folder for a file merged whole");return
+        }
+        item.accepted=false
+    } else {
+        api.call_fail(call,api.INVALID_PARAMS,"give conflict or item, as git.conflicts lists them")
+        return
+    }
+    api.call_result(call,Api_Git_Chosen).chosen=true
+}
+
+@(private)
+api_git_accept :: proc(s:^Session,call:^api.Call) {
+    if !api_git_merge_ready(s,call) {return}
+    p:=api.call_params(call,Api_Git_Accept_Params)
+    g:=s.git
+    if p.item<0 {git_merge_settle_all(s,p.reject)}
+    else if p.item<len(g.merge.items) {git_merge_settle(s,p.item,p.reject)}
+    else {api.call_failf(call,api.INVALID_PARAMS,"item %d does not exist; git.conflicts lists %d",p.item,len(g.merge.items));return}
+    r:=api.call_result(call,Api_Git_Accept_Result)
+    for item in g.merge.items {if !item.accepted {r.left+=1}}
+}
+
+@(private)
+api_git_finish :: proc(s:^Session,call:^api.Call) {api_git_started(call,git_merge_finish(s))}

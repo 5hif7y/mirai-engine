@@ -1,0 +1,6 @@
+{
+  "name": "destruct",
+  "version": "0.1.0",
+  "dependencies": ["physics"],
+  "parts": ["Runtime", "Editor"]
+}

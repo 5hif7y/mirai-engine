@@ -1,0 +1,320 @@
+package mirai_render
+
+import "base:runtime"
+import "core:encoding/json"
+import "core:fmt"
+import "core:math"
+import "core:os"
+import "core:path/filepath"
+import "core:reflect"
+import "core:strings"
+import "mirai:rhi"
+
+// A generation of the shaders loaded from disk; owned: its codes are memory of allocator.
+Shader_Assets :: struct {
+    codes:[Shader_Id]rhi.Shader_Code,
+    extensions:[]rhi.Shader_Code, // the stages the extensions of the generation bring, by name
+    programs:[]rhi.Shader_Code,   // the stages of the engine compiled for one material program each, by name
+    catalog:[]u8, // catalog.json of the generation: its material programs and the layout of its frame constants; empty when it has none
+    owned:bool,allocator:runtime.Allocator,
+}
+@(private)
+shader_code_destroy :: proc(c:rhi.Shader_Code,allocator:runtime.Allocator) {
+    delete(c.name,allocator);delete(c.bindings,allocator)
+    when ODIN_OS==.Darwin {delete(transmute([]u8)c.msl,allocator);delete(c.msl_entry,allocator)} else {delete(c.spirv,allocator)}
+}
+shader_assets_destroy :: proc(assets:^Shader_Assets) {
+    if assets.owned {
+        for c in assets.codes {shader_code_destroy(c,assets.allocator)}
+        for c in assets.extensions {shader_code_destroy(c,assets.allocator)}
+        for c in assets.programs {shader_code_destroy(c,assets.allocator)}
+        delete(assets.extensions,assets.allocator)
+        delete(assets.programs,assets.allocator)
+        delete(assets.catalog,assets.allocator)
+    }
+    assets^={}
+}
+
+FRAME_EXTENSION_CAPACITY :: 8
+
+// What an extension keeps in the constants of every view: the struct it declared for them.
+Frame_Extension :: struct {
+    name:string, // of the catalog the layout was read from
+    offset,size:int,
+}
+
+// The constants of a view in a generation of the shaders: Gpu_Frame, then the
+// nested views when the generation has them, then what each extension declared.
+Frame_Layout :: struct {
+    size:int,
+    nested:bool,
+    instance_ids:bool, // the G-buffer keeps the instance that drew each pixel (Surface_Source.Instance)
+    extensions:[FRAME_EXTENSION_CAPACITY]Frame_Extension,
+    extension_count:int,
+}
+
+// The layout the catalog of a generation declares; that of the engine alone without one.
+@(private)
+frame_layout_of :: proc(assets:^Shader_Assets) -> Frame_Layout {
+    layout:=Frame_Layout{size=size_of(Gpu_Frame)}
+    if len(assets.catalog)==0 {return layout}
+    value,parse_error:=json.parse(assets.catalog,allocator=context.temp_allocator)
+    root,is_object:=value.(json.Object)
+    if parse_error!=.None || !is_object {return layout}
+    frame,has_frame:=root["frame"].(json.Object)
+    if !has_frame {return layout}
+    whole :: proc(v:json.Value)->int {
+        if value,ok:=v.(json.Integer);ok {return int(value)}
+        if value,ok:=v.(json.Float);ok {return int(value)}
+        return 0
+    }
+    nested,_:=frame["nested"].(json.Boolean)
+    instance_ids,_:=frame["instance_ids"].(json.Boolean)
+    size:=whole(frame["size"])
+    core:=size_of(Gpu_Frame)+(NESTED_VIEW_CAPACITY*size_of(Gpu_Nested) if nested else 0)
+    if size<core || size>65536 {return layout}
+    extensions,_:=frame["extensions"].(json.Array)
+    for entry in extensions {
+        item,_:=entry.(json.Object)
+        name,_:=item["name"].(json.String)
+        offset,bytes:=whole(item["offset"]),whole(item["size"])
+        if name=="" || offset<core || bytes<=0 || offset+bytes>size || layout.extension_count>=FRAME_EXTENSION_CAPACITY {return {size=size_of(Gpu_Frame)}}
+        // The name lives as long as the catalog of the generation: find it there.
+        at:=strings.index(string(assets.catalog),name)
+        if at<0 {return {size=size_of(Gpu_Frame)}}
+        layout.extensions[layout.extension_count]={string(assets.catalog[at:][:len(name)]),offset,bytes}
+        layout.extension_count+=1
+    }
+    layout.size,layout.nested,layout.instance_ids=size,bool(nested),bool(instance_ids)
+    return layout
+}
+
+// A stage an extension of the generation brings, to make a pipeline from; nil
+// when the shaders in use have none with that name. It lasts until the shaders
+// are loaded again.
+@(private)
+extension_shader :: proc(r:^Renderer,name:string) -> ^rhi.Shader_Code {
+    for &code in r.shader_assets.extensions {if code.name==name {return &code}}
+    return nil
+}
+// A stage of the engine compiled for one material program (<stage>__<program>),
+// from the generation in use or, without one, from those the executable
+// embeds; nil when it has none. It lasts until the shaders are loaded again.
+@(private)
+program_shader :: proc(r:^Renderer,name:string) -> ^rhi.Shader_Code {
+    if !r.shader_assets.owned {
+        for &code in PROGRAM_SHADERS {if code.name==name {return &code}}
+        return nil
+    }
+    for &code in r.shader_assets.programs {if code.name==name {return &code}}
+    return nil
+}
+// Pipeline creation consumes the code; generations compare by content, not
+// storage. Authoring metadata is published even when GPU code is unchanged.
+shader_assets_match_codes :: proc(assets:^Shader_Assets,codes:^[Shader_Id]rhi.Shader_Code)->bool {
+    for next,id in assets.codes {
+        if !shader_code_matches(next,codes[id]) {return false}
+    }
+    return true
+}
+@(private)
+shader_code_matches :: proc(next,current:rhi.Shader_Code)->bool {
+    if next.name!=current.name || next.stage!=current.stage || next.threadgroup!=current.threadgroup || len(next.bindings)!=len(current.bindings) {return false}
+    for binding,i in next.bindings {if binding!=current.bindings[i] {return false}}
+    when ODIN_OS==.Darwin {
+        if next.msl!=current.msl || next.msl_entry!=current.msl_entry {return false}
+    } else {
+        if string(next.spirv)!=string(current.spirv) {return false}
+    }
+    return true
+}
+// Whether two generations bring the same stages of extensions, or of programs.
+@(private)
+shader_stages_match :: proc(next,current:[]rhi.Shader_Code)->bool {
+    if len(next)!=len(current) {return false}
+    for code,i in next {if !shader_code_matches(code,current[i]) {return false}}
+    return true
+}
+// Whether a folder of compiled shaders was built from the engine shader
+// sources this executable embeds. The structures both sides share, and the
+// passes that bind them, are those of one version of the sources: a
+// generation built for a project is used only while it is of the same one.
+shader_generation_current :: proc(directory:string)->bool {
+    path,_:=filepath.join({directory,"manifest.json"},context.temp_allocator)
+    bytes,read_error:=os.read_entire_file(path,context.temp_allocator)
+    if read_error!=nil {return false}
+    value,parse_error:=json.parse(bytes,allocator=context.temp_allocator)
+    root,ok:=value.(json.Object);if !ok || parse_error!=.None {return false}
+    engine,named:=root["engine"].(json.String)
+    return named && engine==SHADERS_FINGERPRINT
+}
+// On failure nothing is loaded: assets is empty and error is a message, in
+// context.temp_allocator when it names a file.
+shader_assets_load :: proc(directory:string,allocator:=context.allocator)->(assets:Shader_Assets,error:string) {
+    assets.owned=true;assets.allocator=allocator
+    path,_:=filepath.join({directory,"manifest.json"},context.temp_allocator)
+    bytes,read_error:=os.read_entire_file(path,context.temp_allocator)
+    if read_error!=nil {return {},"shader manifest could not be read"}
+    value,parse_error:=json.parse(bytes,allocator=context.temp_allocator)
+    root,ok:=value.(json.Object);if !ok || parse_error!=.None {return {},"invalid shader manifest"}
+    if engine,named:=root["engine"].(json.String);!named || engine!=SHADERS_FINGERPRINT {
+        return {},"these shaders were compiled from other engine shader sources than this executable has: build the engine again"
+    }
+    shaders,is_array:=root["shaders"].(json.Array);if !is_array {return {},"manifest has no shader array"}
+    text :: proc(v:json.Value)->string {return v.(json.String) or_else ""}
+    number :: proc(v:json.Value)->(u32,bool) {
+        n:f64
+        if value,ok:=v.(json.Integer);ok {n=f64(value)} else if value,ok:=v.(json.Float);ok {n=value} else {return 0,false}
+        if math.is_nan(n)||math.is_inf(n)||n<0||n>4294967295||math.floor(n)!=n {return 0,false}
+        return u32(n),true
+    }
+    extensions,_:=root["extensions"].(json.Array)
+    programs,_:=root["program_stages"].(json.Array)
+    assets.extensions=make([]rhi.Shader_Code,len(extensions),allocator)
+    assets.programs=make([]rhi.Shader_Code,len(programs),allocator)
+    for at in 0..<len(shaders)+len(programs)+len(extensions) {
+        program:=at>=len(shaders) && at<len(shaders)+len(programs)
+        extension:=at>=len(shaders)+len(programs)
+        entry:=extensions[at-len(shaders)-len(programs)] if extension else programs[at-len(shaders)] if program else shaders[at]
+        item,is_object:=entry.(json.Object);if !is_object {error="invalid shader entry";break}
+        code:^rhi.Shader_Code
+        if extension {
+            code=&assets.extensions[at-len(shaders)-len(programs)]
+        } else if program {
+            code=&assets.programs[at-len(shaders)]
+        } else {
+            id,valid:=reflect.enum_from_name(Shader_Id,text(item["id"]));if !valid {error=fmt.tprintf("unknown shader %s",text(item["id"]));break}
+            if assets.codes[id].name!="" {error="duplicate shader id";break}
+            code=&assets.codes[id]
+        }
+        code.name=strings.clone(text(item["name"]),allocator)
+        stage,valid_stage:=reflect.enum_from_name(rhi.Shader_Stage,text(item["stage"]));if !valid_stage {error="invalid shader stage";break};code.stage=stage
+        key := "msl" when ODIN_OS==.Darwin else "spv"
+        file,_:=filepath.join({directory,text(item[key])},context.temp_allocator)
+        data,problem:=os.read_entire_file(file,allocator);if problem!=nil {error=fmt.tprintf("cannot read %s",file);break}
+        when ODIN_OS==.Darwin {
+            code.msl=string(data);code.msl_entry=strings.clone(text(item["entry"]),allocator)
+            if code.msl_entry=="" {error="shader has no Metal entry point";break}
+        } else {code.spirv=data}
+        group:=item["group"].(json.Array) or_else nil
+        if len(group)!=3 {error="invalid workgroup";break}
+        for v,i in group {n,valid:=number(v);if !valid {error="invalid workgroup";break};code.threadgroup[i]=n}
+        bindings:=item["bindings"].(json.Array) or_else nil
+        code.bindings=make([]rhi.Binding_Info,len(bindings),allocator)
+        for binding,i in bindings {
+            b:=binding.(json.Object) or_else nil
+            kind,valid_kind:=reflect.enum_from_name(rhi.Binding_Kind,text(b["kind"]));if !valid_kind {error="invalid binding kind";break}
+            slot,valid_slot:=number(b["slot"]);if !valid_slot || !rhi.binding_slot_valid(slot,kind) {error="invalid binding slot";break}
+            code.bindings[i]={slot=slot,kind=kind,stages={stage}}
+        }
+        if error!="" {break}
+    }
+    if error=="" {for c in assets.codes {if c.name=="" {error="shader catalog is incomplete";break}}}
+    if error=="" {
+        catalog,_:=filepath.join({directory,"catalog.json"},context.temp_allocator)
+        assets.catalog,_=os.read_entire_file(catalog,allocator)
+    }
+    if error!="" {shader_assets_destroy(&assets)}
+    return
+}
+// A reload in three steps, while the active generation goes on drawing:
+// renderer_shader_reload_begin on the render thread takes what the pipelines
+// of a generation are made from, renderer_shader_reload_build makes them on
+// any thread (the driver compiles them for seconds), and
+// renderer_publish_shader_reload or renderer_abort_shader_reload ends it
+// between frames. The assets stay with the caller until it publishes them.
+// stop: once set from any thread, the build makes no more pipelines and fails.
+renderer_shader_reload_begin :: proc(r:^Renderer,assets:^Shader_Assets,stop:^bool=nil)->^Renderer {
+    if !assets.owned {return nil}
+    candidate:=new(Renderer,r.allocator)
+    candidate^=r^
+    candidate.shader_codes=assets.codes;candidate.pipelines={};candidate.overlay_pipelines={};candidate.overlay_hw_pipelines={};candidate.program_graphics={};candidate.pipeline_thread=nil
+    candidate.reload_stop=stop
+    candidate.frame_layout=frame_layout_of(assets)
+    return candidate
+}
+// False when a pipeline is refused: candidate.error says which.
+renderer_shader_reload_build :: proc(candidate:^Renderer)->bool {
+    if !create_pipelines(candidate) {return false}
+    if rhi.device_info(candidate.device).features.ray_query {
+        for p,id in candidate.pipelines {if pipeline_uses_hardware(id) && id not_in LAZY_PIPELINES && p==0 {set_error(candidate,"pipeline %v: %s",id,rhi.device_error(candidate.device));return false}}
+    }
+    return true
+}
+renderer_abort_shader_reload :: proc(candidate:^Renderer) {
+    if candidate==nil {return}
+    for p in candidate.pipelines {if p!=0 {rhi.pipeline_destroy(candidate.device,p)}}
+    for p in candidate.overlay_pipelines {if p!=0 {rhi.pipeline_destroy(candidate.device,p)}}
+    for p in candidate.overlay_hw_pipelines {if p!=0 {rhi.pipeline_destroy(candidate.device,p)}}
+    free(candidate,candidate.allocator)
+}
+// The stages only the previews of assets draw with: a generation that changes
+// these alone, or these and idle ones (renderer_shaders_idle), leaves the
+// image of the scene and its histories as they are.
+// A switch and not a bit_set: ranging over a constant one of Shader_Id, past
+// 128, fails in the backend of Odin (odin-lang/Odin#8047).
+preview_shader :: proc "contextless" (id:Shader_Id) -> bool {
+    #partial switch id {case .Thumbnail_Vert,.Thumbnail_Frag,.Thumbnail_Values_Frag,.Preview_Backdrop_Frag: return true}
+    return false
+}
+
+renderer_publish_shader_reload :: proc(r:^Renderer,assets:^Shader_Assets,candidate:^Renderer) {
+    scene:=false
+    idle:=renderer_shaders_idle(r)
+    for code,id in candidate.shader_codes {
+        if !preview_shader(id) && !idle[id] && !shader_code_matches(code,r.shader_codes[id]) {scene=true;break}
+    }
+    rhi.device_wait_idle(r.device)
+    pipelines_drop(r)
+    for p in r.pipelines {if p!=0 {rhi.pipeline_destroy(r.device,p)}}
+    for p in r.overlay_pipelines {if p!=0 {rhi.pipeline_destroy(r.device,p)}}
+    for p in r.overlay_hw_pipelines {if p!=0 {rhi.pipeline_destroy(r.device,p)}}
+    shader_assets_destroy(&r.shader_assets)
+    r.shader_assets=assets^;assets^={}
+    r.frame_layout=frame_layout_of(&r.shader_assets)
+    stage_pipelines_destroy(r)
+    points_pipelines_destroy(r)
+    program_graphics_destroy(r)
+    program_catalog_destroy(&r.programs)
+    r.shader_codes=candidate.shader_codes;r.pipelines=candidate.pipelines;r.overlay_pipelines=candidate.overlay_pipelines
+    r.overlay_hw_pipelines=candidate.overlay_hw_pipelines
+    candidate.pipelines={};candidate.overlay_pipelines={};candidate.overlay_hw_pipelines={}
+    if !scene {return}
+    r.targets.reflect_valid=false;r.targets.gi_reference_valid=false;r.targets.taa_valid=false;r.targets.glass_valid=false
+    renderer_camera_cut(r)
+    world_light_stale(r)
+}
+renderer_reload_shaders :: proc(r:^Renderer,assets:^Shader_Assets)->bool {
+    if !assets.owned {return false}
+    catalog,valid:=program_catalog_parse(assets.catalog,r.allocator)
+    if !valid {set_error(r,"invalid material program catalog");return false}
+    defer program_catalog_destroy(&catalog)
+    if shader_assets_match_codes(assets,&r.shader_codes) {
+        renderer_publish_shader_metadata(r,assets)
+        r.programs=catalog;r.programs.loaded=true;catalog={}
+        return true
+    }
+    candidate:=renderer_shader_reload_begin(r,assets)
+    defer renderer_abort_shader_reload(candidate)
+    if !renderer_shader_reload_build(candidate) {set_error(r,"%s",candidate.error);return false}
+    renderer_publish_shader_reload(r,assets,candidate)
+    r.programs=catalog;r.programs.loaded=true;catalog={}
+    return true
+}
+
+renderer_publish_shader_metadata :: proc(r:^Renderer,assets:^Shader_Assets) {
+    // The stages of an extension or of a program changed alone: their pipelines are made again, those of the engine stay.
+    extensions:=shader_stages_match(assets.extensions,r.shader_assets.extensions)
+    programs:=shader_stages_match(assets.programs,r.shader_assets.programs)
+    if !extensions || !programs {
+        rhi.device_wait_idle(r.device)
+        pipelines_drop(r)
+        if !extensions {stage_pipelines_destroy(r)}
+        program_stages_publish(r,assets.programs)
+    }
+    shader_assets_destroy(&r.shader_assets)
+    r.shader_assets=assets^;assets^={}
+    r.shader_codes=r.shader_assets.codes
+    r.frame_layout=frame_layout_of(&r.shader_assets)
+    program_catalog_destroy(&r.programs)
+}

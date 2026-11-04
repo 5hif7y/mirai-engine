@@ -1,0 +1,80 @@
+package textures
+
+import "core:fmt"
+import "core:os"
+import "core:slice"
+import "core:testing"
+import "core:time"
+import "mirai:asset"
+import "mirai:cook/cache"
+import "mirai:std/serial"
+
+@(test)
+built_textures_are_kept_by_image_and_settings_and_read_back_whole :: proc(t:^testing.T) {
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    directory,_:=os.temp_directory(context.temp_allocator)
+    folder:=fmt.tprintf("%s/mirai-textures-%d-cache",directory,os.get_pid())
+    os.remove_all(folder)
+    defer os.remove_all(folder)
+    pixels:=make([]u8,16*16*4,context.temp_allocator)
+    for &value,at in pixels {value=at%4==3?255:u8(at*7)}
+    options:=Build_Options{srgb=true}
+    key:=cache_key_build(pixels,rgba8(pixels,16,16),options)
+    testing.expect(t,key!=cache_key_build(pixels,rgba8(pixels,16,16),{}),"other settings are another texture")
+    testing.expect(t,key!=cache_key_build(pixels,rgba8(pixels,8,32),options),"another size of the same bytes too")
+    other:=slice.clone(pixels,context.temp_allocator)
+    other[5]+=1
+    testing.expect(t,key!=cache_key_build(other,rgba8(other,16,16),options),"and other bytes")
+    testing.expect(t,cache_key_blocks(1)!=cache_key_blocks(2))
+
+    _,missing:=cache_read(folder,key,&types,context.temp_allocator)
+    testing.expect(t,!missing,"an empty cache has nothing")
+    built,error:=build(rgba8(pixels,16,16),options,context.temp_allocator)
+    testing.expect_value(t,error,Error.None)
+    testing.expect(t,cache_write(folder,key,&types,&built))
+    read,found:=cache_read(folder,key,&types,context.temp_allocator)
+    testing.expect(t,found && read.width==built.width && read.height==built.height && read.format==built.format && read.flags==built.flags && len(read.mips)==len(built.mips))
+    for level,at in built.mips {testing.expect(t,slice.equal(read.mips[at],level))}
+    _,other_key:=cache_read(folder,key+2,&types,context.temp_allocator)
+    testing.expect(t,!other_key)
+    _,no_folder:=cache_read("",key,&types,context.temp_allocator)
+    testing.expect(t,!no_folder && !cache_write("",key,&types,&built))
+
+    // Above its budget the cache keeps what was used last: a read counts as a use.
+    trimmed:=fmt.tprintf("%s-trim",folder)
+    os.remove_all(trimmed)
+    defer os.remove_all(trimmed)
+    keys:[3]u64
+    for &key_of,at in keys {
+        other[0]=u8(at)
+        key_of=cache_key_build(other,rgba8(other,16,16),options)
+        if at==2 {break}
+        level_built,_:=build(rgba8(other,16,16),options,context.temp_allocator)
+        testing.expect(t,cache_write(trimmed,key_of,&types,&level_built))
+        time.sleep(20*time.Millisecond)
+    }
+    entry,_:=os.stat(fmt.tprintf("%s/%016x.tex",trimmed,keys[0]),context.temp_allocator)
+    _,first_read:=cache_read(trimmed,keys[0],&types,context.temp_allocator)
+    testing.expect(t,first_read && entry.size>0)
+    time.sleep(20*time.Millisecond)
+    other[0]=2
+    third,_:=build(rgba8(other,16,16),options,context.temp_allocator)
+    testing.expect(t,cache_write(trimmed,keys[2],&types,&third,budget=entry.size*28/10))
+    _,kept_first:=cache_read(trimmed,keys[0],&types,context.temp_allocator)
+    _,kept_second:=cache_read(trimmed,keys[1],&types,context.temp_allocator)
+    _,kept_third:=cache_read(trimmed,keys[2],&types,context.temp_allocator)
+    testing.expect(t,kept_first && !kept_second && kept_third,"the one used longest ago goes")
+    testing.expect_value(t,cache.trim(trimmed,entry.size*28/10),0)
+
+    // A file of the cache that does not read back whole is no texture.
+    path:=fmt.tprintf("%s/%016x.tex",folder,key)
+    whole,_:=serial.file_read(path,context.temp_allocator)
+    damaged:=slice.clone(whole,context.temp_allocator)
+    damaged[len(damaged)-1]~=0xff
+    for bytes in ([][]u8{whole[:len(whole)/2],damaged}) {
+        testing.expect_value(t,serial.file_write_atomic(path,bytes),serial.File_Error.None)
+        _,read_back:=cache_read(folder,key,&types,context.temp_allocator)
+        testing.expect(t,!read_back)
+    }
+    free_all(context.temp_allocator)
+}

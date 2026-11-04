@@ -1,0 +1,378 @@
+package destruct
+
+import "base:intrinsics"
+import "core:math/linalg"
+import "mirai:asset"
+import "mirai:core"
+import "mirai:host"
+import sim "plugins:physics/runtime/sim"
+import fr "plugins:destruct/runtime/fracture"
+import render "mirai:engine/render"
+import "mirai:std/base"
+import "mirai:std/geom"
+import "mirai:std/jobs"
+
+// What the application derives from the destructibles of a world: the cut of
+// each mesh into pieces, the geometry of every piece, and the meshes
+// generated for the bodies. None of it is the state of the world, so none is
+// copied: it is rebuilt from the components and from the simulation, and
+// each world keeps its own.
+@(storage,host,by_world,free="cache_free")
+Destruct_Cache :: struct {
+    epoch:u32,                // of the simulation the entries were made for
+    ready:bool,
+    pass:u32,
+    entries:core.Entity_Map(Entry), // by destructible
+    seen:core.Seen,           // of the destructibles: the entries of those that went end
+    infos:[]fr.Piece_Info,   // the pieces of the destructible being looked at
+    marks:[]u32,              // by body slot: equal to mark for the bodies already taken in the pass under way
+    group_of:[]i32,           // by body slot: index of its group in this pass
+    firsts:[]i32,             // one piece of each body of a destructible
+    flat:[]i32,               // piece ids of every group, one after another
+    mark:u32,
+    groups:[dynamic]Scratch_Group,
+    slicer:geom.Slicer,
+    halves:[2]geom.Mesh_Buffer,
+    merged:geom.Mesh_Buffer,
+    stats:Destruct_Stats,
+}
+
+Destruct_Stats :: struct {
+    created,destroyed:u64, // simulation destructibles
+    meshes:int,            // generated meshes alive
+    prepared:u64,          // meshes cut into pieces, off the tick
+    events:u64,            // fracture events applied
+}
+
+@(private)
+Scratch_Group :: struct {
+    group:u32,
+    body:sim.Body_Handle,
+    debris:bool,
+    first,count:int, // in flat
+}
+
+// The pieces a mesh is cut into. A job writes it while counter is pending;
+// after that it is kept, so making the destructible again costs no new cut.
+@(private)
+Prepared :: struct {
+    key:Prepared_Key,
+    source:geom.Mesh_Buffer, // the mesh in the frame of the entity, at its size; empty once cut
+    sites:[dynamic][3]f32,
+    fracture:geom.Fracture,
+    desc:geom.Site_Desc,
+    error:geom.Fracture_Error,
+    interior:u32,
+    anchors:[dynamic]bool,
+    clusters:[dynamic]fr.Cluster_Desc,
+    cluster_points:[dynamic][3]f32, // of the hulls of the clusters, at the size of the entity
+    piece_clusters:[dynamic]i32,
+    connection_strength:[dynamic]f32,
+    counter:jobs.Counter,
+}
+
+// What a cut depends on.
+@(private)
+Prepared_Key :: struct {
+    pieces:u32,
+    seed:u64,
+    pattern:Destruct_Pattern,
+    mesh:base.Asset_Id,
+    fracture:base.Asset_Id,
+    shape:host.Shape,
+    scale:[3]f32,
+    interior:u32,
+}
+
+// The geometry of a piece: a view of the cut it came from, or its own after a slice.
+@(private)
+Visual :: struct {
+    piece:i32,            // fr.Piece_Info.id
+    center:[3]f32,        // of the piece it was made for: a slot that holds another piece is made again
+    volume:f32,
+    source:i32,           // piece of the fracture; -1 for a half of a slice
+    geometry:geom.Mesh_Buffer,
+}
+
+// The entity and the generated mesh of one body of a broken destructible.
+@(private)
+Group_Record :: struct {
+    group:u32,
+    entity:core.Entity,
+    mesh:base.Asset_Id,
+    members:[dynamic]i32, // the pieces the mesh was made of
+    body:sim.Body_Handle,
+}
+
+@(private)
+Entry :: struct {
+    prepared:^Prepared,
+    visuals:[dynamic]Visual,
+    groups:[dynamic]Group_Record,
+    materials:[render.MATERIAL_SLOTS]base.Asset_Id, // of the Mesh_Renderer of the groups
+    generated:[asset.MESH_MAX_SLOTS]base.Asset_Id,  // of the meshes generated for them
+    slots:u32,                                      // material slots of those meshes; the last is the interior
+    event:fr.Fracture_Event,                       // the strongest applied in event_tick: what Fracture tells
+    event_tick:u64,
+    pass:u32,                                       // the last tick that wrote its state
+}
+
+// Frees the memory of the cache and the meshes it made.
+cache_destroy :: proc(app:^host.App,cache:^Destruct_Cache) {
+    cache_reset(app,cache)
+    cache_free(cache)
+}
+
+// Frees the memory of the cache when the application ends: its meshes go with the assets.
+cache_free :: proc(cache:^Destruct_Cache) {
+    core.entity_map_destroy(&cache.entries);delete(cache.groups)
+    delete(cache.infos);delete(cache.marks);delete(cache.group_of);delete(cache.firsts);delete(cache.flat)
+    if cache.ready {
+        geom.slicer_destroy(&cache.slicer)
+        for &half in cache.halves {geom.mesh_buffer_destroy(&half)}
+        geom.mesh_buffer_destroy(&cache.merged)
+    }
+    cache^={}
+}
+
+// What the cache derived for a World that is freed goes with it.
+@(step="release")
+destruct_release :: proc(cache:^Destruct_Cache,app:^host.App) {
+    if cache!=nil {cache_reset(app,cache)}
+}
+
+// Releases what the cache derived, for a simulation that was replaced.
+@(private)
+cache_reset :: proc(app:^host.App,cache:^Destruct_Cache) {
+    for &entry in cache.entries.values {entry_release(app,cache,&entry)}
+    core.entity_map_clear(&cache.entries)
+}
+
+// Scratch for the worlds of the simulation, reserved once.
+@(private)
+cache_make :: proc(cache:^Destruct_Cache,f:^fr.Fracture) {
+    if cache.ready {return}
+    pieces,bodies:=max(f.desc.pieces,1),max(f.desc.bodies,1)
+    cache.infos=make([]fr.Piece_Info,pieces)
+    cache.marks=make([]u32,bodies)
+    cache.group_of=make([]i32,bodies)
+    cache.firsts=make([]i32,pieces)
+    cache.flat=make([]i32,pieces)
+    reserve(&cache.groups,bodies)
+    geom.slicer_init(&cache.slicer)
+    for &half in cache.halves {geom.mesh_buffer_init(&half)}
+    geom.mesh_buffer_init(&cache.merged)
+    cache.ready=true
+}
+
+@(private)
+entry_find :: proc(cache:^Destruct_Cache,e:core.Entity) -> ^Entry {
+    return cache==nil?nil:core.entity_map_get(&cache.entries,e)
+}
+
+// The entry of a destructible; a new one for one that has none. nil without memory for it.
+@(private)
+entry_take :: proc(cache:^Destruct_Cache,e:core.Entity) -> ^Entry {
+    if entry:=core.entity_map_get(&cache.entries,e);entry!=nil {return entry}
+    entry,_:=core.entity_map_put(&cache.entries,e,Entry{})
+    return entry
+}
+
+@(private)
+visuals_release :: proc(entry:^Entry) {
+    for &visual in entry.visuals {geom.mesh_buffer_destroy(&visual.geometry)}
+    clear(&entry.visuals)
+}
+
+// Releases the generated meshes of the groups of an entry. The entities are the caller's.
+@(private)
+groups_release :: proc(app:^host.App,cache:^Destruct_Cache,entry:^Entry) {
+    for &group in entry.groups {
+        if group.mesh!={} && app.assets!=nil && host.assets_mesh_release(app.assets,group.mesh) {cache.stats.meshes-=1}
+        delete(group.members)
+    }
+    clear(&entry.groups)
+}
+
+@(private)
+prepared_release :: proc(app:^host.App,entry:^Entry) {
+    p:=entry.prepared
+    if p==nil {return}
+    jobs.wait(&app.jobs,jobs.OWNER,&p.counter)
+    geom.mesh_buffer_destroy(&p.source)
+    delete(p.sites)
+    geom.fracture_destroy(&p.fracture)
+    delete(p.anchors);delete(p.clusters);delete(p.cluster_points);delete(p.piece_clusters);delete(p.connection_strength)
+    free(p)
+    entry.prepared=nil
+}
+
+// Ends an entry: its meshes, its geometry and its cut. The entities of its
+// groups are the caller's, and so is taking it out of the cache.
+@(private)
+entry_release :: proc(app:^host.App,cache:^Destruct_Cache,entry:^Entry) {
+    groups_release(app,cache,entry)
+    delete(entry.groups)
+    visuals_release(entry)
+    delete(entry.visuals)
+    prepared_release(app,entry)
+    entry^={}
+}
+
+// The material slots of the meshes of the pieces: those of the mesh of the
+// entity and one more, the last, for the faces the fracture opens.
+@(private)
+slots_of :: proc(app:^host.App,d:Destructible,mesh:base.Asset_Id) -> (slots,interior:u32,generated:[asset.MESH_MAX_SLOTS]base.Asset_Id) {
+    slots=1
+    if mesh!={} && app.assets!=nil {
+        if found:=host.assets_mesh(app.assets,mesh);found!=nil && found.slot_count>0 {
+            slots=found.slot_count
+            generated=found.slot_materials
+        }
+    }
+    interior=min(slots,asset.MESH_MAX_SLOTS-1)
+    generated[interior]=d.interior!={}?d.interior:generated[0]
+    return
+}
+
+// Starts cutting the mesh of a destructible into pieces. The geometry is
+// read here; the cut runs as a job, which a thread of the application takes or
+// whoever waits for its counter runs. False when there is no geometry to cut.
+@(private)
+prepare_start :: proc(app:^host.App,entry:^Entry,d:Destructible,static:render.Mesh_Renderer,scale:[3]f32,interior:u32) -> bool {
+    p:=entry.prepared
+    if p==nil {
+        allocated,error:=new(Prepared)
+        if error!=nil {return false}
+        p=allocated
+        geom.mesh_buffer_init(&p.source)
+        p.sites=make([dynamic][3]f32)
+        geom.fracture_init(&p.fracture)
+        p.anchors=make([dynamic]bool)
+        p.clusters=make([dynamic]fr.Cluster_Desc)
+        p.cluster_points=make([dynamic][3]f32)
+        p.piece_clusters=make([dynamic]i32)
+        p.connection_strength=make([dynamic]f32)
+        entry.prepared=p
+    } else {
+        // The job of what it was cut from before may still be writing.
+        jobs.wait(&app.jobs,jobs.OWNER,&p.counter)
+    }
+    p.key,p.error={},.None
+    clear(&p.anchors);clear(&p.clusters);clear(&p.cluster_points);clear(&p.piece_clusters);clear(&p.connection_strength)
+    geom.mesh_buffer_clear(&p.source)
+    if d.fracture!={} {
+        if !prepare_authored(app,p,d,static,scale,interior) {p.error=.Invalid_Mesh;return false}
+        return true
+    }
+    if !host.assets_geometry(app.assets,static.mesh,static.shape,&p.source,true) {p.error=.Invalid_Mesh;return false}
+    for &position in p.source.positions {position*=scale}
+    for &normal in p.source.normals {normal=linalg.normalize0(normal/scale)}
+    lo,hi:=geom.mesh_bounds(p.source.positions[:])
+    resize(&p.sites,int(d.pieces))
+    p.desc={pattern=geom.Site_Pattern(d.pattern),seed=d.seed,lo=lo,hi=hi,center=0.5*(lo+hi)}
+    p.interior=interior
+    p.key={pieces=d.pieces,seed=d.seed,pattern=d.pattern,mesh=static.mesh,shape=static.shape,scale=scale,interior=interior}
+    jobs.run(&app.jobs,jobs.OWNER,prepare_job,p,&p.counter)
+    // Without other threads nobody would cut them while the ticks go on.
+    if jobs.worker_count(&app.jobs)==1 {jobs.wait(&app.jobs,jobs.OWNER,&p.counter)}
+    return true
+}
+
+@(private)
+prepare_job :: proc(p:^Prepared,worker:int) {
+    geom.sites_generate(p.sites[:],p.desc)
+    p.error=geom.mesh_fracture(&p.fracture,geom.mesh_buffer_view(&p.source),p.sites[:],{interior_material=p.interior})
+    geom.mesh_buffer_clear(&p.source)
+}
+
+@(private)
+prepared_pending :: proc(p:^Prepared) -> bool {return jobs.pending(&p.counter)}
+
+@(private)
+visual_find :: proc(entry:^Entry,piece:i32) -> ^Visual {
+    for &visual in entry.visuals {
+        if visual.piece==piece {return &visual}
+    }
+    return nil
+}
+
+@(private)
+visual_mesh :: proc(entry:^Entry,visual:^Visual) -> geom.Mesh {
+    if visual.source>=0 && entry.prepared!=nil {
+        if int(visual.source)>=len(entry.prepared.fracture.pieces) {return {}}
+        return geom.fracture_piece_mesh(&entry.prepared.fracture,int(visual.source))
+    }
+    return geom.mesh_buffer_view(&visual.geometry)
+}
+
+// Notes the geometry of a piece of the cut: kept when the slot still holds the piece it was made for.
+@(private)
+visual_source :: proc(entry:^Entry,piece:fr.Piece_Info) {
+    visual:=visual_find(entry,piece.id)
+    if visual!=nil && visual.center==piece.center && visual.volume==piece.volume {return}
+    if visual==nil {
+        append(&entry.visuals,Visual{piece=piece.id})
+        visual=&entry.visuals[len(entry.visuals)-1]
+        geom.mesh_buffer_init(&visual.geometry)
+    }
+    visual.center,visual.volume,visual.source=piece.center,piece.volume,piece.source
+}
+
+// The geometry of a half: the geometry of the piece it was cut from, cut by the same plane.
+@(private)
+visual_cut :: proc(cache:^Destruct_Cache,entry:^Entry,piece:fr.Piece_Info) -> bool {
+    if visual:=visual_find(entry,piece.id);visual!=nil && visual.center==piece.center && visual.volume==piece.volume {return true}
+    parent:=visual_find(entry,piece.parent)
+    if parent==nil {return false}
+    _,error:=geom.mesh_slice(&cache.slicer,visual_mesh(entry,parent),geom.Plane{piece.cut_normal,piece.cut_offset},&cache.halves[0],&cache.halves[1],{cap_material=entry.slots-1})
+    half:=&cache.halves[piece.front?0:1]
+    if error!=.None || len(half.indices)==0 {return false}
+    visual:=visual_find(entry,piece.id)
+    if visual==nil {
+        append(&entry.visuals,Visual{piece=piece.id})
+        visual=&entry.visuals[len(entry.visuals)-1]
+        geom.mesh_buffer_init(&visual.geometry)
+    }
+    g:=&visual.geometry
+    geom.mesh_buffer_clear(g)
+    append(&g.positions,..half.positions[:])
+    append(&g.normals,..half.normals[:])
+    append(&g.uvs,..half.uvs[:])
+    append(&g.colors,..half.colors[:])
+    append(&g.indices,..half.indices[:])
+    append(&g.materials,..half.materials[:])
+    visual.center,visual.volume,visual.source=piece.center,piece.volume,-1
+    return true
+}
+
+// A mesh with the geometry of the pieces of a body, generated for the renderer:
+// none and true when they have no geometry, false when it was not made.
+@(private)
+group_mesh_make :: proc(app:^host.App,cache:^Destruct_Cache,entry:^Entry,members:[]i32) -> (id:base.Asset_Id,ok:bool) {
+    if app.assets==nil {return}
+    m:=&cache.merged
+    geom.mesh_buffer_clear(m)
+    for piece in members {
+        visual:=visual_find(entry,piece)
+        if visual==nil {continue}
+        mesh:=visual_mesh(entry,visual)
+        first:=u32(len(m.positions))
+        append(&m.positions,..mesh.positions)
+        append(&m.normals,..mesh.normals)
+        append(&m.uvs,..mesh.uvs)
+        append(&m.colors,..mesh.colors)
+        for index in mesh.indices {append(&m.indices,first+index)}
+        append(&m.materials,..mesh.materials)
+    }
+    // Pieces without geometry have their own problem: no mesh is wanted.
+    if len(m.indices)==0 {return {},true}
+    // A stream that not every piece brought is left out.
+    if len(m.normals)!=len(m.positions) {clear(&m.normals)}
+    if len(m.uvs)!=len(m.positions) {clear(&m.uvs)}
+    if len(m.colors)!=len(m.positions) {clear(&m.colors)}
+    if len(m.materials)*3!=len(m.indices) {clear(&m.materials)}
+    id,ok=host.assets_mesh_generate(app.assets,geom.mesh_buffer_view(m),entry.generated[:entry.slots])
+    if ok {cache.stats.meshes+=1}
+    return
+}

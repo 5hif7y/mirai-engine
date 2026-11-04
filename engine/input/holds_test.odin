@@ -1,0 +1,142 @@
+package input
+
+import "core:testing"
+import "mirai:core"
+
+@(private="file") HOLD_MOVE :: Action(0)
+@(private="file") HOLD_JUMP :: Action(2)
+@(private="file") HOLD_CONFIRM :: Action(3)
+@(private="file") HOLD_MENU :: Input_Context(1)
+
+@(private="file")
+Hold_Test :: struct {
+    es:core.Entities,
+    seats:core.Table(Seat),
+    requests:Hold_Requests,
+    problems:core.Problems,
+    time:core.Time,
+    bindings:Input_Map,
+    local,remote:core.Entity,
+}
+
+@(private="file")
+hold_test_init :: proc(f:^Hold_Test,jump:..Input_Binding) {
+    core.entities_init(&f.es)
+    core.table_init(&f.seats,"Seat")
+    f.local,f.remote=core.create(&f.es),core.create(&f.es)
+    core.add(&f.seats,f.local,Seat{})
+    core.add(&f.seats,f.remote,Seat{peer=7})
+    core.table_settle(&f.seats,&f.es)
+    input_map_action(&f.bindings,HOLD_MOVE,.Axis2)
+    input_map_bind(&f.bindings,HOLD_MOVE,binding_keys(.A,.D,.S,.W))
+    input_map_action(&f.bindings,HOLD_JUMP,.Button)
+    for binding in jump {input_map_bind(&f.bindings,HOLD_JUMP,binding)}
+    input_map_action(&f.bindings,HOLD_CONFIRM,.Button)
+    f.bindings.contexts[HOLD_CONFIRM]=HOLD_MENU
+    f.time.tick=10
+}
+
+@(private="file")
+hold_test_free :: proc(f:^Hold_Test) {
+    delete(f.requests.queue.items)
+    core.table_destroy(&f.seats)
+    core.entities_destroy(&f.es)
+}
+
+// One fixed tick of the seats without devices: the holds first, as the loop
+// runs them, then the local seat reads its actions, and the seat of a
+// connection takes them as its client sends them to the server.
+@(private="file")
+hold_test_tick :: proc(f:^Hold_Test) {
+    input_holds(&f.seats,&f.requests,f.time,&f.problems)
+    device:core.Input
+    seat_feed(core.get(&f.seats,f.local),&device,&f.bindings,false)
+    sent,_:=seat_remote(core.read(&f.seats),f.local,&f.bindings)
+    seat_receive(core.get(&f.seats,f.remote),&f.bindings,sent)
+    core.time_advance(&f.time)
+}
+
+@(test)
+a_held_action_reaches_its_seat_from_the_next_tick_whatever_its_bindings :: proc(t:^testing.T) {
+    rebound:=[3][]Input_Binding{{binding_key(.Space)},{binding_key(.K),binding_gamepad_button(.East)},{}}
+    for jump in rebound {
+        f:Hold_Test
+        hold_test_init(&f,..jump)
+        defer hold_test_free(&f)
+        read:=core.read(&f.seats)
+        hold(&f.requests,f.local,HOLD_JUMP,{1,0},3)
+        hold(&f.requests,f.local,HOLD_MOVE,{0,1})
+        testing.expect(t,!seat_down(read,f.local,HOLD_JUMP),"nothing acts before the tick")
+        hold_test_tick(&f)
+        testing.expect(t,seat_pressed(read,f.local,HOLD_JUMP),"pressed on the next tick")
+        testing.expect(t,seat_pressed(read,f.remote,HOLD_JUMP),"and on the server, from what the client sent")
+        testing.expect_value(t,seat_vector(read,f.local,HOLD_MOVE),[2]f32{0,1})
+        testing.expect_value(t,seat_vector(read,f.remote,HOLD_MOVE),[2]f32{0,1})
+        hold_test_tick(&f)
+        hold_test_tick(&f)
+        testing.expect(t,seat_down(read,f.remote,HOLD_JUMP) && !seat_pressed(read,f.remote,HOLD_JUMP))
+        testing.expect_value(t,seat_action(read,f.remote,HOLD_JUMP).held_ticks,3)
+        hold_test_tick(&f)
+        state:=seat_action(read,f.remote,HOLD_JUMP)
+        testing.expect(t,state.released && state.tapped && state.released_held==3,"released after its ticks")
+        testing.expect_value(t,f.seats.values[core.row_of(read,f.local)].hold_count,1)
+        testing.expect_value(t,seat_vector(read,f.local,HOLD_MOVE),[2]f32{0,1})
+        // Until it is let go: released on the tick after.
+        let_go(&f.requests,f.local,HOLD_MOVE)
+        hold_test_tick(&f)
+        testing.expect(t,seat_released(read,f.local,HOLD_MOVE) && seat_released(read,f.remote,HOLD_MOVE))
+        testing.expect_value(t,f.problems.count,0)
+    }
+}
+
+@(test)
+a_held_action_keeps_the_contexts_blocks_and_capacity_of_its_seat :: proc(t:^testing.T) {
+    f:Hold_Test
+    hold_test_init(&f,binding_key(.Space))
+    defer hold_test_free(&f)
+    read:=core.read(&f.seats)
+    hold(&f.requests,f.local,HOLD_CONFIRM,{1,0})
+    hold_test_tick(&f)
+    testing.expect(t,!seat_down(read,f.local,HOLD_CONFIRM),"an action of a context the seat is not in")
+    let_go(&f.requests,f.local,HOLD_CONFIRM)
+    seat:=core.get(&f.seats,f.local)
+    seat.contexts.layers[0],seat.contexts.count=HOLD_MENU,1
+    hold_test_tick(&f)
+    hold(&f.requests,f.local,HOLD_CONFIRM,{1,0})
+    hold_test_tick(&f)
+    testing.expect(t,seat_pressed(read,f.local,HOLD_CONFIRM),"in the context, it acts")
+    seat.blocked=action_bit(HOLD_CONFIRM)
+    testing.expect(t,!seat_down(read,f.local,HOLD_CONFIRM),"a block takes it")
+    for action in 4..<4+HOLD_CAPACITY {hold(&f.requests,f.local,Action(action),{1,0})}
+    hold(&f.requests,core.Entity(0xdead),HOLD_JUMP,{1,0})
+    hold(&f.requests,f.remote,HOLD_JUMP,{1,0})
+    hold_test_tick(&f)
+    testing.expect_value(t,f.problems.count,3)
+    testing.expect_value(t,f.seats.values[core.row_of(read,f.remote)].hold_count,0)
+    testing.expect_value(t,f.seats.values[core.row_of(read,f.local)].hold_count,u8(HOLD_CAPACITY))
+}
+
+@(test)
+the_same_holds_on_the_same_seats_give_the_same_ticks :: proc(t:^testing.T) {
+    run :: proc() -> (states:[12][2]Action_State) {
+        f:Hold_Test
+        hold_test_init(&f,binding_key(.Space))
+        defer hold_test_free(&f)
+        read:=core.read(&f.seats)
+        for tick in 0..<len(states) {
+            switch tick {
+            case 0: hold(&f.requests,f.local,HOLD_JUMP,{1,0},2)
+            case 1: hold(&f.requests,f.local,HOLD_MOVE,{0.5,-0.5},4)
+            case 4: hold(&f.requests,f.local,HOLD_JUMP,{1,0},5)
+            case 6: let_go(&f.requests,f.local,HOLD_JUMP)
+            }
+            hold_test_tick(&f)
+            states[tick]={seat_action(read,f.local,HOLD_JUMP),seat_action(read,f.local,HOLD_MOVE)}
+        }
+        return
+    }
+    first,second:=run(),run()
+    testing.expect(t,first==second)
+    testing.expect(t,first[0][0].pressed && first[2][0].released && first[4][0].pressed && first[5][0].down && first[6][0].released)
+    testing.expect(t,first[1][1].pressed && first[4][1].down && first[5][1].released)
+}

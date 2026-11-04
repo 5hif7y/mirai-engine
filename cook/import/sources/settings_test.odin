@@ -1,0 +1,188 @@
+package sources
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:testing"
+import "mirai:asset"
+import "mirai:std/geom"
+import importer "mirai:cook/import"
+
+// An OBJ of a sphere, smooth, with texture coordinates.
+@(private="file")
+sphere_obj :: proc(folder:string) -> string {
+    sphere:geom.Mesh_Buffer
+    geom.mesh_buffer_init(&sphere,context.temp_allocator)
+    geom.sphere_build(&sphere,1,48,24)
+    b:=strings.builder_make(context.temp_allocator)
+    strings.write_string(&b,"o Ball\n")
+    for position in sphere.positions {fmt.sbprintf(&b,"v %f %f %f\n",position.x,position.y,position.z)}
+    for uv in sphere.uvs {fmt.sbprintf(&b,"vt %f %f\n",uv.x,uv.y)}
+    for normal in sphere.normals {fmt.sbprintf(&b,"vn %f %f %f\n",normal.x,normal.y,normal.z)}
+    for triangle in 0..<len(sphere.indices)/3 {
+        a,b_,c:=sphere.indices[triangle*3]+1,sphere.indices[triangle*3+1]+1,sphere.indices[triangle*3+2]+1
+        fmt.sbprintf(&b,"f %d/%d/%d %d/%d/%d %d/%d/%d\n",a,a,a,b_,b_,b_,c,c,c)
+    }
+    return write_text(folder,"ball.obj",strings.to_string(b))
+}
+
+@(test)
+an_import_stores_levels_and_colliders_and_reports_them :: proc(t:^testing.T) {
+    folder:=temp_folder("levels")
+    defer os.remove_all(folder)
+    source:=sphere_obj(folder)
+    model,ok:=import_ok(t,source,{collision=.Hull})
+    if !ok {return}
+    defer importer.model_destroy(&model)
+    testing.expect(t,model.settings.collision==.Hull && !model.stored)
+    report,error:=importer.import_write(&model,fmt.tprintf("%s/out",folder),{collision=.Hull})
+    defer importer.report_destroy(&report)
+    testing.expect_value(t,error.code,importer.Error_Code.None)
+    if error.code!=.None || len(report.assets)==0 {return}
+    written:=report.assets[len(report.assets)-1]
+    testing.expect_value(t,written.kind,asset.KIND_MESH)
+    testing.expect(t,strings.contains(written.detail," triangles, 1 hull of "),written.detail)
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    a:asset.Asset
+    if !testing.expect_value(t,asset.asset_load(&a,written.path),asset.Error.None) {return}
+    defer asset.asset_close(&a)
+    view,view_error:=asset.mesh_view(&a,&types)
+    testing.expect_value(t,view_error,asset.Error.None)
+    testing.expect(t,asset.mesh_check_indices(view))
+    // A static mesh is a DAG: the detail names the triangles of each of its levels.
+    testing.expect(t,len(view.levels)>2 && .Levels not_in view.info.flags)
+    testing.expect(t,strings.count(written.detail,"/")==len(view.levels)-1,written.detail)
+    testing.expect(t,len(view.colliders)==1 && view.colliders[0].kind==.Hull && len(view.collision_points)==int(view.colliders[0].point_count))
+    testing.expect(t,view.source!=nil && view.source.settings_hash==importer.mesh_settings_hash(model.settings) && view.source.settings_hash!=importer.mesh_settings_hash({}),"the asset names the settings it was made with")
+    testing.expect(t,int(view.info.vertex_count)==len(view.vertices) && view.levels[0].triangle_count<view.info.triangle_count)
+}
+
+@(test)
+settings_live_next_to_the_source_and_importing_again_uses_them :: proc(t:^testing.T) {
+    folder:=temp_folder("settings")
+    defer os.remove_all(folder)
+    source:=sphere_obj(folder)
+    stored,found,load_error:=importer.settings_load(source)
+    testing.expect(t,!found && load_error.code==.None && stored=={},"a source without settings has the defaults")
+    wanted:=importer.Import_Settings{max_texture_size=512,textures=.Uncompressed,image=.Normal,alpha_coverage=0.5,lods=.None,collision=.Pieces,collision_hulls=4,rig=.Spider}
+    testing.expect(t,importer.settings_save(source,wanted))
+    text,_:=os.read_entire_file(importer.settings_path(source,context.temp_allocator),context.temp_allocator)
+    testing.expect(t,strings.contains(string(text),"\"lods\": \"None\"") && strings.contains(string(text),"\"collision\": \"Pieces\"") && strings.contains(string(text),"\"max_texture_size\": 512") && strings.contains(string(text),"\"alpha_coverage\": 0.5"),string(text))
+    stored,found,load_error=importer.settings_load(source)
+    testing.expect(t,found && load_error.code==.None && stored==wanted)
+    // The same settings are not written again.
+    before,_:=os.modification_time_by_path(importer.settings_path(source,context.temp_allocator))
+    testing.expect(t,importer.settings_save(source,wanted))
+    after,_:=os.modification_time_by_path(importer.settings_path(source,context.temp_allocator))
+    testing.expect_value(t,after,before)
+
+    // The stored settings are the ones of the import, whatever the options say.
+    model,ok:=import_ok(t,source,{collision=.Hull})
+    if !ok {return}
+    testing.expect_value(t,model.settings,wanted)
+    report,error:=importer.import_write(&model,fmt.tprintf("%s/out",folder),{collision=.Hull})
+    testing.expect_value(t,error.code,importer.Error_Code.None)
+    if error.code==.None {
+        detail:=report.assets[len(report.assets)-1].detail
+        testing.expect(t,!strings.contains(detail,"/") && strings.contains(detail,"hull"),detail)
+        importer.report_destroy(&report)
+    }
+    importer.model_destroy(&model)
+    // Unless whoever imports sets them now.
+    model,ok=import_ok(t,source,{collision=.Hull,ignore_stored=true})
+    if !ok {return}
+    testing.expect_value(t,model.settings,importer.Import_Settings{collision=.Hull})
+    importer.model_destroy(&model)
+
+    // Settings nobody chose are an error, not the defaults.
+    for broken in ([]string{"{\"lods\": \"Sometimes\"}","{\"scale\": 2}","{","{\"max_texture_size\": -1}","{\"alpha_coverage\": 1.5}","{\"alpha_coverage\": \"nan\"}","{\"rig\": \"Fox\", \"rig_crotch\": 0.9}"}) {
+        write_text(folder,"ball.obj.import",broken)
+        _,_,broken_error:=importer.settings_load(source)
+        testing.expectf(t,broken_error.code==.Malformed,"%s is refused",broken)
+        _,import_error:=importer.import_model(source,FORMATS[:])
+        testing.expect_value(t,import_error.code,importer.Error_Code.Malformed)
+    }
+    write_text(folder,"ball.obj.import","{}")
+    stored,found,load_error=importer.settings_load(source)
+    testing.expect(t,found && load_error.code==.None && stored=={},"a setting that is not named has its default")
+    parsed,valid:=importer.settings_parse(importer.settings_text(wanted,context.temp_allocator))
+    testing.expect(t,valid && parsed==wanted)
+}
+
+@(test)
+a_mesh_records_only_the_settings_it_is_built_from :: proc(t:^testing.T) {
+    hash:=importer.mesh_settings_hash
+    testing.expect(t,hash({max_texture_size=512,textures=.Uncompressed,image=.Normal,alpha_coverage=0.5})==hash({}),"the settings of textures and images do not build a mesh")
+    testing.expect(t,hash({lods=.None})!=hash({}) && hash({collision=.Hull})!=hash({}) && hash({collision=.Mesh})!=hash({collision=.Hull}),"levels and colliders do")
+    testing.expect(t,hash({collision=.Pieces,collision_hulls=4})!=hash({collision=.Pieces}),"so does the number of hulls of Pieces")
+    testing.expect(t,hash({collision=.Pieces,collision_hulls=geom.DECOMPOSE_DEFAULT_HULLS})==hash({collision=.Pieces}),"0 hulls is the default number")
+    testing.expect(t,hash({collision=.Hull,collision_hulls=4})==hash({collision=.Hull}),"hulls mean nothing to another collider")
+    testing.expect(t,hash({max_triangles=5000})!=hash({}) && hash({max_triangles=5000})!=hash({max_triangles=6000}),"so does the most triangles of a mesh")
+    testing.expect(t,hash({force_collision=true})!=hash({}),"and forcing a collider")
+    testing.expect(t,hash({rig=.Humanoid})!=hash({}) && hash({rig=.Humanoid,rig_crotch=0.9})!=hash({rig=.Humanoid}),"and a rig that weights it, with what it is told of the body")
+    testing.expect(t,hash({rig=.Fox})!=hash({rig=.Humanoid}) && hash({rig=.Fox})!=hash({rig=.Horse}),"each template its own")
+    testing.expect(t,hash({rig=.Source,rig_crotch=0.9})==hash({}),"which means nothing to the rig of the source")
+}
+
+@(test)
+a_standalone_image_takes_its_use_from_its_settings :: proc(t:^testing.T) {
+    folder:=temp_folder("image-settings")
+    defer os.remove_all(folder)
+    path:=fmt.tprintf("%s/normal.png",folder)
+    _=os.write_entire_file(path,png_bytes(8,8,{128,128,255}))
+    testing.expect(t,importer.settings_save(path,{image=.Normal,max_texture_size=4}))
+    report,error:=importer.import_texture(path,fmt.tprintf("%s/out",folder),{image=.Color})
+    defer importer.report_destroy(&report)
+    testing.expect_value(t,error.code,importer.Error_Code.None)
+    if error.code!=.None {return}
+    testing.expect(t,report.assets[0].id!={})
+    testing.expect(t,strings.contains(report.assets[0].detail,"4x4"),report.assets[0].detail)
+    testing.expect_value(t,report.settings,importer.Import_Settings{image=.Normal,max_texture_size=4})
+}
+
+@(test)
+the_coverage_of_a_standalone_image_is_a_setting_kept_next_to_it :: proc(t:^testing.T) {
+    folder:=temp_folder("image-coverage")
+    defer os.remove_all(folder)
+    path:=fmt.tprintf("%s/leaves.png",folder)
+    _=os.write_entire_file(path,png_bytes(16,16,{40,120,30},masked=true))
+    out:=fmt.tprintf("%s/out",folder)
+    import_image :: proc(t:^testing.T,path,out:string,options:importer.Import_Options,loc:=#caller_location) -> (written:importer.Written,coverage:f32,ok:bool) {
+        report,error:=import_source(path,out,options)
+        defer importer.report_destroy(&report)
+        if !testing.expectf(t,error.code==.None && len(report.assets)==1,"%v %s",error.code,error.message,loc=loc) {return}
+        written=report.assets[0]
+        types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+        a:asset.Asset
+        if !testing.expect_value(t,asset.asset_load(&a,written.path),asset.Error.None,loc=loc) {return}
+        defer asset.asset_close(&a)
+        view,view_error:=asset.texture_view(&a,&types)
+        if !testing.expect_value(t,view_error,asset.Error.None,loc=loc) {return}
+        return written,view.info.alpha_coverage,true
+    }
+    first,coverage,ok:=import_image(t,path,out,{image=.Color,alpha_coverage=0.5})
+    if !ok {return}
+    testing.expect_value(t,coverage,f32(0.5))
+    stored,found,_:=importer.settings_load(path)
+    testing.expect(t,found && stored==importer.Import_Settings{image=.Color,alpha_coverage=0.5},"the coverage is saved with the use of the image")
+    // Whoever imports it again, without knowing the material that shows it, gets the same texture.
+    again,kept_coverage,kept_ok:=import_image(t,path,out,{})
+    testing.expect(t,kept_ok && again.kept && again.id==first.id && kept_coverage==0.5,"importing again with the stored settings keeps the texture")
+}
+
+@(test)
+a_vertex_that_is_not_a_number_fails_its_model_with_a_message :: proc(t:^testing.T) {
+    folder:=temp_folder("not_a_number")
+    defer os.remove_all(folder)
+    model,ok:=import_ok(t,sphere_obj(folder),{})
+    if !ok {return}
+    defer importer.model_destroy(&model)
+    model.meshes[0].vertices[5].position.y=transmute(f32)u32(0x7fc00000)
+    out:=fmt.tprintf("%s/out",folder)
+    report,error:=importer.import_write(&model,out)
+    defer importer.report_destroy(&report)
+    testing.expect_value(t,error.code,importer.Error_Code.Malformed)
+    testing.expectf(t,strings.contains(error.message,"not a number") && strings.contains(error.message,model.meshes[0].name),"%q",error.message)
+    entries,_:=os.read_all_directory_by_path(out,context.temp_allocator)
+    for entry in entries {testing.expectf(t,!strings.has_suffix(entry.name,".mesh"),"%s stays after the failure",entry.name)}
+}

@@ -1,0 +1,146 @@
+package mirai_math
+
+import "core:math/linalg"
+
+// Parametric curves over floats or vectors, with t from 0 to 1 along one segment.
+
+bezier_quadratic :: proc "contextless" (p0,p1,p2:$T,t:f32) -> T {
+    u:=1-t
+    return p0*(u*u)+p1*(2*u*t)+p2*(t*t)
+}
+// The derivative with respect to t: the direction of travel, not unit.
+bezier_quadratic_tangent :: proc "contextless" (p0,p1,p2:$T,t:f32) -> T {
+    return (p1-p0)*(2*(1-t))+(p2-p1)*(2*t)
+}
+bezier_cubic :: proc "contextless" (p0,p1,p2,p3:$T,t:f32) -> T {
+    u:=1-t
+    return p0*(u*u*u)+p1*(3*u*u*t)+p2*(3*u*t*t)+p3*(t*t*t)
+}
+bezier_cubic_tangent :: proc "contextless" (p0,p1,p2,p3:$T,t:f32) -> T {
+    u:=1-t
+    return (p1-p0)*(3*u*u)+(p2-p1)*(6*u*t)+(p3-p2)*(3*t*t)
+}
+// From p0 to p1, leaving with derivative m0 and arriving with m1.
+hermite :: proc "contextless" (p0,m0,p1,m1:$T,t:f32) -> T {
+    t2:=t*t
+    t3:=t2*t
+    return p0*(2*t3-3*t2+1)+m0*(t3-2*t2+t)+p1*(-2*t3+3*t2)+m1*(t3-t2)
+}
+// The segment from p1 to p2 of the curve through the four points.
+catmull_rom :: proc "contextless" (p0,p1,p2,p3:$T,t:f32) -> T {
+    t2:=t*t
+    t3:=t2*t
+    return (p1*2+(p2-p0)*t+(p0*2-p1*5+p2*4-p3)*t2+(p1*3-p0-p2*3+p3)*t3)*0.5
+}
+catmull_rom_tangent :: proc "contextless" (p0,p1,p2,p3:$T,t:f32) -> T {
+    return ((p2-p0)+(p0*2-p1*5+p2*4-p3)*(2*t)+(p1*3-p0-p2*3+p3)*(3*t*t))*0.5
+}
+// A segment of the uniform cubic B-spline of the four control points: it
+// passes near them, not through them, and joins its neighbors smoothly.
+b_spline :: proc "contextless" (p0,p1,p2,p3:$T,t:f32) -> T {
+    t2:=t*t
+    t3:=t2*t
+    u:=1-t
+    return (p0*(u*u*u)+p1*(3*t3-6*t2+4)+p2*(-3*t3+3*t2+3*t+1)+p3*t3)*(1.0/6)
+}
+
+// Arc length table: lengths[i] is the length of the curve from its start to
+// sample i, for points sampled at even steps of the parameter. Both slices
+// have the same length. Returns the total length.
+arc_table_build :: proc "contextless" (points:[]$V/[$N]f32,lengths:[]f32) -> f32 {
+    total:f32
+    for i in 0..<min(len(points),len(lengths)) {
+        if i>0 {total+=linalg.length(points[i]-points[i-1])}
+        lengths[i]=total
+    }
+    return total
+}
+// The parameter, from 0 to 1, at which the curve has run `distance`: what
+// moves something along a curve at constant speed.
+arc_table_parameter :: proc "contextless" (lengths:[]f32,distance:f32) -> f32 {
+    last:=len(lengths)-1
+    if last<1 || distance<=0 {return 0}
+    if distance>=lengths[last] {return 1}
+    low,high:=0,last
+    for high-low>1 {
+        middle:=(low+high)>>1
+        if lengths[middle]<=distance {low=middle} else {high=middle}
+    }
+    span:=lengths[high]-lengths[low]
+    within:=(distance-lengths[low])/span if span>0 else 0
+    return (f32(low)+within)/f32(last)
+}
+// The length run at parameter t; 0 for a NaN t.
+arc_table_distance :: proc "contextless" (lengths:[]f32,t:f32) -> f32 {
+    last:=len(lengths)-1
+    if last<1 || !(t>0) {return 0}
+    if t>=1 {return lengths[last]}
+    position:=t*f32(last)
+    index:=min(int(position),last-1)
+    return lengths[index]+(lengths[index+1]-lengths[index])*(position-f32(index))
+}
+
+Curve_Interpolation :: enum u8 {
+    Cubic,  // Hermite, with the slopes of the two keys
+    Linear,
+    Step,   // holds the value of the key until the next one
+}
+// A key of a float curve over time. Slopes are change of value per unit of time.
+Curve_Key :: struct {
+    time,value:f32,
+    slope_in,slope_out:f32,            // arriving at the key and leaving it
+    interpolation:Curve_Interpolation, // of the segment that starts at this key
+}
+
+// The value of a curve whose keys are sorted by time. Before the first key
+// and after the last one it holds their values, and at a NaN time the value
+// of the first. 0 without keys.
+curve_evaluate :: proc "contextless" (keys:[]Curve_Key,time:f32) -> f32 {
+    if len(keys)==0 {return 0}
+    if !(time>keys[0].time) {return keys[0].value}
+    last:=len(keys)-1
+    if time>=keys[last].time {return keys[last].value}
+    low,high:=0,last
+    for high-low>1 {
+        middle:=(low+high)>>1
+        if keys[middle].time<=time {low=middle} else {high=middle}
+    }
+    return curve_segment(keys[low],keys[high],time)
+}
+// The same value, for a time that moves little between calls, as playback
+// does: `segment` remembers where the last call found it, and the search
+// starts there. It must start at 0 and belong to one reader of the curve.
+curve_evaluate_from :: proc "contextless" (keys:[]Curve_Key,time:f32,segment:^int) -> f32 {
+    if len(keys)==0 {return 0}
+    last:=len(keys)-1
+    if !(time>keys[0].time) {segment^=0;return keys[0].value}
+    if time>=keys[last].time {segment^=max(last-1,0);return keys[last].value}
+    index:=clamp(segment^,0,last-1)
+    for index<last-1 && time>=keys[index+1].time {index+=1}
+    for index>0 && time<keys[index].time {index-=1}
+    segment^=index
+    return curve_segment(keys[index],keys[index+1],time)
+}
+@(private)
+curve_segment :: #force_inline proc "contextless" (a,b:Curve_Key,time:f32) -> f32 {
+    span:=b.time-a.time
+    if span<=0 {return b.value}
+    t:=(time-a.time)/span
+    switch a.interpolation {
+    case .Cubic:  return hermite(a.value,a.slope_out*span,b.value,b.slope_in*span,t)
+    case .Linear: return a.value+(b.value-a.value)*t
+    case .Step:   return a.value
+    }
+    return a.value
+}
+// Gives every key the slope of the line between its two neighbors, and the
+// ends the slope of their only segment: a smooth curve through all the keys.
+curve_smooth_slopes :: proc "contextless" (keys:[]Curve_Key) {
+    last:=len(keys)-1
+    for &key,i in keys {
+        before,after:=keys[max(i-1,0)],keys[min(i+1,last)]
+        span:=after.time-before.time
+        slope:=(after.value-before.value)/span if span>0 else 0
+        key.slope_in=slope;key.slope_out=slope
+    }
+}

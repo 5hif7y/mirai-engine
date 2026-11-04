@@ -1,0 +1,7 @@
+{
+  "name": "terrain_vfx",
+  "version": "0.1.0",
+  "dependencies": ["terrain", "vfx"],
+  "parts": ["Runtime"],
+  "automatic": true
+}

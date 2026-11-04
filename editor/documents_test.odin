@@ -1,0 +1,158 @@
+package editor
+
+import "core:fmt"
+import "core:testing"
+import "mirai:platform"
+import "mirai:std/base"
+import "mirai:ui"
+
+@(private)
+documents_test_frame :: proc(s:^Session,input:ui.Input) -> ui.Frame {
+    ctx:=s.gui.ctx
+    s.gui.named_count=0
+    ui.frame_begin(ctx,input)
+    if ui.panel(ctx,ui.id(ctx,"documents_test_bar"),{width=ui.fixed(input.size.x),height=ui.fixed(ctx.theme.bar_height),padding=0,gap=0}) {documents_build(s)}
+    return ui.frame_end(ctx)
+}
+
+@(test)
+document_tabs_hover_as_one_surface_and_close_independently :: proc(t:^testing.T) {
+    ctx:ui.Context
+    testing.expect(t,ui.context_init(&ctx,{}))
+    defer ui.context_destroy(&ctx)
+    gui:=Editor_Ui{ctx=&ctx}
+    document:Document
+    edits:Edits
+    session:=Session{gui=&gui,document=&document,edits=&edits}
+    document_name(&document,"scenes/Active.scene","")
+    append(&session.documents,Document_Tab{})
+    other:Document_Tab
+    document_name(&other.document,"scenes/Other.scene","")
+    append(&session.documents,other)
+    defer delete(session.documents)
+    shape_fill :: proc(frame:ui.Frame,rect:ui.Rect) -> [4]f32 {
+        for shape in frame.shapes {
+            if shape.bounds==([4]f32{rect.x,rect.y,rect.w,rect.h}) {return shape.fill}
+        }
+        return {}
+    }
+    input:=ui.Input{size={460,100},pointer_absent=true}
+    frame:ui.Frame
+    for _ in 0..<3 {frame=documents_test_frame(&session,input)}
+    active,_:=ui.widget_rect(&ctx,shell_id(&gui,"document_look",1))
+    idle,_:=ui.widget_rect(&ctx,shell_id(&gui,"document_look",2))
+    testing.expect(t,active.h==ctx.theme.bar_height && idle.y+idle.h<active.y+active.h,"the active document connects to the toolbar in front of the inactive tabs")
+    surface,_:=ui.widget_rect(&ctx,shell_id(&gui,"document_surface",2))
+    testing.expect(t,surface.y<=active.y && surface.h==ctx.theme.bar_height,"an inactive tab takes clicks up to the edge of the window")
+    idle_fill:=shape_fill(frame,idle)
+    tab,_:=ui.widget_rect(&ctx,shell_id(&gui,"document_tab",2))
+    close,_:=ui.widget_rect(&ctx,shell_id(&gui,"document_close",2))
+    input.pointer_absent=false
+    input.pointer=ui.rect_center(tab)
+    frame=documents_test_frame(&session,input)
+    hovered:=shape_fill(frame,idle)
+    testing.expect(t,hovered!=idle_fill && hovered[3]>0,"hovering the title lights the entire tab surface")
+    testing.expect_value(t,shape_fill(frame,close),[4]f32{})
+    input.pointer=ui.rect_center(close)
+    frame=documents_test_frame(&session,input)
+    testing.expect_value(t,shape_fill(frame,idle),hovered)
+    testing.expect(t,shape_fill(frame,close)[3]>0,"hovering the close control adds its circular highlight")
+    input.pressed,input.down={.Left},{.Left}
+    documents_test_frame(&session,input)
+    testing.expect(t,.Document_Close in session.requests && .Document_Switch not_in session.requests)
+    testing.expect_value(t,session.document_request,1)
+    testing.expect_value(t,ctx.stats.layout_errors,u32(0))
+}
+
+@(test)
+document_tabs_scroll_and_reveal_the_active_document_with_clipped_native_regions :: proc(t:^testing.T) {
+    ctx:ui.Context
+    testing.expect(t,ui.context_init(&ctx,{}))
+    defer ui.context_destroy(&ctx)
+    gui:=Editor_Ui{ctx=&ctx,documents_reveal=true}
+    document:Document
+    edits:Edits
+    session:=Session{gui=&gui,document=&document,edits=&edits,active_document=19}
+    for index in 0..<20 {
+        tab:Document_Tab
+        document_name(&tab.document,fmt.tprintf("scenes/Document_%02d.scene",index),"")
+        append(&session.documents,tab)
+    }
+    defer delete(session.documents)
+    document=session.documents[19].document
+    for _ in 0..<3 {documents_test_frame(&session,{size={420,100},pointer_absent=true})}
+    testing.expect_value(t,ctx.stats.layout_errors,u32(0))
+    strip,found:=ui.widget_rect(&ctx,shell_id(&gui,"documents_strip"))
+    testing.expect(t,found && gui.documents_scroll>0,"activating a clipped tab reveals it")
+    last,_:=ui.widget_rect(&ctx,shell_id(&gui,"document_tab",20))
+    testing.expect(t,last.x>=strip.x-0.01 && last.x+last.w<=strip.x+strip.w+0.01)
+    next,next_found:=ui.widget_rect(&ctx,shell_id(&gui,"documents_next"))
+    previous,previous_found:=ui.widget_rect(&ctx,shell_id(&gui,"documents_previous"))
+    testing.expect(t,next_found && previous_found && next.w>0 && previous.w>0)
+    before:=gui.documents_scroll
+    documents_test_frame(&session,{size={420,100},pointer=ui.rect_center(previous),pressed={.Left},down={.Left},clicks=1})
+    testing.expect(t,gui.documents_scroll<before,"the previous arrow scrolls without switching documents")
+    documents_test_frame(&session,{size={420,100},pointer=ui.rect_center(previous),released={.Left}})
+    before=gui.documents_scroll
+    documents_test_frame(&session,{size={420,100},pointer=ui.rect_center(strip),wheel={2,0}})
+    testing.expect(t,gui.documents_scroll<before,"horizontal wheel input moves the document strip")
+    gui.documents_reveal=true
+    documents_test_frame(&session,{size={420,100},pointer_absent=true})
+    gui.documents_scroll-=107
+    documents_test_frame(&session,{size={420,100},pointer_absent=true})
+    gui.rects.bar={0,0,420,ctx.theme.bar_height}
+    regions:[NAMED_CAPACITY+1]platform.Window_Region
+    count:=shell_regions(&session,regions[:])
+    for region in regions[:count] {
+        if region.kind!=.Client {continue}
+        testing.expect(t,region.rect.x>=0 && region.rect.x+region.rect.w<=420.01,"native client regions stay inside the displayed bar")
+    }
+    testing.expect(t,gui.named_count<=12,"clipped documents do not consume native hit regions")
+    partial,_:=ui.widget_rect(&ctx,shell_id(&gui,"document_close",15))
+    clipped:=ui.rect_intersect(partial,strip)
+    testing.expect(t,clipped.w>0 && clipped.w<partial.w,"the fixture includes a partially visible tab control")
+    clipped_region:=false
+    for region in regions[:count] {
+        if region.kind==.Client && abs(region.rect.x-clipped.x)<0.01 && abs(region.rect.w-clipped.w)<0.01 {clipped_region=true;break}
+    }
+    testing.expect(t,clipped_region,"the native window receives only the visible part of a clipped tab control")
+    testing.expect_value(t,ctx.stats.layout_errors,u32(0))
+}
+
+// A scene that waits for the question about the open one does not drop what
+// was asked in the same frame.
+@(test)
+the_question_before_opening_a_scene_keeps_the_other_requests_of_the_frame :: proc(t:^testing.T) {
+    gui:Editor_Ui
+    defer delete(gui.confirm_assets)
+    document:Document
+    edits:Edits
+    s:=Session{gui=&gui,document=&document,edits=&edits}
+    append(&s.documents,Document_Tab{})
+    defer delete(s.documents)
+    document.unsaved=true
+    s.open_length=copy(s.open_path[:],"scenes/other.scene")
+    s.requests={.Open,.Quit}
+    requests_run(&s)
+    testing.expect(t,gui.modal==.Confirm && gui.pending==.Open_Scene)
+    testing.expect(t,s.quit)
+}
+
+// Escape closes a dialog as its Cancel does: nothing of what it asked about stays.
+@(test)
+escape_closes_a_dialog_with_what_it_asks_about :: proc(t:^testing.T) {
+    gui:Editor_Ui
+    defer delete(gui.confirm_assets)
+    viewport:Viewport
+    selection:Selection
+    edits:Edits
+    s:=Session{gui=&gui,edits=&edits,selection=&selection,viewport=&viewport}
+    for modal in ([]Modal{.Save_Changes,.Delete_Asset,.Git_Discard}) {
+        gui.modal=modal
+        confirm_assets_set(&gui,{"materials/clay.mat"})
+        gui.delete_asset={1,2}
+        base.text_set(gui.discard_path[:],"scenes/a.scene")
+        escape_run(&s,&gui,&viewport,&selection)
+        testing.expectf(t,gui.modal==.None && len(gui.confirm_assets)==0 && gui.delete_asset=={} && base.text_get(gui.discard_path[:])=="","%v",modal)
+    }
+}

@@ -1,0 +1,393 @@
+package ui_inspector_editor
+
+import "core:fmt"
+import "core:os"
+import "core:strings"
+import "core:testing"
+import "mirai:asset"
+import "mirai:engine/gui"
+import "mirai:host"
+import "mirai:std/base"
+import "mirai:std/serial"
+import "mirai:ui"
+
+// A project whose .ui only the memory of the registry holds, as an editor
+// leaves them unsaved.
+@(private="file")
+Project :: struct {
+    root:string,
+    assets:host.Assets,
+}
+
+@(private="file")
+project_init :: proc(t:^testing.T,p:^Project,name:string) -> bool {
+    directory,_:=os.temp_directory(context.temp_allocator)
+    p.root=fmt.aprintf("%s/mirai-ui-inspector-%d-%s",directory,os.get_pid(),name)
+    os.remove_all(p.root)
+    os.make_directory_all(p.root)
+    return testing.expect(t,host.assets_init(&p.assets,{root=p.root,capacity=8}))
+}
+
+@(private="file")
+project_destroy :: proc(p:^Project) {
+    host.assets_destroy(&p.assets)
+    os.remove_all(p.root)
+    delete(p.root)
+}
+
+// Writes records to path as the .ui id; imports as host.ui_tree_imports reads them.
+@(private="file")
+project_put :: proc(t:^testing.T,p:^Project,path:string,id:base.Asset_Id,data:ui.Tree_Data,imports:[]ui.Tree_Data={},loc:=#caller_location) -> bool {
+    bytes,error:=host.ui_tree_bytes(&p.assets.types,id,data,imports,context.temp_allocator)
+    if !testing.expect_value(t,error,asset.Error.None,loc=loc) {return false}
+    return testing.expect_value(t,asset.registry_memory_set(&p.assets.registry,path,bytes),asset.Error.None,loc=loc)
+}
+
+@(private="file")
+project_records :: proc(t:^testing.T,p:^Project,id:base.Asset_Id,r:^Records,loc:=#caller_location) -> bool {
+    return testing.expect(t,records_read(&p.assets,id,r,context.temp_allocator),"the .ui reads",loc=loc)
+}
+
+// ---------------------------------------------------------------- texts
+
+@(private="file") MENU_ID :: base.Asset_Id{0x3e,1}
+@(private="file") GAME_LANGUAGES :: gui.Languages{.English,.Spanish,.French}
+
+// A menu with two localized texts, one with no Spanish, and one that is not.
+@(private="file")
+menu_records :: proc(t:^testing.T,r:^Records,translated:bool) -> bool {
+    texts:=make([dynamic]u8,context.temp_allocator)
+    nodes:=[]ui.Tree_Node{
+        ui.tree_node_record(&texts,-1,{kind=.Box,name="menu"}),
+        ui.tree_node_record(&texts,0,{kind=.Text,name="play",text="Play, \"now\"\nor later",flags={.Localized},text_id=0xa1}),
+        ui.tree_node_record(&texts,0,{kind=.Button,name="quit,all",text="Quit",flags={.Localized},text_id=0xb2}),
+        ui.tree_node_record(&texts,0,{kind=.Text,name="hint",text="Not localized"}),
+    }
+    if !testing.expect(t,records_load(r,{text=texts[:],nodes=nodes,styles={{}}},context.temp_allocator)) {return false}
+    if translated {
+        node_text_set(r,&r.nodes[1],1,.Spanish,.English,"Jugar, \"ya\"\r\no luego")
+        node_text_set(r,&r.nodes[1],1,.French,.English,"Jouer")
+        node_text_set(r,&r.nodes[2],2,.French,.English,"Quitter")
+    }
+    return true
+}
+
+// The rows of the CSV of a menu, parsed as ui.text.import reads them.
+@(private="file")
+menu_csv :: proc(r:^Records) -> (text:string,rows:[][]string,count:int) {
+    order:=texts_csv_order(GAME_LANGUAGES,.English)
+    b:=strings.builder_make(context.temp_allocator)
+    texts_csv_header(&b,order)
+    count=texts_csv_file(&b,"ui/menu, main.ui",MENU_ID,r,order,.English)
+    text=strings.to_string(b)
+    return text,csv_rows(text),count
+}
+
+// The rows after the first, accepted against the registry; why of each rejected.
+@(private="file")
+csv_accept :: proc(p:^Project,rows:[][]string,rejected:^[dynamic]Texts_Rejected) -> []Texts_Row {
+    accepted:=make([dynamic]Texts_Row,context.temp_allocator)
+    for row,i in rows[1:] {
+        if len(row)==1 && row[0]=="" {continue}
+        parsed,why:=texts_csv_row(&p.assets.registry,row,i+2,len(rows[0]))
+        if why!="" {append(rejected,Texts_Rejected{i+2,why});continue}
+        append(&accepted,parsed)
+    }
+    return accepted[:]
+}
+
+@(test)
+texts_go_to_a_csv_and_back_with_commas_quotes_and_lines :: proc(t:^testing.T) {
+    p:Project
+    if !project_init(t,&p,"texts") {return}
+    defer project_destroy(&p)
+    source:Records
+    if !menu_records(t,&source,true) {return}
+    if !project_put(t,&p,"ui/menu.ui",MENU_ID,records_data(&source)) {return}
+
+    text,rows,count:=menu_csv(&source)
+    testing.expect_value(t,count,2)
+    if !testing.expect_value(t,len(rows),3) {return}
+    testing.expect_value(t,strings.join(rows[0],"|",context.temp_allocator),"file|asset|node|id|en|es|fr")
+    testing.expect_value(t,rows[1][0],"ui/menu, main.ui")
+    testing.expect_value(t,rows[1][3],"00000000000000a1")
+    testing.expect_value(t,rows[1][4],"Play, \"now\"\nor later")
+    testing.expect_value(t,rows[1][5],"Jugar, \"ya\"\r\no luego")
+    testing.expect_value(t,rows[2][2],"quit,all")
+    testing.expect_value(t,rows[2][5],"")
+    testing.expect_value(t,rows[2][6],"Quitter")
+    testing.expect(t,strings.contains(text,`"Play, ""now""`),"A quote inside a field is doubled")
+
+    // The same CSV into the menu without translations gives back every text.
+    target:Records
+    if !menu_records(t,&target,false) {return}
+    columns,why:=texts_csv_columns(rows,GAME_LANGUAGES)
+    if !testing.expect_value(t,why,"") {return}
+    rejected:=make([dynamic]Texts_Rejected,context.temp_allocator)
+    accepted:=csv_accept(&p,rows,&rejected)
+    testing.expect_value(t,len(accepted),2)
+    testing.expect(t,texts_csv_apply(&target,MENU_ID,accepted,columns,.English,&rejected))
+    testing.expect_value(t,len(rejected),0)
+    for row in 0..<len(source.nodes) {
+        for language in GAME_LANGUAGES {
+            testing.expectf(t,node_text_in(&target,&target.nodes[row],language,.English)==node_text_in(&source,&source.nodes[row],language,.English),"node %d in %v",row,language)
+        }
+    }
+    again_text,_,_:=menu_csv(&target)
+    testing.expect_value(t,again_text,text)
+
+    // An empty cell changes nothing; another text replaces the one there.
+    rows[1][5]=""
+    rows[1][6]="Jouer, enfin"
+    rows[2][4]=""
+    accepted=csv_accept(&p,rows,&rejected)
+    testing.expect(t,texts_csv_apply(&target,MENU_ID,accepted,columns,.English,&rejected))
+    testing.expect_value(t,node_text_in(&target,&target.nodes[1],.Spanish,.English),"Jugar, \"ya\"\r\no luego")
+    testing.expect_value(t,node_text_in(&target,&target.nodes[1],.French,.English),"Jouer, enfin")
+    testing.expect_value(t,node_text_in(&target,&target.nodes[2],.English,.English),"Quit")
+    testing.expect_value(t,node_text_in(&target,&target.nodes[2],.Spanish,.English),"")
+
+    // Lines a spreadsheet ends with \r\n, and a last one without its end.
+    crlf:=fmt.tprintf("file,asset,node,id,en,es\r\nui/menu.ui,%s,play,00000000000000a1,,\"Sí, \"\"ya\"\"\"",rows[1][1])
+    parsed:=csv_rows(crlf)
+    if testing.expect_value(t,len(parsed),2) && testing.expect_value(t,len(parsed[1]),6) {
+        testing.expect_value(t,parsed[0][5],"es")
+        testing.expect_value(t,parsed[1][5],"Sí, \"ya\"")
+    }
+}
+
+@(test)
+a_csv_of_texts_says_why_it_refuses_a_language_the_game_lacks_and_rows_of_no_text :: proc(t:^testing.T) {
+    p:Project
+    if !project_init(t,&p,"texts-refused") {return}
+    defer project_destroy(&p)
+    r:Records
+    if !menu_records(t,&r,true) {return}
+    if !project_put(t,&p,"ui/menu.ui",MENU_ID,records_data(&r)) {return}
+    _,rows,_:=menu_csv(&r)
+
+    // A column of a language the game is not in.
+    _,why:=texts_csv_columns(rows,{.English,.Spanish})
+    testing.expect(t,strings.contains(why,"column fr") && strings.contains(why,"Project Settings > UI"),why)
+    _,why=texts_csv_columns(rows,{.English,.Spanish,.French,.German})
+    testing.expect_value(t,why,"")
+    _,why=texts_csv_columns({{"asset","file","node","id","en"}},GAME_LANGUAGES)
+    testing.expect(t,strings.contains(why,"file,asset,node,id"),why)
+
+    id:[32]u8
+    menu:=base.asset_id_format(MENU_ID,id[:])
+    other:[32]u8
+    unknown:=base.asset_id_format({0x99,9},other[:])
+    csv:=fmt.tprintf("file,asset,node,id,en,es,fr\nui/menu.ui,%s,play,00000000000000a1,,Jugar,\n" +
+        "ui/menu.ui,not-an-id,play,00000000000000a1,,,\n" +
+        "ui/gone.ui,%s,play,00000000000000a1,,,\n" +
+        "ui/menu.ui,%s,play,00000000000000A1,,,\n" +
+        "ui/menu.ui,%s,play,0000000000000000,,,\n" +
+        "ui/menu.ui,%s,play\n" +
+        "ui/menu.ui,%s,hint,00000000000000c3,,Pista,\n",menu,unknown,menu,menu,menu,menu)
+    parsed:=csv_rows(csv)
+    columns,columns_why:=texts_csv_columns(parsed,GAME_LANGUAGES)
+    if !testing.expect_value(t,columns_why,"") {return}
+    rejected:=make([dynamic]Texts_Rejected,context.temp_allocator)
+    accepted:=csv_accept(&p,parsed,&rejected)
+    testing.expect(t,texts_csv_apply(&r,MENU_ID,accepted,columns,.English,&rejected))
+    testing.expect_value(t,node_text_in(&r,&r.nodes[1],.Spanish,.English),"Jugar")
+    testing.expect_value(t,node_text_in(&r,&r.nodes[3],.Spanish,.English),"")
+    if !testing.expect_value(t,len(rejected),6) {return}
+    expected:=[6]struct{line:int,says:string}{
+        {3,"is not an asset id"},{4,"is not a .ui of the project"},{5,"16 hexadecimal digits"},
+        {6,"16 hexadecimal digits"},{7,"fewer columns"},{8,"no localized node with id 00000000000000c3"},
+    }
+    for e,i in expected {
+        testing.expect_value(t,rejected[i].line,e.line)
+        testing.expect(t,strings.contains(rejected[i].reason,e.says),rejected[i].reason)
+    }
+}
+
+// ---------------------------------------------------------------- renames
+
+@(private="file") CARD_ID :: base.Asset_Id{0xca,1}   // a widget: card > label
+@(private="file") SLOT_ID :: base.Asset_Id{0x5107,1} // an instance of card, slot, that overrides label
+@(private="file") SCREEN_ID :: base.Asset_Id{0x5c,1} // an instance of the slot one, outer, that overrides slot/label
+@(private="file") PANEL_ID :: base.Asset_Id{0xba,1}  // another widget with a label
+@(private="file") OTHER_ID :: base.Asset_Id{0x07,1}  // an instance of panel that overrides its label
+
+@(private="file")
+widget_data :: proc(root,child:string) -> ui.Tree_Data {
+    texts:=make([dynamic]u8,context.temp_allocator)
+    nodes:=make([]ui.Tree_Node,2,context.temp_allocator)
+    nodes[0]=ui.tree_node_record(&texts,-1,{kind=.Box,name=root})
+    nodes[1]=ui.tree_node_record(&texts,0,{kind=.Text,name=child,text="Label"})
+    return {text=texts[:],nodes=nodes,styles=make([]ui.Node_Style,1,context.temp_allocator)}
+}
+
+// A root with an instance of widget that overrides the text of target.
+@(private="file")
+instance_data :: proc(instance:string,widget:base.Asset_Id,target:string) -> ui.Tree_Data {
+    texts:=make([dynamic]u8,context.temp_allocator)
+    nodes:=make([]ui.Tree_Node,2,context.temp_allocator)
+    nodes[0]=ui.tree_node_record(&texts,-1,{kind=.Box,name="root"})
+    nodes[1]=ui.tree_node_record(&texts,0,{kind=.Component,name=instance,component=1})
+    components:=make([]ui.Tree_Component,1,context.temp_allocator)
+    components[0]=ui.tree_component_record("widget",0,0)
+    components[0].widget=widget
+    overrides:=make([]ui.Tree_Override,1,context.temp_allocator)
+    overrides[0]=ui.tree_override_record(&texts,1,target,{.Text},{text="Mine"})
+    return {text=texts[:],nodes=nodes,styles=make([]ui.Node_Style,1,context.temp_allocator),components=components,overrides=overrides}
+}
+
+@(private="file")
+override_of :: proc(r:^Records) -> string {return serial.text_field(r.overrides[0].node[:])}
+
+// Whether records of a .ui load with the widgets the registry has for them.
+@(private="file")
+loads :: proc(p:^Project,id:base.Asset_Id,r:^Records) -> bool {
+    data:=records_data(r)
+    imports,ok:=host.ui_tree_imports(&p.assets,data)
+    if !ok {return false}
+    _,error:=host.ui_tree_bytes(&p.assets.types,id,data,imports,context.temp_allocator)
+    return error==.None
+}
+
+@(test)
+a_renamed_node_renames_the_overrides_of_the_interfaces_that_use_its_widget :: proc(t:^testing.T) {
+    p:Project
+    if !project_init(t,&p,"rename") {return}
+    defer project_destroy(&p)
+    card,panel:=widget_data("card","label"),widget_data("panel","label")
+    slot:=instance_data("slot",CARD_ID,"label")
+    linked_slot,linked:=ui.tree_link(slot,{card})
+    if !testing.expect(t,linked) {return}
+    ok:=project_put(t,&p,"card.ui",CARD_ID,card) && project_put(t,&p,"slot.ui",SLOT_ID,slot,{card}) &&
+        project_put(t,&p,"screen.ui",SCREEN_ID,instance_data("outer",SLOT_ID,"slot/label"),{linked_slot}) &&
+        project_put(t,&p,"panel.ui",PANEL_ID,panel) && project_put(t,&p,"other.ui",OTHER_ID,instance_data("other",PANEL_ID,"label"),{panel})
+    if !ok {return}
+
+    // label of card becomes caption: what names it through card follows, the label of panel does not.
+    renamed:=[2]Records{}
+    for id,i in ([2]base.Asset_Id{SLOT_ID,SCREEN_ID}) {
+        if !project_records(t,&p,id,&renamed[i]) {return}
+        testing.expect_value(t,records_rename_follow(&p.assets,&renamed[i],CARD_ID,"label","caption"),1)
+    }
+    testing.expect_value(t,override_of(&renamed[0]),"caption")
+    testing.expect_value(t,override_of(&renamed[1]),"slot/caption")
+    other:Records
+    if !project_records(t,&p,OTHER_ID,&other) {return}
+    testing.expect_value(t,records_rename_follow(&p.assets,&other,CARD_ID,"label","caption"),0)
+    testing.expect_value(t,override_of(&other),"label")
+    testing.expect_value(t,records_rename_follow(&p.assets,&renamed[0],CARD_ID,"capt","x"),0)
+
+    // With card renamed, what followed loads and what did not follow does not.
+    if !project_put(t,&p,"card.ui",CARD_ID,widget_data("card","caption")) {return}
+    stale:Records
+    if !project_records(t,&p,SLOT_ID,&stale) {return}
+    testing.expect(t,!loads(&p,SLOT_ID,&stale),"An override of a node the widget no longer has does not load")
+    testing.expect(t,loads(&p,SLOT_ID,&renamed[0]))
+    if !project_put(t,&p,"slot.ui",SLOT_ID,records_data(&renamed[0]),{widget_data("card","caption")}) {return}
+    testing.expect(t,loads(&p,SCREEN_ID,&renamed[1]))
+
+    // The instance inside the widget renamed: the path follows in its first part.
+    screen:Records
+    if !project_records(t,&p,SCREEN_ID,&screen) {return}
+    testing.expect_value(t,records_rename_follow(&p.assets,&screen,SLOT_ID,"slot","socket"),1)
+    testing.expect_value(t,override_of(&screen),"socket/label")
+    testing.expect_value(t,records_rename_follow(&p.assets,&screen,CARD_ID,"slot","socket"),0)
+}
+
+// ---------------------------------------------------------------- check
+
+@(private="file") USES_ID :: base.Asset_Id{0x05e5,1}  // uses the widget and binds one path of its own
+@(private="file") ALONE_ID :: base.Asset_Id{0xa1,1}   // binds a path, no widgets
+@(private="file") QUIET_ID :: base.Asset_Id{0x9e,1}   // binds nothing
+
+@(private="file")
+bound_data :: proc(kind:ui.Node_Kind,name,path:string) -> ui.Tree_Data {
+    texts:=make([dynamic]u8,context.temp_allocator)
+    nodes:=make([]ui.Tree_Node,2,context.temp_allocator)
+    nodes[0]=ui.tree_node_record(&texts,-1,{kind=.Box,name="root"})
+    nodes[1]=ui.tree_node_record(&texts,0,{kind=kind,name=name,bind_text=path if kind==.Text else "",bind_value=path if kind!=.Text else ""})
+    return {text=texts[:],nodes=nodes,styles=make([]ui.Node_Style,1,context.temp_allocator)}
+}
+
+@(private="file")
+Problem_Key :: struct {asset:base.Asset_Id,row,node:int,binding:ui.Binding,fault:Bind_Fault,path:string}
+
+// Whether two lists have the same problems, in any order.
+@(private="file")
+same_problems :: proc(a,b:[]Bind_Problem) -> bool {
+    key :: proc(p:^Bind_Problem) -> Problem_Key {return {p.asset,p.row,p.node,p.binding,p.fault,serial.text_field(p.path[:])}}
+    if len(a)!=len(b) {return false}
+    taken:=make([]bool,len(b),context.temp_allocator)
+    outer: for &x in a {
+        for &y,i in b {
+            if !taken[i] && key(&x)==key(&y) {taken[i]=true;continue outer}
+        }
+        return false
+    }
+    return true
+}
+
+@(private="file")
+full_check :: proc(p:^Project) -> []Bind_Problem {
+    types:Bind_Types
+    defer bind_types_free(&types)
+    problems:=make([dynamic]Bind_Problem,context.temp_allocator)
+    bind_check_all(&problems,&types,context.allocator,&p.assets,nil)
+    return problems[:]
+}
+
+@(private="file") MARK :: -77
+
+@(test)
+the_check_of_interfaces_reads_again_only_what_changed_and_finds_what_the_full_check_finds :: proc(t:^testing.T) {
+    p:Project
+    if !project_init(t,&p,"check") {return}
+    defer project_destroy(&p)
+    widget:=bound_data(.Text,"label","Game.title")
+    uses:=instance_data("slot",CARD_ID,"label")
+    progress:=[3]ui.Tree_Node{uses.nodes[0],uses.nodes[1],{}}
+    texts:=make([dynamic]u8,context.temp_allocator)
+    append(&texts,..uses.text)
+    progress[2]=ui.tree_node_record(&texts,0,{kind=.Progress,name="health",bind_value="Game.health"})
+    uses.nodes,uses.text=progress[:],texts[:]
+    ok:=project_put(t,&p,"card.ui",CARD_ID,widget) && project_put(t,&p,"uses.ui",USES_ID,uses,{widget}) &&
+        project_put(t,&p,"alone.ui",ALONE_ID,bound_data(.Text,"clock","Game.time")) && project_put(t,&p,"quiet.ui",QUIET_ID,bound_data(.Spacer,"gap",""))
+    if !ok {return}
+
+    u:=new(Ui_Inspector,context.temp_allocator)
+    defer {delete(u.problems);delete(u.checked);delete(u.checked_uses);bind_types_free(&u.bind_types)}
+    testing.expect(t,bind_check_changed(u,context.allocator,&p.assets,nil,true))
+    testing.expect(t,same_problems(u.problems[:],full_check(&p)),"The first check finds what the full one finds")
+    testing.expect_value(t,bind_files(u.problems[:]),3)
+    testing.expect_value(t,len(u.checked),4)
+
+    // Nothing changed: nothing is read.
+    loads:=p.assets.stats.loads
+    testing.expect(t,!bind_check_changed(u,context.allocator,&p.assets,nil,false))
+    testing.expect_value(t,p.assets.stats.loads,loads)
+
+    // The widget changes: it and what uses it are checked again, the rest keeps what it found.
+    for &problem in u.problems {problem.node=MARK}
+    if !project_put(t,&p,"card.ui",CARD_ID,bound_data(.Text,"label","Game.name")) {return}
+    testing.expect(t,bind_check_changed(u,context.allocator,&p.assets,nil,false))
+    for &problem in u.problems {
+        testing.expectf(t,(problem.node==MARK)==(problem.asset==ALONE_ID),"%v checked again: %v",problem.asset,problem.node!=MARK)
+        if problem.asset==CARD_ID {testing.expect_value(t,serial.text_field(problem.path[:]),"Game.name")}
+    }
+    for &problem in u.problems {
+        if problem.node!=MARK {continue}
+        // What was not checked again holds what the first check found.
+        for &first in full_check(&p) {if first.asset==problem.asset {problem.node=first.node}}
+    }
+    testing.expect(t,same_problems(u.problems[:],full_check(&p)),"After a change it finds what the full check finds")
+
+    // A .ui that goes is checked no more; another build checks every one again.
+    testing.expect_value(t,asset.registry_memory_remove(&p.assets.registry,"alone.ui"),asset.Error.None)
+    testing.expect(t,bind_check_changed(u,context.allocator,&p.assets,nil,false))
+    testing.expect_value(t,len(u.checked),3)
+    testing.expect_value(t,bind_files(u.problems[:]),2)
+    testing.expect(t,same_problems(u.problems[:],full_check(&p)))
+    for &problem in u.problems {problem.node=MARK}
+    testing.expect(t,bind_check_changed(u,context.allocator,&p.assets,nil,true))
+    for &problem in u.problems {testing.expect(t,problem.node!=MARK,"Another build checks every .ui again")}
+}

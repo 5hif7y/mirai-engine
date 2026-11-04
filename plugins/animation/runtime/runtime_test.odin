@@ -1,0 +1,271 @@
+package anim
+
+import "base:runtime"
+import "core:strings"
+import "core:testing"
+import "mirai:core"
+import "mirai:host"
+import lib "mirai:std/anim"
+import "mirai:std/base"
+import mm "mirai:std/math"
+
+@(test)
+curve_queries_mix_missing_tracks_with_the_callers_default_and_retire_stale_outputs :: proc(t:^testing.T) {
+    content:=host.Content_Animation{clip_count=2}
+    testing.expect(t,lib.library_init(&content.lib,{max_clips=2,max_tracks=1,max_keys=2}))
+    defer lib.library_destroy(&content.lib)
+    target:=base.name_hash("pulse")
+    keys:=[2]lib.Keyframe{{time=0,value={2,0,0,0}},{time=1,value={4,0,0,0}}}
+    clip,_:=lib.clip_add(&content.lib,{name=1,tracks={{target=target,property=.Float,keys=keys[:]}}})
+    empty,_:=lib.clip_add(&content.lib,{name=2})
+    playback:Playback;defer playback_free(&playback)
+    state:=state_get(&playback,core.Entity(1));state.seen=1;playback.frame=1
+    lib.fader_play(&state.fader,clip,1,0);state.fader.current.time=.5
+    sample_curves(state,&content,.5)
+    testing.expect_value(t,animation_curve(&playback,state.entity,"pulse",default_value=5),f32(4))
+    lib.fader_play(&state.fader,empty,1,1)
+    state.fader.current.time=.5
+    state.fader.outgoing[0].elapsed=.5;state.fader.elapsed=.5
+    sample_curves(state,&content,1)
+    testing.expect_value(t,animation_curve(&playback,state.entity,"pulse",default_value=5),f32(4))
+    playback.frame+=1
+    testing.expect_value(t,animation_curve(&playback,state.entity,"pulse",default_value=5),f32(5))
+    _,present:=animation_root_delta(&playback,state.entity);testing.expect(t,!present)
+}
+
+@(test)
+direct_clip_weights_preserve_zero_full_and_partial_trs_without_allocations :: proc(t:^testing.T) {
+    content:=host.Content_Animation{clip_count=1}
+    if !testing.expect(t,lib.library_init(&content.lib,{max_clips=1,max_tracks=3,max_keys=3})) {return}
+    defer lib.library_destroy(&content.lib)
+    target:=base.name_hash("bone")
+    rest:=mm.Transform{position={1,2,3},rotation=mm.quat_axis_angle({1,0,0},.3),scale={.5,1,2}}
+    posed:=mm.Transform{position={3,4,5},rotation=-mm.quat_axis_angle({0,1,0},1.2),scale={2,3,4}}
+    clip,_:=lib.clip_add(&content.lib,{tracks={
+        {target=target,property=.Position,keys={{value={3,4,5,0}}}},
+        {target=target,property=.Rotation,keys={{value=lib.quat_vec4(posed.rotation)}}},
+        {target=target,property=.Scale,keys={{value={2,3,4,0}}}},
+    }})
+    if !testing.expect(t,clip!=0) {return}
+    state:=Playing{clip=0};defer playing_free(&state)
+    append(&state.bindings,Binding{target=target,driven={.Position,.Rotation,.Scale},rest=rest})
+    append(&state.local,rest)
+    lib.fader_play(&state.fader,clip)
+    playback:Playback;defer playback_free(&playback)
+    if !testing.expect(t,lib.pose_init(&playback.pose,8)) {return}
+    pose_sample(&playback,&state,&content.lib,ANIMATION_DEFAULT,{},nil)
+    saved:=context;context.allocator=runtime.nil_allocator();context.temp_allocator=runtime.nil_allocator()
+    matched:=true
+    for source_weight in ([3]f32{0,.5,1}) {for weight in ([3]f32{0,.25,1}) {
+        state.fader.current.weight=source_weight
+        animation:=ANIMATION_DEFAULT;animation.weight=weight
+        pose_sample(&playback,&state,&content.lib,animation,{},nil)
+        expected:=mm.transform_interpolate(rest,posed,source_weight*weight)
+        expected.rotation=mm.quat_slerp(rest.rotation,posed.rotation,source_weight*weight)
+        for i in 0..<3 {matched &&=abs(state.local[0].position[i]-expected.position[i])<1e-5 && abs(state.local[0].scale[i]-expected.scale[i])<1e-5}
+        matched &&=mm.quat_angle(state.local[0].rotation,expected.rotation)<1e-5
+    }}
+    context=saved
+    testing.expect(t,matched && playback.pose.failed==0)
+}
+
+@(test)
+negative_speed_plays_a_once_clip_from_its_end_and_seeks_drive_progress :: proc(t:^testing.T) {
+    content:=host.Content_Animation{clip_count=1}
+    testing.expect(t,lib.library_init(&content.lib,{max_keys=2,max_tracks=1,max_clips=2,max_markers=0}))
+    defer lib.library_destroy(&content.lib)
+    walk,_:=lib.clip_add(&content.lib,{tracks={{target=base.name_hash("10"),property=.Position,keys={{time=0,value={}},{time=2,value={2,0,0,0}}}}}})
+    testing.expect(t,walk!=0)
+    state:=Playing{entity=core.entity_make(1,1),clip=-1}
+    playback:Playback;defer playback_free(&playback)
+    events:Animation_Events;defer delete(events.items)
+    settings:=ANIMATION_DEFAULT;settings.speed=-2;settings.loop=false
+    advance(&playback,&state,&content,settings,&events,0.25,nil)
+    testing.expect(t,abs(state.time-1.5)<0.0001 && !state.ended && state.duration==2)
+    settings.speed=1
+    advance(&playback,&state,&content,settings,&events,1,nil)
+    testing.expect(t,state.ended && abs(state.time-2)<0.0001)
+    settings.speed=-1
+    advance(&playback,&state,&content,settings,&events,0.5,nil)
+    testing.expect(t,!state.ended && abs(state.time-1.5)<0.0001)
+    advance(&playback,&state,&content,settings,&events,0,nil,0.25)
+    testing.expect(t,abs(state.time-0.25)<0.0001)
+    base.text_set(settings.clip[:],"missing")
+    problems:core.Problems
+    advance(&playback,&state,&content,settings,&events,0.5,&problems)
+    advance(&playback,&state,&content,settings,&events,0.5,&problems)
+    testing.expect(t,state.clip==-1 && state.duration==0)
+    missing:=core.problem_find(&problems,state.entity,"animation.clip")
+    if testing.expect(t,missing!=nil && problems.count==1,"a clip the animation lacks is a problem of its entity") {
+        testing.expect_value(t,missing.count,u64(2))
+        testing.expect(t,strings.contains(core.problem_text(missing),"Animation.clip is 'missing'"),core.problem_text(missing))
+        testing.expect(t,strings.contains(core.problem_text(missing),"name one of its clips"),core.problem_text(missing))
+    }
+}
+
+// The actor, hip below it, arm below hip, and leg below the actor; walk moves
+// hip and leg, wave raises arm and leg, run moves hip twice as fast as walk.
+@(private)
+layer_fixture :: proc(t:^testing.T,content:^host.Content_Animation) -> Playing {
+    content.id={1,2}
+    testing.expect(t,lib.library_init(&content.lib,{max_keys=16,max_tracks=8,max_clips=6,max_markers=0}))
+    hip,arm,leg:=base.name_hash("hip"),base.name_hash("arm"),base.name_hash("leg")
+    walk:=[2]lib.Keyframe{{time=0},{time=2,value={2,0,0,0}}}
+    stride:=[2]lib.Keyframe{{time=0},{time=2,value={0,0,2,0}}}
+    raised:=[1]lib.Keyframe{{value={0,1,0,0}}}
+    kicked:=[1]lib.Keyframe{{value={0,5,0,0}}}
+    run:=[2]lib.Keyframe{{time=0},{time=1,value={4,0,0,0}}}
+    clips:=[3]lib.Clip_Desc{
+        {name=base.name_hash("walk"),tracks={{target=hip,property=.Position,keys=walk[:]},{target=leg,property=.Position,keys=stride[:]}}},
+        {name=base.name_hash("wave"),tracks={{target=arm,property=.Position,keys=raised[:]},{target=leg,property=.Position,keys=kicked[:]}}},
+        {name=base.name_hash("run"),tracks={{target=hip,property=.Position,keys=run[:]}}},
+    }
+    for clip in clips {added,_:=lib.clip_add(&content.lib,clip);testing.expect(t,added!=0)}
+    for i in 0..<3 {content.lib.clips[3+i]=content.lib.clips[i];content.lib.clips[3+i].loop=.Loop}
+    content.lib.clip_count=6;content.clip_count=3
+    state:=Playing{entity=core.entity_make(1,1),clip=-1}
+    targets:=[4]u64{0,hip,arm,leg}
+    parents:=[4]i32{-1,0,1,0}
+    for target,i in targets {
+        append(&state.bindings,Binding{target=target,entity=core.NONE,driven={.Position},rest=mm.TRANSFORM_IDENTITY,parent=parents[i]})
+        append(&state.parents,parents[i]);append(&state.targets,target);append(&state.rest,mm.TRANSFORM_IDENTITY)
+    }
+    resize(&state.local,4);resize(&state.world,4)
+    return state
+}
+
+@(private="file")
+layer_step :: proc(playback:^Playback,state:^Playing,content:^host.Content_Animation,animation:Animation,events:^Animation_Events,dt:f32) {
+    copy(state.local[:],state.rest[:])
+    advance(playback,state,content,animation,events,dt,nil)
+    layers_advance(playback,state,content,animation,events,dt,nil)
+    pose_sample(playback,state,&content.lib,animation,{},nil)
+}
+
+@(test)
+layers_play_over_the_clip_inside_their_branch_by_weight_and_fade_out :: proc(t:^testing.T) {
+    content:host.Content_Animation
+    state:=layer_fixture(t,&content)
+    defer lib.library_destroy(&content.lib);defer playing_free(&state)
+    playback:Playback;defer playback_free(&playback)
+    testing.expect(t,lib.pose_init(&playback.pose,64))
+    events:Animation_Events;defer delete(events.items)
+    animation:=ANIMATION_DEFAULT
+    testing.expect(t,animation_play(&animation,"walk",fade=0))
+    layer_step(&playback,&state,&content,animation,&events,1)
+    testing.expect(t,abs(state.local[1].position.x-1)<0.0001 && abs(state.local[3].position.z-1)<0.0001 && state.local[2].position==0)
+    // Over the branch of hip: arm rises, leg keeps walking, hip keeps what wave does not move.
+    testing.expect(t,animation_play(&animation,"wave",fade=0,layer=1,over="hip"))
+    layer_step(&playback,&state,&content,animation,&events,0)
+    testing.expect(t,state.local[2].position==mm.Vec3{0,1,0} && state.local[3].position.y==0 && abs(state.local[1].position.x-1)<0.0001)
+    testing.expect(t,animation_play(&animation,"wave",fade=0,layer=1))
+    layer_step(&playback,&state,&content,animation,&events,0)
+    testing.expect_value(t,state.local[3].position,mm.Vec3{0,5,0})
+    testing.expect(t,animation_weight(&animation,1,0.5))
+    layer_step(&playback,&state,&content,animation,&events,0)
+    testing.expect(t,abs(state.local[3].position.y-2.5)<0.0001 && abs(state.local[3].position.z-0.5)<0.0001)
+    testing.expect(t,animation_stop(&animation,1,0.5))
+    layer_step(&playback,&state,&content,animation,&events,0.1)
+    testing.expect(t,abs(state.layers[0].weight-0.3)<0.0001 && abs(state.local[3].position.y-1.5)<0.0001)
+    layer_step(&playback,&state,&content,animation,&events,1)
+    testing.expect(t,state.layers[0]==Layer_Playing{} && state.local[3].position.y==0)
+    // A synchronized layer is where the clip below it is in its cycle: walk lasts 2 s and run 1 s.
+    testing.expect(t,animation_play(&animation,"run",fade=0,layer=2,sync=true))
+    layer_step(&playback,&state,&content,animation,&events,0.5)
+    run_time:=lib.player_time(&content.lib,state.layers[1].fader.current)
+    testing.expect(t,abs(run_time-state.time/2)<0.0001 && abs(state.local[1].position.x-run_time*4)<0.0001)
+    testing.expect(t,animation_play(&animation,"missing",fade=0,layer=2))
+    layer_step(&playback,&state,&content,animation,&events,0.1)
+    testing.expect_value(t,state.layers[1].clip,u64(0))
+    before:=animation
+    long:="a clip whose name is longer than the sixty four bytes that the component can hold"
+    testing.expect(t,!animation_play(&animation,"wave",layer=ANIMATION_LAYERS+1) && !animation_play(&animation,"wave",layer=-1) && !animation_play(&animation,long))
+    zero:f32
+    testing.expect(t,!animation_play(&animation,"wave",layer=1,weight=zero/zero) && !animation_play(&animation,"",layer=1) && !animation_weight(&animation,4,1) && !animation_stop(&animation,-1))
+    testing.expect_value(t,animation,before)
+}
+
+@(test)
+animation_play_sets_the_clip_of_the_component_on_layer_zero :: proc(t:^testing.T) {
+    animation:=ANIMATION_DEFAULT
+    animation.playing=false
+    testing.expect(t,animation_play(&animation,"jump",fade=0.08,loop=false,speed=0.5))
+    testing.expect(t,base.text_get(animation.clip[:])=="jump" && animation.playing && !animation.loop && animation.fade==0.08 && animation.speed==0.5)
+    testing.expect(t,animation_play(&animation,"walk"))
+    testing.expect(t,base.text_get(animation.clip[:])=="walk" && !animation.loop && animation.fade==0.08 && animation.speed==1)
+    testing.expect(t,animation_weight(&animation,0,2) && animation.weight==1)
+    testing.expect(t,animation_stop(&animation,0) && !animation.playing)
+    testing.expect(t,animation_play(&animation,"wave",fade=-1,layer=3,over="hand"))
+    testing.expect(t,animation.layers[2]==Animation_Layer{clip=base.name_hash("wave"),over=base.name_hash("hand"),weight=1,speed=1,fade=0.08,loop=true})
+}
+
+@(private)
+Runtime_Allocation_Failure :: struct {owner:runtime.Allocator,remaining,calls:int}
+@(private)
+runtime_failure_allocator :: proc(data:rawptr,mode:runtime.Allocator_Mode,size,alignment:int,old_memory:rawptr,old_size:int,loc:=#caller_location) -> ([]byte,runtime.Allocator_Error) {
+    state:=(^Runtime_Allocation_Failure)(data)
+    if mode==.Alloc || mode==.Alloc_Non_Zeroed || mode==.Resize || mode==.Resize_Non_Zeroed {
+        state.calls+=1
+        if state.remaining==0 {return nil,.Out_Of_Memory}
+        state.remaining-=1
+    }
+    return state.owner.procedure(state.owner.data,mode,size,alignment,old_memory,old_size,loc)
+}
+
+@(test)
+animation_bind_is_transactional_when_allocations_fail_and_stops_at_nested_players :: proc(t:^testing.T) {
+    entities:core.Entities;core.entities_init(&entities);defer core.entities_destroy(&entities)
+    root,bone,nested,nested_bone:=core.create(&entities),core.create(&entities),core.create(&entities),core.create(&entities)
+    transforms:core.Table(core.Transform);parents:core.Table(core.Parent);names:core.Table(core.Name)
+    targets:core.Table(Animation_Target);animations:core.Table(Animation)
+    defer {core.table_destroy(&transforms);core.table_destroy(&parents);core.table_destroy(&names);core.table_destroy(&targets);core.table_destroy(&animations)}
+    for e in ([4]core.Entity{root,bone,nested,nested_bone}) {core.add(&transforms,e,core.TRANSFORM_IDENTITY);core.add(&names,e,{})}
+    core.add(&parents,bone,{entity=root});core.add(&parents,nested,{entity=root});core.add(&parents,nested_bone,{entity=nested})
+    target:=Animation_Target{};base.text_set(target.path[:],"10");core.add(&targets,bone,target);core.add(&targets,nested_bone,target)
+    core.add(&animations,root,ANIMATION_DEFAULT);core.add(&animations,nested,ANIMATION_DEFAULT)
+    core.table_settle(&transforms,&entities);core.table_settle(&parents,&entities);core.table_settle(&names,&entities);core.table_settle(&targets,&entities);core.table_settle(&animations,&entities)
+    content:host.Content_Animation
+    testing.expect(t,lib.library_init(&content.lib,{max_keys=2,max_tracks=1,max_clips=1,max_markers=0}))
+    defer lib.library_destroy(&content.lib)
+    still,_:=lib.clip_add(&content.lib,{tracks={{target=base.name_hash("10"),property=.Position,keys={{time=0,value={1,0,0,0}}}}}})
+    testing.expect(t,still!=0)
+    hierarchy:core.Hierarchy;defer core.value_free(&hierarchy,type_info_of(core.Hierarchy))
+    testing.expect(t,core.hierarchy_settle(&hierarchy,core.read(&parents),&entities))
+    state:=Playing{entity=root}
+    defer playing_free(&state)
+    playback:Playback;defer playback_free(&playback)
+    testing.expect(t,bind(&playback,&state,&content,core.ref(&hierarchy),&transforms,core.read(&names),core.read(&targets),core.read(&animations),nil))
+    testing.expect_value(t,len(state.bindings),2)
+    testing.expect_value(t,state.bindings[1].entity,bone)
+    core.get(&transforms,bone).position={9,0,0}
+    core.get(&transforms,bone).rotation=mm.quat_axis_angle({0,0,1},0.5)
+    old_rest:=state.rest[1]
+    old_pointer:=raw_data(state.bindings)
+    succeeded:=false
+    failure:=Runtime_Allocation_Failure{owner=context.allocator}
+    for budget in 0..<24 {
+        failure.remaining=budget
+        saved_context:=context
+        context.allocator={runtime_failure_allocator,&failure}
+        context.temp_allocator=context.allocator
+        ok:=bind(&playback,&state,&content,core.ref(&hierarchy),&transforms,core.read(&names),core.read(&targets),core.read(&animations),nil)
+        context=saved_context
+        if ok {succeeded=true;break}
+        testing.expect_value(t,raw_data(state.bindings),old_pointer)
+        testing.expect_value(t,len(state.local),2)
+        testing.expect_value(t,state.rest[1],old_rest)
+    }
+    testing.expect(t,succeeded)
+    testing.expect_value(t,state.rest[1],old_rest)
+    core.remove(&animations,nested);core.table_settle(&animations,&entities)
+    append(&playback.rigs,Rig{nested,{1,2}})
+    testing.expect(t,bind(&playback,&state,&content,core.ref(&hierarchy),&transforms,core.read(&names),core.read(&targets),core.read(&animations),nil))
+    testing.expect_value(t,len(state.bindings),2)
+    testing.expect_value(t,len(state.previous),len(state.local))
+    saved_context:=context
+    context.allocator=runtime.nil_allocator();context.temp_allocator=runtime.nil_allocator()
+    failed:Playback
+    testing.expect_value(t,state_get(&failed,root),(^Playing)(nil))
+    context=saved_context
+    playback_free(&failed)
+}

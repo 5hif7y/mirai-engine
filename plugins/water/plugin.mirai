@@ -1,0 +1,6 @@
+{
+  "name": "water",
+  "version": "0.1.0",
+  "dependencies": ["physics", "fog", "vfx"],
+  "parts": ["Runtime", "Shaders"]
+}

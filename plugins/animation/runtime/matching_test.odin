@@ -1,0 +1,460 @@
+package anim
+
+import "base:runtime"
+import cmath "core:math"
+import "core:fmt"
+import "core:log"
+import "core:math/linalg"
+import "core:os"
+import "core:testing"
+import "core:time"
+import "mirai:asset"
+import "mirai:core"
+import "mirai:host"
+import lib "mirai:std/anim"
+import "mirai:std/base"
+import mm "mirai:std/math"
+import "mirai:std/serial"
+
+// The walk of the demo Mirai (its Walk and turn) and the modes of a Character, without the physics.
+@(private="file") MIRAI_AVATAR_WALK_SPEED :: 2.9154
+@(private="file") MIRAI_AVATAR_ACCELERATION :: 20.48
+@(private="file") MIRAI_AVATAR_BRAKING :: 20
+@(private="file") MIRAI_AVATAR_TURN :: 500*mm.RAD_PER_DEG
+@(private="file") MIRAI_AVATAR_JUMP :: 4.2 // m/s up: a jump of .9 m
+@(private="file") MODE_FALLING,MODE_WALKING :: u16(0),u16(1)
+@(private="file") MODE_FALL,MODE_WALK :: u32(1)<<MODE_FALLING,u32(1)<<MODE_WALKING
+@(private="file") TICKS :: 720
+
+// Wish of the stick at a tick: stand, walk, stop, half stick, turns of 90 and 180 degrees, and
+// a jump while it walks.
+@(private="file")
+mirai_avatar_wish :: proc(tick:int) -> (wish:mm.Vec3,jump:bool) {
+    switch {
+    case tick<60: return {},false
+    case tick<180: return {0,0,1},false
+    case tick<240: return {},false
+    case tick<360: return {0,0,.5},false
+    case tick<420: return {1,0,0},false
+    case tick<480: return {0,0,-1},false
+    case tick<660: return {0,0,1},tick==540
+    }
+    return {},false
+}
+
+@(private="file")
+Mirai_Body :: struct {position,velocity:mm.Vec3,yaw:f32,mode:u16,jumped:bool}
+
+@(private="file")
+mirai_avatar_body_step :: proc(body:^Mirai_Body,wish:mm.Vec3,jump:bool,dt:f32) {
+    desired:=wish*MIRAI_AVATAR_WALK_SPEED
+    if body.mode==MODE_WALKING {
+        flat:=mm.Vec3{body.velocity.x,0,body.velocity.z}
+        rate:=f32(MIRAI_AVATAR_BRAKING) if desired=={} else MIRAI_AVATAR_ACCELERATION
+        change:=desired-flat
+        if length:=linalg.length(change);length>rate*dt {flat+=change*(rate*dt/length)} else {flat=desired}
+        body.velocity={flat.x,0,flat.z}
+        if jump {body.velocity.y,body.mode,body.jumped=MIRAI_AVATAR_JUMP,MODE_FALLING,true}
+    } else {
+        body.velocity.y-=9.81*dt
+    }
+    if linalg.length(wish)>.001 {body.yaw=mm.angle_wrap(mm.angle_approach(body.yaw,cmath.atan2(wish.x,wish.z),MIRAI_AVATAR_TURN*dt))}
+    body.position+=body.velocity*dt
+    if body.mode==MODE_FALLING && body.position.y<=0 && body.velocity.y<=0 {body.position.y,body.velocity.y,body.mode,body.jumped=0,0,MODE_WALKING,false}
+}
+
+@(private="file")
+Mirai_Metrics :: struct {
+    slide_sum,slide_max:f32,slide_samples:int,
+    pop_max,pop_sum:f32,pops,pop_samples:int,
+    response_sum:f32,responses,changes:int,
+    nanoseconds,load:f64, // per tick after the first, and of the first: the load and the database
+    searches,jumps:u32,
+}
+
+// Walks a Mirai of the demo by matching (.match) through the program of the runtime, and
+// measures what its pose does: how far a planted toe slides, the second difference of every bone
+// (a jump of the pose), and the ticks until the speed the pose walks at follows a change of the
+// stick. The jump and the landing are entry clips of their modes.
+@(private="file")
+mirai_avatar_walk :: proc(t:^testing.T,app:^host.App,skeletons:^Skeleton_Assets,graphs:^Graph_Assets,id,skeleton:base.Asset_Id) -> (metrics:Mirai_Metrics,ok:bool) {
+    blends:Blend_Assets;defer blend_assets_free(&blends)
+    entities:core.Entities;core.entities_init(&entities);defer core.entities_destroy(&entities)
+    transforms:core.Table(core.Transform);defer core.table_destroy(&transforms)
+    entity:=core.create(&entities);core.add(&transforms,entity,core.TRANSFORM_IDENTITY);core.table_settle(&transforms,&entities)
+    animation:=ANIMATION_DEFAULT;animation.asset=id
+    state:=Playing{entity=entity,clip=-1};defer playing_free(&state)
+    playback:Playback;defer playback_free(&playback)
+    events:Animation_Events;defer {delete(events.items);delete(events.plays.items)}
+    match:=match_content(graphs,app,id);if match==nil {return}
+    content:=host.content_animation(app,match.profile.info.animation)
+    definition:=skeleton_content(skeletons,app,skeleton)
+    if content==nil || definition==nil || !skeleton_bind(&playback,&state,definition,content,&transforms) || !lib.pose_init(&playback.pose,max(POSE_CAPACITY,content.lib.track_count)) {return}
+    toes:=[2]int{bone_resolve(&state,bone_ref("LeftToeBase")),bone_resolve(&state,bone_ref("RightToeBase"))}
+    if toes[0]<0 || toes[1]<0 {return}
+    n:=len(state.local)
+    world,rig,last,before:=make([]mm.Transform,n),make([]mm.Transform,n),make([]mm.Vec3,n),make([]mm.Vec3,n)
+    defer {delete(world);delete(rig);delete(last);delete(before)}
+    lib.pose_world(state.parents[:],state.rest[:],rig)
+    floor:=max(rig[toes[0]].position.y,rig[toes[1]].position.y)+.02
+    body:=Mirai_Body{mode=MODE_WALKING}
+    dt:=f32(1.0/60)
+    previous_toes:[2]mm.Vec3;planted:[2]bool
+    target:f32;changed:=-1
+    for tick in 0..<TICKS {
+        wish,jump:=mirai_avatar_wish(tick)
+        if speed:=linalg.length(wish)*MIRAI_AVATAR_WALK_SPEED;speed!=target {target,changed=speed,tick;metrics.changes+=1}
+        // What the animation reads is what the body did in the last tick.
+        flat:=mm.Vec3{body.velocity.x,0,body.velocity.z};speed:=linalg.length(flat)
+        facing:=mm.Vec3{cmath.sin(body.yaw),0,cmath.cos(body.yaw)}
+        goals:=[1]Match_Goal{{rig=entity,mode=body.mode,velocity=body.velocity,desired=wish*MIRAI_AVATAR_WALK_SPEED,facing=wish,acceleration=MIRAI_AVATAR_ACCELERATION,braking=MIRAI_AVATAR_BRAKING,turn_rate=MIRAI_AVATAR_TURN}}
+        start:=time.tick_now()
+        copy(state.local[:],state.rest[:])
+        clear(&events.items)
+        output,programmed,resolved:=program_resolve(&state,animation,app,&blends,graphs,dt,&events,&playback,content,nil,goals[:],{},facing)
+        if !resolved || !programmed || !program_masks_prepare(&state,output,content,graphs,app) || !program_players(&state,output,content,animation,&events,&playback,dt,-1,nil) || !program_pose(&playback,&state,content,animation,output,{}) {
+            log.errorf("tick %d: %v",tick,state.program.error);return
+        }
+        if tick==0 {metrics.load=f64(time.duration_nanoseconds(time.tick_since(start)))} else {metrics.nanoseconds+=f64(time.duration_nanoseconds(time.tick_since(start)))}
+        walked:=state.program.match.speed*state.program.match.rate
+        mirai_avatar_body_step(&body,wish,jump,dt)
+        // Where the pose puts the toes in the world, and how much the pose itself jumped.
+        state.local[0]={body.position,mm.quat_axis_angle({0,1,0},body.yaw),{1,1,1}}
+        lib.pose_world(state.parents[:],state.local[:],world)
+        state.local[0]=mm.TRANSFORM_IDENTITY
+        lib.pose_world(state.parents[:],state.local[:],rig)
+        if tick>=2 {
+            // Over the joints of the body: the helper bones of the rig (ik_*) are not skinned.
+            worst:f32
+            for b in state.body {if b>0 {worst=max(worst,linalg.length(rig[b].position-2*last[b]+before[b]))}}
+            metrics.pop_max=max(metrics.pop_max,worst);metrics.pop_sum+=worst;metrics.pop_samples+=1
+            if worst>.1 {metrics.pops+=1}
+        }
+        for b in 0..<n {before[b]=last[b];last[b]=rig[b].position}
+        for toe,i in toes {
+            position:=world[toe].position
+            // A toe low on the ground that moves slower than half the walk stands: one faster swings past it.
+            slide:=linalg.length(mm.Vec2{position.x-previous_toes[i].x,position.z-previous_toes[i].z})/dt
+            down:=body.mode==MODE_WALKING && position.y-body.position.y<floor && slide<MIRAI_AVATAR_WALK_SPEED*.5
+            if down && planted[i] {metrics.slide_sum+=slide;metrics.slide_max=max(metrics.slide_max,slide);metrics.slide_samples+=1}
+            previous_toes[i],planted[i]=position,down
+        }
+        if changed>=0 && abs(walked-target)<=.3 {metrics.response_sum+=f32(tick-changed);metrics.responses+=1;changed=-1}
+    }
+    metrics.nanoseconds/=TICKS-1
+    metrics.searches,metrics.jumps=state.program.match.searches,state.program.match.jumps
+    return metrics,true
+}
+
+// The .match of the demo by its content: idle and walk on the ground, a fall loop in the air, and
+// the jump and the landing as entry clips of those modes.
+@(private="file")
+mirai_avatar_match_profile :: proc(animation:base.Asset_Id) -> Match_Profile {
+    clips:=make([]Match_Source,5)
+    Clip :: struct {name:string,modes:u32,loop:bool}
+    for value,i in ([5]Clip{{"idle",MODE_WALK,true},{"walk",MODE_WALK,true},{"fall",MODE_FALL,true},{"jump",MODE_FALL,false},{"land",MODE_WALK,false}}) {
+        base.text_set(clips[i].clip[:],value.name);clips[i].modes,clips[i].loop,clips[i].entry=value.modes,value.loop,!value.loop
+    }
+    info:=MATCH_INFO_DEFAULT;info.animation=animation
+    return {info=info,clips=clips}
+}
+
+@(test)
+matching_walks_mirai_avatar_with_its_feet_planted_without_pose_jumps_and_follows_the_stick :: proc(t:^testing.T) {
+    root,found:=os.lookup_env("MIRAI_ROOT",context.temp_allocator)
+    if !testing.expect(t,found,"MIRAI_ROOT names the repository, whose demo has Mirai") {return}
+    assets:host.Assets
+    if !testing.expect(t,host.assets_init(&assets,{root=fmt.tprintf("%s/demo",root),capacity=512})) {return}
+    defer host.assets_destroy(&assets)
+    app:=host.App{assets=&assets,allocator=context.allocator};defer host.app_content_destroy(&app)
+    skeletons:Skeleton_Assets;defer skeleton_assets_free(&skeletons)
+    graphs:Graph_Assets;defer graph_assets_free(&graphs)
+    ids:[3]base.Asset_Id
+    for file,i in ([3]string{"assets/animations/mirai_matching.match","assets/animations/mirai_locomotion.anim","assets/models/mirai/Armature.skeleton"}) {
+        record,present:=asset.registry_find_path(&assets.registry,file)
+        if !testing.expectf(t,present,"the demo has %s",file) {return}
+        ids[i]=record.id
+    }
+    if match_content(&graphs,&app,ids[0])==nil {
+        // An older version of the asset: its content, as the demo means it.
+        profile:=mirai_avatar_match_profile(ids[1])
+        if !testing.expect(t,match_check(profile)) {match_profile_free(&profile);return}
+        content:=&graphs.matches[len(graphs.matches)-1]
+        content.profile,content.valid,content.error=profile,true,.None
+    }
+    matched,matched_ok:=mirai_avatar_walk(t,&app,&skeletons,&graphs,ids[0],ids[2])
+    if !testing.expect(t,matched_ok) {return}
+    database,rows:=0,0
+    search:f64
+    for &content in graphs.matches {for &built in content.databases {if built.error==.None {
+        database,rows=lib.match_database_size(built.database),built.database.rows
+        request:=lib.Match_Request{query=lib.match_features(&built.database,0),modes=~u32(0),min_rate=.5,max_rate=1}
+        request.positions,request.directions=lib.match_row_trajectory(&built.database,0)
+        start:=time.tick_now();sink:=0
+        for _ in 0..<1000 {best,_,_:=lib.match_search(&built.database,request);sink+=best}
+        search=f64(time.duration_nanoseconds(time.tick_since(start)))/1000
+        testing.expect(t,sink>=0)
+    }}}
+    slide:=matched.slide_sum/f32(max(matched.slide_samples,1));response:=matched.response_sum/f32(max(matched.responses,1))
+    log.infof("slide mean | slide max | pose jump mean | pose jump max | jumps >10 cm | response   | ns/tick | first tick | database          | searches | jumps | ns/search")
+    log.infof("%.3f m/s  | %.3f m/s | %.4f m        | %.4f m       | %d            | %.1f ticks | %.0f   | %.0f ns  | %d B, %d rows | %d     | %d  | %.0f",slide,matched.slide_max,matched.pop_sum/f32(max(matched.pop_samples,1)),matched.pop_max,matched.pops,response,matched.nanoseconds,matched.load,database,rows,matched.searches,matched.jumps,search)
+    testing.expect(t,database>0)
+    testing.expect(t,matched.responses==matched.changes,"the pose follows every change of the stick")
+    testing.expectf(t,slide<.25,"a planted toe slides %.3f m/s on average",slide)
+    testing.expectf(t,matched.pop_max<.2,"the pose jumps %.3f m at most between ticks",matched.pop_max)
+    testing.expectf(t,response<10,"the walk follows the stick in %.1f ticks on average",response)
+}
+
+@(private="file") MATCH_TEST_ID :: base.Asset_Id{0x3a7c,1}
+@(private="file") GROUND,AIR :: u16(1),u16(0)
+
+// Hips over two feet and a head, as the matching of std/anim: idle and walk on the ground, a fall
+// loop in the air and jump, the entry clip of the air. vault is not in the .match: only match_play
+// plays it, for two seconds, with a marker 'release' at .35 s.
+@(private="file")
+Match_Fixture :: struct {
+    entities:core.Entities,
+    transforms:core.Table(core.Transform),
+    bones:[4]asset.Skeleton_Bone,
+    definition:Skeleton_Content,
+    content:host.Content_Animation,
+    assets:host.Assets,
+    app:host.App,
+    graphs:Graph_Assets,
+    playback:Playback,
+    events:Animation_Events,
+    requests:Animation_Requests,
+    problems:core.Problems,
+    animation:Animation,
+    rig:core.Entity,
+    state:^Playing,
+}
+
+@(private="file")
+match_fixture :: proc(t:^testing.T,f:^Match_Fixture,memory:u32=MATCH_INFO_DEFAULT.memory) -> bool {
+    core.entities_init(&f.entities);f.rig=core.create(&f.entities)
+    core.add(&f.transforms,f.rig,core.TRANSFORM_IDENTITY);core.table_settle(&f.transforms,&f.entities)
+    Bone :: struct {name,path:string,at:mm.Vec3}
+    for bone,i in ([4]Bone{{"hips","hips",{0,1,0}},{"foot_l","hips/foot_l",{.1,-.95,0}},{"foot_r","hips/foot_r",{-.1,-.95,0}},{"head","hips/head",{0,.7,0}}}) {
+        f.bones[i]={parent=-1 if i==0 else 0,translation=bone.at,rotation=1,scale={1,1,1},target=base.name_hash(bone.path)}
+        base.text_set(f.bones[i].name[:],bone.name);base.text_set(f.bones[i].path[:],bone.path)
+    }
+    f.definition={id={0x3a7c,2},revision=1,bones=f.bones[:]}
+    left,right:=f.bones[1].target,f.bones[2].target
+    still:=[2]lib.Keyframe{{time=0,value={.1,-.95,0,0}},{time=1,value={.1,-.95,0,0}}}
+    other:=[2]lib.Keyframe{{time=0,value={-.1,-.95,0,0}},{time=1,value={-.1,-.95,0,0}}}
+    stride_l:=[4]lib.Keyframe{{time=0,value={.1,-.95,.375,0}},{time=.5,value={.1,-.95,-.375,0}},{time=.75,value={.1,-.8,0,0}},{time=1,value={.1,-.95,.375,0}}}
+    stride_r:=[4]lib.Keyframe{{time=0,value={-.1,-.95,-.375,0}},{time=.25,value={-.1,-.8,0,0}},{time=.5,value={-.1,-.95,.375,0}},{time=1,value={-.1,-.95,-.375,0}}}
+    tucked:=[2]lib.Keyframe{{time=0,value={.1,-.6,.1,0}},{time=1,value={.1,-.6,.1,0}}}
+    rise_l:=[2]lib.Keyframe{{time=0,value={.1,-.95,0,0}},{time=1,value={.1,-.5,.2,0}}}
+    rise_r:=[2]lib.Keyframe{{time=0,value={-.1,-.95,0,0}},{time=1,value={-.1,-.5,.2,0}}}
+    over_l:=[2]lib.Keyframe{{time=0,value={.1,-.3,.5,0}},{time=2,value={.1,-.3,-.5,0}}}
+    over_r:=[2]lib.Keyframe{{time=0,value={-.1,-.3,.5,0}},{time=2,value={-.1,-.3,.5,0}}}
+    release:=[1]lib.Marker{{time=.35,id=0}}
+    descs:=[5]lib.Clip_Desc{
+        {name=base.name_hash("idle"),tracks={{target=left,property=.Position,keys=still[:]},{target=right,property=.Position,keys=other[:]}}},
+        {name=base.name_hash("walk"),tracks={{target=left,property=.Position,keys=stride_l[:]},{target=right,property=.Position,keys=stride_r[:]}}},
+        {name=base.name_hash("fall"),tracks={{target=left,property=.Position,keys=tucked[:]},{target=right,property=.Position,keys=other[:]}}},
+        {name=base.name_hash("jump"),tracks={{target=left,property=.Position,keys=rise_l[:]},{target=right,property=.Position,keys=rise_r[:]}}},
+        {name=base.name_hash("vault"),tracks={{target=left,property=.Position,keys=over_l[:]},{target=right,property=.Position,keys=over_r[:]}},markers=release[:]},
+    }
+    f.content.id,f.content.generation={0x3a7c,3},1
+    if !lib.library_init(&f.content.lib,{max_keys=64,max_tracks=16,max_clips=2*len(descs),max_markers=2}) {return false}
+    for desc in descs {if _,error:=lib.clip_add(&f.content.lib,desc);error!=.None {return false}}
+    if _,error:=lib.library_optimize(&f.content.lib);error!=.None {return false}
+    host.content_animation_loops(&f.content.lib,len(descs));f.content.clip_count=len(descs)
+    f.content.markers=make([]u64,1);f.content.markers[0]=base.name_hash("release")
+    f.assets.registry.by_id=make(map[base.Asset_Id]u32)
+    append(&f.assets.registry.files,asset.Registry_File{id=MATCH_TEST_ID,kind=MATCH_KIND,state=.Asset});f.assets.registry.by_id[MATCH_TEST_ID]=0
+    f.app={assets=&f.assets,allocator=context.allocator}
+    Source :: struct {name:string,modes:u32,loop:bool}
+    clips:=make([]Match_Source,4)
+    for value,i in ([4]Source{{"idle",1<<GROUND,true},{"walk",1<<GROUND,true},{"fall",1<<AIR,true},{"jump",1<<AIR,false}}) {
+        base.text_set(clips[i].clip[:],value.name);clips[i].modes,clips[i].loop,clips[i].entry=value.modes,value.loop,!value.loop
+    }
+    info:=MATCH_INFO_DEFAULT;info.animation,info.memory=f.content.id,memory
+    info.left_foot,info.right_foot,info.hips=bone_ref("foot_l"),bone_ref("foot_r"),bone_ref("hips")
+    profile:=Match_Profile{info=info,clips=clips}
+    append(&f.graphs.matches,Match_Content{id=MATCH_TEST_ID,checked=assets_stamp(&f.app),revision=1,valid=true,profile=profile})
+    if !testing.expect(t,match_check(profile) && lib.pose_init(&f.playback.pose,64)) {return false}
+    f.state=state_get(&f.playback,f.rig)
+    f.animation=ANIMATION_DEFAULT;f.animation.asset=MATCH_TEST_ID
+    return f.state!=nil && skeleton_bind(&f.playback,f.state,&f.definition,&f.content,&f.transforms)
+}
+@(private="file")
+match_fixture_free :: proc(f:^Match_Fixture) {
+    playback_free(&f.playback);lib.library_destroy(&f.content.lib);delete(f.content.markers)
+    graph_assets_free(&f.graphs);delete(f.assets.registry.by_id);delete(f.assets.registry.files)
+    delete(f.events.items);delete(f.events.plays.items);delete(f.requests.match_plays.items)
+    core.table_destroy(&f.transforms);core.entities_destroy(&f.entities)
+}
+// A tick of the rig with the body standing in mode.
+@(private="file")
+match_step :: proc(f:^Match_Fixture,dt:f32,mode:u16,plays:[]Match_Play={}) -> bool {
+    clear(&f.events.items);clear(&f.events.plays.items)
+    goals:=[1]Match_Goal{{rig=f.rig,mode=mode,facing={0,0,1},acceleration=20,braking=20}}
+    copy(f.state.local[:],f.state.rest[:])
+    output,programmed,ok:=program_resolve(f.state,f.animation,&f.app,nil,&f.graphs,dt,&f.events,&f.playback,&f.content,&f.problems,goals[:],plays)
+    return ok && programmed && program_players(f.state,output,&f.content,f.animation,&f.events,&f.playback,dt,-1,nil) && program_pose(&f.playback,f.state,&f.content,f.animation,output,{})
+}
+@(private="file")
+match_test_play :: proc(f:^Match_Fixture,clip:string,mode:u16,options:=MATCH_PLAY_OPTIONS_DEFAULT) -> []Match_Play {
+    if !match_play(&f.requests,f.rig,clip,mode,options) {return nil}
+    return core.take(&f.requests.match_plays)
+}
+@(private="file")
+match_test_events :: proc(f:^Match_Fixture,kind:Animation_Play_Event_Kind,clip:string,other:="") -> int {
+    count:=0
+    for event in f.events.plays.items {if event.entity==f.rig && event.kind==kind && event.clip==base.name_hash(clip) && event.other==(base.name_hash(other) if other!="" else 0) {count+=1}}
+    return count
+}
+
+@(test)
+match_play_enters_at_its_start_time_or_phase_and_hands_back_at_its_phase_or_marker :: proc(t:^testing.T) {
+    Case :: struct {entry:Match_Entry,phase:f32,marker:string,release:f32}
+    cases:=[?]Case{{.Start,1,"release",.35},{.Keep_Time,1,"",2},{.Match_Phase,.5,"",1},{.Start,.5,"",1}}
+    dt:=f32(.05)
+    for c in cases {
+        f:Match_Fixture;defer match_fixture_free(&f)
+        if !testing.expect(t,match_fixture(t,&f)) {continue}
+        for _ in 0..<5 {testing.expect(t,match_step(&f,dt,GROUND))}
+        before,_:=animation_match(&f.playback,f.rig);duration:=f.state.duration
+        testing.expect(t,!match_play(&f.requests,f.rig,"vault",GROUND,{phase=2}) && !match_play(&f.requests,f.rig,"",GROUND) && !match_play(&f.requests,f.rig,"vault",32),"a phase past 1, an empty name or a mode past 31 is refused")
+        options:=MATCH_PLAY_OPTIONS_DEFAULT;options.entry,options.phase,options.marker=c.entry,c.phase,c.marker
+        if !testing.expect(t,match_step(&f,dt,GROUND,match_test_play(&f,"vault",GROUND,options))) {continue}
+        playing,_:=animation_match(&f.playback,f.rig)
+        start:=f32(0) if c.entry==.Start else before.time if c.entry==.Keep_Time else before.time/duration*2
+        testing.expectf(t,playing.forced && playing.clip==base.name_hash("vault") && abs(playing.time-(start+dt))<1e-4,"%v enters at %.3f s, not %.3f s",c.entry,start+dt,playing.time)
+        testing.expect(t,match_test_events(&f,.Entered,"vault")==1 && len(f.events.plays.items)==1,"a play that interrupts matching enters with no other")
+        held:=playing.time;exited:=0
+        for _ in 0..<60 {
+            testing.expect(t,match_step(&f,dt,GROUND))
+            exited+=match_test_events(&f,.Exited,"vault")
+            value,_:=animation_match(&f.playback,f.rig)
+            if !value.forced {break}
+            held=value.time
+        }
+        testing.expectf(t,held>=c.release-1e-4 && held<c.release+dt+1e-4 && exited==1,"a play of phase %.2f and marker '%s' hands back at %.3f s, not %.3f s",c.phase,c.marker,c.release,held)
+    }
+}
+
+@(test)
+match_play_refuses_a_lower_priority_and_a_waiting_play_starts_once_when_the_blend_ends :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    dt:=f32(.1)
+    testing.expect(t,match_step(&f,dt,GROUND) && match_step(&f,dt,GROUND))
+    high:=MATCH_PLAY_OPTIONS_DEFAULT;high.priority,high.fade=2,.45
+    testing.expect(t,match_step(&f,dt,GROUND,match_test_play(&f,"vault",GROUND,high)) && match_test_events(&f,.Entered,"vault")==1)
+    low:=high;low.priority=1
+    testing.expect(t,match_step(&f,dt,GROUND,match_test_play(&f,"idle",GROUND,low)))
+    playing,_:=animation_match(&f.playback,f.rig)
+    testing.expect(t,playing.clip==base.name_hash("vault") && core.problem_find(&f.problems,f.rig,"animation.match_busy")!=nil && len(f.events.plays.items)==0,"a play of lower priority is refused")
+    waiting:=high;waiting.wait=true
+    entered,blended:=0,true
+    for tick in 0..<10 {
+        plays:[]Match_Play
+        if tick==0 {plays=match_test_play(&f,"idle",GROUND,waiting)}
+        if tick==1 {plays=match_test_play(&f,"jump",GROUND,waiting)}
+        elapsed:=f.state.program.elapsed
+        testing.expect(t,match_step(&f,dt,GROUND,plays) && match_test_events(&f,.Entered,"idle","vault")==0)
+        if match_test_events(&f,.Entered,"jump","vault")==1 {
+            entered+=1
+            testing.expectf(t,elapsed>=high.fade && blended && match_test_events(&f,.Exited,"vault","jump")==1,"a waiting play starts when the blend ends, not at %.2f s of it",elapsed)
+        }
+        blended=elapsed<high.fade
+    }
+    testing.expect(t,entered==1,"the last waiting play starts once and replaces the one before it")
+    testing.expect(t,match_step(&f,dt,GROUND,match_test_play(&f,"vault",GROUND,high)))
+    testing.expect(t,match_test_events(&f,.Exited,"jump","vault")==1 && match_test_events(&f,.Entered,"vault","jump")==1,"a play of the same priority replaces the one playing at once")
+}
+
+@(test)
+match_play_hands_back_when_the_body_leaves_its_mode_and_reports_the_end_of_its_clip :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    // On the second tick: the blend starts from the pose of the first, with no history before it.
+    testing.expect(t,match_step(&f,.1,GROUND) && match_step(&f,.1,GROUND,match_test_play(&f,"vault",GROUND)))
+    testing.expect(t,match_step(&f,.1,AIR))
+    value,_:=animation_match(&f.playback,f.rig)
+    testing.expect(t,!value.forced && value.mode==AIR && match_test_events(&f,.Exited,"vault")==1 && match_test_events(&f,.Finished,"vault")==0,"leaving its mode hands the rig back to matching")
+    testing.expect(t,match_step(&f,.1,GROUND) && match_step(&f,.25,GROUND,match_test_play(&f,"vault",GROUND)))
+    finished,exited:=0,0
+    for _ in 0..<12 {
+        testing.expect(t,match_step(&f,.25,GROUND))
+        finished+=match_test_events(&f,.Finished,"vault")
+        if match_test_events(&f,.Exited,"vault")==1 {exited+=1;testing.expect(t,finished==1,"the end of the clip is reported before it hands back")}
+    }
+    testing.expect(t,finished==1 && exited==1)
+}
+
+@(test)
+match_play_blends_inertially_from_the_last_pose_and_stable_ticks_do_not_allocate :: proc(t:^testing.T) {
+    dt:=f32(1.0/60)
+    jumps:[2]f32
+    for fade,i in ([2]f32{0,.2}) {
+        f:Match_Fixture;defer match_fixture_free(&f)
+        if !testing.expect(t,match_fixture(t,&f)) {continue}
+        for _ in 0..<10 {testing.expect(t,match_step(&f,dt,GROUND))}
+        foot:=bone_resolve(f.state,bone_ref("foot_l"));last:=f.state.local[foot].position
+        options:=MATCH_PLAY_OPTIONS_DEFAULT;options.fade=fade
+        testing.expect(t,match_step(&f,dt,GROUND,match_test_play(&f,"vault",GROUND,options)))
+        jumps[i]=linalg.length(f.state.local[foot].position-last)
+        if fade==0 {continue}
+        testing.expect(t,f.state.program.fade==fade)
+        options.phase=.25
+        saved:=context;context.allocator=runtime.nil_allocator();context.temp_allocator=context.allocator;f.app.allocator=context.allocator
+        stable:=true
+        for tick in 0..<90 {stable &&=match_step(&f,dt,GROUND,match_test_play(&f,"jump",GROUND,options) if tick==30 else nil)}
+        context=saved;f.app.allocator,f.graphs.allocator=saved.allocator,saved.allocator
+        value,_:=animation_match(&f.playback,f.rig)
+        testing.expect(t,stable && !value.forced && f.problems.count==0,"plays, their blends and the matching after them do not allocate")
+    }
+    testing.expectf(t,jumps[0]>.3 && jumps[1]<jumps[0]*.25,"a play without fade cuts (%.3f m) and one with fade goes on from the last pose (%.3f m)",jumps[0],jumps[1])
+}
+
+@(test)
+a_new_mode_of_the_match_goal_enters_by_its_entry_clip :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    dt:=f32(1.0/30)
+    for _ in 0..<10 {testing.expect(t,match_step(&f,dt,GROUND))}
+    value,_:=animation_match(&f.playback,f.rig)
+    testing.expect(t,value.mode==GROUND && (value.clip==base.name_hash("idle") || value.clip==base.name_hash("walk")))
+    testing.expect(t,match_step(&f,dt,AIR))
+    value,_=animation_match(&f.playback,f.rig)
+    testing.expectf(t,value.mode==AIR && value.clip==base.name_hash("jump") && value.time<=lib.MATCH_ENTRY_SPAN+dt+1e-4 && !value.forced,"entering the air starts its entry clip near its start, not %v",value)
+    testing.expectf(t,value.rate==1,"an entry clip plays at its own rate whatever the body moves, not %.2f",value.rate)
+    for _ in 0..<120 {testing.expect(t,match_step(&f,dt,AIR))}
+    value,_=animation_match(&f.playback,f.rig)
+    testing.expectf(t,value.mode==AIR && value.clip==base.name_hash("fall"),"the entry clip hands the air over to its loop when it ends, not %v",value)
+}
+
+@(test)
+match_assets_roundtrip_refuse_no_memory_or_looping_entries_and_report_a_database_past_their_memory :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f,memory=1)) {return}
+    profile:=f.graphs.matches[0].profile
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    doc:asset.Document;if !testing.expect_value(t,match_document(&doc,&types,MATCH_TEST_ID,profile),asset.Error.None) {return};defer asset.document_destroy(&doc)
+    for version in ([2]type_of(doc.kind_version){MATCH_VERSION,MATCH_VERSION-1}) {
+        doc.kind_version=version
+        writer:serial.Writer;serial.writer_init(&writer);defer serial.writer_destroy(&writer)
+        if !testing.expect_value(t,asset.document_write(&doc,&writer),asset.Error.None) {continue}
+        file:asset.Asset
+        if !testing.expect_value(t,asset.asset_open(&file,serial.writer_bytes(&writer)),asset.Error.None) {continue};defer asset.asset_close(&file)
+        view,read:=match_view(&file,&types)
+        if version!=MATCH_VERSION {testing.expect(t,read!=.None,"an older version is refused");continue}
+        if !testing.expect_value(t,read,asset.Error.None) {continue}
+        testing.expect_value(t,view.info,profile.info);testing.expect_value(t,len(view.clips),len(profile.clips))
+        for clip,i in view.clips {testing.expect_value(t,clip,profile.clips[i])}
+    }
+    changed:=profile;changed.info.memory=0
+    testing.expect(t,!match_check(changed),"a .match keeps some memory")
+    clips:=make([]Match_Source,len(profile.clips));defer delete(clips);copy(clips,profile.clips)
+    clips[3].loop=true;changed=profile;changed.clips=clips
+    invalid:asset.Document
+    testing.expect(t,!match_check(changed) && match_document(&invalid,&types,MATCH_TEST_ID,changed)==.Invalid,"an entry clip does not loop")
+    testing.expect(t,match_step(&f,.1,GROUND))
+    testing.expect(t,core.problem_find(&f.problems,f.rig,"animation.match_memory")!=nil,"a database past the memory of its .match is reported")
+}

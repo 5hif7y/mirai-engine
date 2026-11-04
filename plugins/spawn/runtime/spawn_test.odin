@@ -1,0 +1,110 @@
+package spawn
+
+import "core:testing"
+import "mirai:core"
+import input "mirai:engine/input"
+import scene "mirai:engine/scene"
+
+@(test)
+a_body_given_to_a_seat_goes_when_the_seat_goes :: proc(t:^testing.T) {
+    es:core.Entities
+    core.entities_init(&es)
+    defer core.entities_destroy(&es)
+    bodies:core.Table(Seat_Body)
+    drivables:core.Table(input.Drivable)
+    core.table_init(&bodies,"Seat_Body")
+    core.table_init(&drivables,"Drivable")
+    defer core.table_destroy(&bodies)
+    defer core.table_destroy(&drivables)
+    hierarchy:core.Hierarchy
+    seat,given,other:=core.create(&es),core.create(&es),core.create(&es)
+    core.add(&bodies,given,Seat_Body{})
+    core.add(&drivables,given,input.Drivable{seat=seat})
+    core.add(&drivables,other,input.Drivable{seat=seat})
+    core.table_settle(&bodies,&es);core.table_settle(&drivables,&es)
+    spawn_seat_bodies(&es,core.ref(&hierarchy),core.read(&bodies),core.read(&drivables))
+    core.entities_settle(&es)
+    testing.expect(t,core.alive(&es,given),"a body stays while its seat is there")
+    core.destroy(&es,seat)
+    core.entities_settle(&es)
+    spawn_seat_bodies(&es,core.ref(&hierarchy),core.read(&bodies),core.read(&drivables))
+    core.entities_settle(&es)
+    testing.expect(t,!core.alive(&es,given),"the body spawn gave goes with its seat")
+    testing.expect(t,core.alive(&es,other),"a body nobody gave is left to the game")
+}
+
+// Without a point asked for, the points are taken in turn; a body needs a
+// point with a prefab, and a point asked for is the one used.
+@(test)
+spawn_points_are_taken_in_turn_or_as_asked :: proc(t:^testing.T) {
+    es:core.Entities
+    core.entities_init(&es)
+    defer core.entities_destroy(&es)
+    points:core.Table(Spawn_Point)
+    core.table_init(&points,"Spawn_Point")
+    defer core.table_destroy(&points)
+    bare,first,second:=core.create(&es),core.create(&es),core.create(&es)
+    core.add(&points,bare,Spawn_Point{})
+    core.add(&points,first,Spawn_Point{prefab={1,1}})
+    core.add(&points,second,Spawn_Point{prefab={1,2}})
+    core.table_settle(&points,&es)
+    spawning:Spawning
+    problems:core.Problems
+    a:=Apply{points=core.read(&points),spawning=&spawning,problems=&problems}
+    picked:[4]core.Entity
+    for &e in picked {e,_=spawn_pick(&a,core.NONE,core.NONE,true)}
+    testing.expect_value(t,picked,[4]core.Entity{first,second,first,second})
+    any,_:=spawn_pick(&a,core.NONE,core.NONE,false)
+    testing.expect_value(t,any,bare)
+    asked,_:=spawn_pick(&a,core.NONE,second,true)
+    testing.expect_value(t,asked,second)
+    _,ok:=spawn_pick(&a,core.NONE,core.create(&es),true)
+    testing.expect(t,!ok && core.problem_find(&problems,core.NONE,"spawn.not_a_point")!=nil)
+    testing.expect_value(t,problems.count,1)
+}
+
+// Where the Play of the editor asks, player 1 gets its first body before any
+// point, of the prefab of a point when the project has none; the other
+// seats, and player 1 afterwards, take the points.
+@(test)
+the_place_the_editor_asks_comes_before_the_points_for_player_1_once :: proc(t:^testing.T) {
+    es:core.Entities
+    core.entities_init(&es)
+    defer core.entities_destroy(&es)
+    points:core.Table(Spawn_Point)
+    seats:core.Table(input.Seat)
+    core.table_init(&points,"Spawn_Point")
+    core.table_init(&seats,"Seat")
+    defer core.table_destroy(&points)
+    defer core.table_destroy(&seats)
+    point,first,second,remote:=core.create(&es),core.create(&es),core.create(&es),core.create(&es)
+    core.add(&points,point,Spawn_Point{prefab={1,1}})
+    core.add(&seats,first,input.Seat{slot=0})
+    core.add(&seats,second,input.Seat{slot=1})
+    core.add(&seats,remote,input.Seat{slot=0,peer=7})
+    core.table_settle(&points,&es);core.table_settle(&seats,&es)
+    spawning:Spawning
+    problems:core.Problems
+    a:=Apply{seats=core.read(&seats),points=core.read(&points),spawning=&spawning,origin=scene.Play_Origin{set=true,asked=true},problems=&problems}
+    cases:=[?]struct{seat:core.Entity,given:bool,point:core.Entity,asked:bool}{
+        {second,false,point,false},
+        {remote,false,point,false},
+        {first,false,point,true},
+        {first,true,point,false},
+    }
+    for c in cases {
+        spawning.asked_given=c.given
+        at,asked,ok:=spawn_where(&a,{kind=.Spawn,seat=c.seat})
+        testing.expect(t,ok)
+        testing.expect_value(t,at,c.point)
+        testing.expect_value(t,asked,c.asked)
+    }
+    spawning.asked_given=false
+    a.settings.prefab={1,9}
+    at,asked,_:=spawn_where(&a,{kind=.Spawn,seat=first})
+    testing.expect(t,at==core.NONE && asked,"the body of the project needs no point")
+    a.origin.asked=false
+    at,asked,_=spawn_where(&a,{kind=.Spawn,seat=first})
+    testing.expect(t,at==point && !asked,"the camera of a Play not asked from a place leaves the points first")
+    testing.expect_value(t,problems.count,0)
+}

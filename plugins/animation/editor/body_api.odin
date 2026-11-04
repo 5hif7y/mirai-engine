@@ -1,0 +1,232 @@
+package animation_editor
+
+import "core:fmt"
+import "core:math/linalg"
+import "core:strings"
+import aa "mirai:asset"
+import "mirai:editor"
+import "mirai:editor/api"
+import lib "mirai:std/anim"
+import "mirai:std/base"
+import mm "mirai:std/math"
+import "mirai:std/serial"
+import anim "plugins:animation/runtime"
+
+Body_Detect_Params :: struct {
+    asset:base.Asset_Id,
+    keep_manual:bool `mirai:"optional,label=Keeps the parts and axes a person set"`,
+    dry_run:bool `mirai:"optional,label=Answers without writing the skeleton"`,
+}
+Body_Part_Assignment :: struct {
+    part:lib.Body_Part,
+    bone:[aa.NODE_PATH_CAPACITY]u8 `mirai:"text,optional,label=Bone path or unique name; empty clears the part"`,
+}
+Body_Set_Params :: struct {
+    asset:base.Asset_Id,
+    parts:[len(lib.Body_Part)]Body_Part_Assignment `mirai:"optional,label=What it sets becomes manual and survives detection and reimport"`,
+    forward:mm.Vec3 `mirai:"optional,label=Where the body faces at rest; with up"`,
+    up:mm.Vec3 `mirai:"optional"`,
+    dry_run:bool `mirai:"optional"`,
+}
+Body_Part_Result :: struct {
+    part:lib.Body_Part,
+    bone:[aa.NODE_PATH_CAPACITY]u8 `mirai:"text,label=Its path"`,
+    name:[64]u8 `mirai:"text"`,
+    confidence:f32 `mirai:"label=0 to 1"`,
+    manual:bool `mirai:"label=Whether a person set it"`,
+}
+Body_Result :: struct {
+    asset:base.Asset_Id,path:[1024]u8 `mirai:"text"`,dry_run:bool `mirai:"optional"`,
+    forward,up:mm.Vec3 `mirai:"label=Where the body faces at rest"`,axes_confidence:f32 `mirai:"label=0 to 1"`,manual_axes:bool,
+    parts:[len(lib.Body_Part)]Body_Part_Result,
+    missing:[len(lib.Body_Part)]lib.Body_Part `mirai:"label=Parts without a bone"`,
+    unassigned_total:u32,
+    unassigned:[32][aa.NODE_PATH_CAPACITY]u8 `mirai:"text,label=Bones outside the body"`,
+    fix:[256]u8 `mirai:"text,label=How to complete or correct the body; empty when it needs nothing"`,
+}
+
+@(private)
+body_register :: proc(s:^editor.Session) {
+    detect:=Body_Detect_Params{keep_manual=true}
+    authoring_method_register(s,{name="skeleton.body.detect",summary="Finds the body parts of a skeleton and the way it faces from bone names, hierarchy and rest pose, and saves them in the .skeleton.",params=Body_Detect_Params,params_info=type_info_of(Body_Detect_Params),defaults=&detect,run=body_detect},Body_Result,type_info_of(Body_Result))
+    authoring_method_register(s,{name="skeleton.body.set",summary="Corrects the body parts of a skeleton and the way it faces at rest.",params=Body_Set_Params,params_info=type_info_of(Body_Set_Params),run=body_set},Body_Result,type_info_of(Body_Result))
+}
+
+// The bone with this path or, failing that, this unique name; -1 for none or several.
+@(private)
+body_bone_find :: proc(bones:[]aa.Skeleton_Bone,text:string) -> i32 {
+    for &bone,i in bones {if base.text_get(bone.path[:])==text {return i32(i)}}
+    found:i32=-1
+    for &bone,i in bones {
+        if base.text_get(bone.name[:])!=text {continue}
+        if found>=0 {return -1}
+        found=i32(i)
+    }
+    return found
+}
+
+// The rig of a skeleton for metrics and edits: hierarchy, rest pose, its body
+// and its mirror. root is the bone named for the root motion of a clip, if any.
+@(private)
+body_rig :: proc(call:^api.Call,view:aa.Skeleton_View,root_path:string) -> (rig:lib.Body_Rig,ok:bool) {
+    n:=len(view.bones)
+    rig.parents=make([]i32,n,call.allocator)
+    rig.rest=make([]mm.Transform,n,call.allocator)
+    if len(rig.parents)!=n || len(rig.rest)!=n {authoring_failure(call,"skeleton","Out_Of_Memory","memory for the rig","allocation failed","The rig could not be prepared",api.SERVER_ERROR);return}
+    for &bone,i in view.bones {rig.parents[i]=bone.parent;rig.rest[i]={bone.translation,bone.rotation,bone.scale}}
+    rig.body=aa.skeleton_body_map(view.bones,view.body,view.body_parts)
+    rig.root=-1
+    if root_path!="" {rig.root=body_bone_find(view.bones,root_path)}
+    pairs,paired:=anim.skeleton_mirror_pairs(view.bones,call.allocator)
+    corrections:=make([]mm.Quat,n,call.allocator)
+    scratch:=make([]mm.Transform,n,call.allocator)
+    if paired && len(corrections)==n && len(scratch)==n {
+        if plane,prepared:=lib.mirror_prepare(rig.parents,pairs,rig.rest,corrections,scratch);prepared {rig.mirror={pairs,corrections,plane}}
+    }
+    return rig,true
+}
+
+@(private)
+body_detect :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Body_Detect_Params)
+    if !authoring_editable(s,call) {return}
+    file:Authoring_File;defer aa.asset_close(&file.file)
+    view,ok:=authoring_skeleton_open(s,call,p.asset,&file);if !ok {return}
+    previous:=lib.body_map_empty()
+    if p.keep_manual {
+        previous=aa.skeleton_body_map(view.bones,view.body,view.body_parts)
+        for part in lib.Body_Part {if part not_in previous.manual {previous.bones[part],previous.confidence[part]=-1,0}}
+    }
+    found,detected:=aa.skeleton_body_detect(view.bones,previous,call.allocator)
+    if !detected {authoring_failure(call,"asset","Invalid_Skeleton","a skeleton whose rest pose composes","detection failed","The body could not be detected",fix="Check the rest pose with animation.asset.inspect section=bones");return}
+    body_save(s,call,file,p.asset,view,found)
+}
+
+@(private)
+body_set :: proc(s:^editor.Session,call:^api.Call) {
+    p:=api.call_params(call,Body_Set_Params)
+    if !authoring_editable(s,call) {return}
+    file:Authoring_File;defer aa.asset_close(&file.file)
+    view,ok:=authoring_skeleton_open(s,call,p.asset,&file);if !ok {return}
+    map_:=aa.skeleton_body_map(view.bones,view.body,view.body_parts)
+    if view.body==nil {
+        // Without a detected body the axes come from detection.
+        if detected,found:=aa.skeleton_body_detect(view.bones,lib.body_map_empty(),call.allocator);found {map_.forward,map_.up,map_.axes_confidence=detected.forward,detected.up,detected.axes_confidence}
+    }
+    count,_:=api.params_array_count(call,"parts")
+    for assignment,i in p.parts[:min(count,len(p.parts))] {
+        assignment:=assignment
+        text:=base.text_get(assignment.bone[:])
+        if text=="" {map_.bones[assignment.part],map_.confidence[assignment.part]=-1,0;map_.manual+={assignment.part};continue}
+        bone:=body_bone_find(view.bones,text)
+        if bone<0 {
+            authoring_failure(call,fmt.tprintf("parts[%d].bone",i),"Missing_Bone","a bone path, or a name only one bone has",text,"The skeleton has no such bone",fix=body_similar_bones(view.bones,assignment.part,call.allocator))
+            return
+        }
+        for &other,part in map_.bones {if other==bone && part!=assignment.part {other=-1;map_.confidence[part]=0}}
+        map_.bones[assignment.part],map_.confidence[assignment.part]=bone,1
+        map_.manual+={assignment.part}
+    }
+    if p.forward!={} || p.up!={} {
+        forward,up:=p.forward,p.up
+        f,fok:=body_unit(forward);u,uok:=body_unit(up)
+        if !fok || !uok || abs(linalg.dot(f,u))>1e-3 {authoring_failure(call,"forward","Invalid_Axes","nonzero perpendicular forward and up",fmt.tprintf("forward %v up %v",forward,up),"The body axes must be perpendicular",fix="Pass both, at right angles, as unit vectors (for example forward [0,0,1] and up [0,1,0])");return}
+        map_.forward,map_.up,map_.axes_confidence,map_.manual_axes=f,u,1,true
+    }
+    body_save(s,call,file,p.asset,view,map_)
+}
+
+// Bones whose name shares a word with the part, as a hint.
+@(private)
+body_similar_bones :: proc(bones:[]aa.Skeleton_Bone,part:lib.Body_Part,allocator:=context.temp_allocator) -> string {
+    names:=lib.BODY_PART_NAMES
+    word:=names[part]
+    if at:=strings.index_byte(word,'_');at>0 {word=word[:at]}
+    hints:=make([dynamic]string,0,8,allocator)
+    for &bone in bones {
+        name:=base.text_get(bone.name[:])
+        if len(hints)<8 && strings.contains(strings.to_lower(name,allocator),word) {append(&hints,base.text_get(bone.path[:]))}
+    }
+    if len(hints)==0 {return "Use a bone path from animation.asset.inspect with section bones"}
+    return fmt.aprintf("Bones named like %s: %s",word,strings.join(hints[:],", ",allocator),allocator=allocator)
+}
+
+@(private)
+body_save :: proc(s:^editor.Session,call:^api.Call,file:Authoring_File,id:base.Asset_Id,view:aa.Skeleton_View,map_:lib.Body_Map) {
+    body:aa.Skeleton_Body
+    rows:[len(lib.Body_Part)]aa.Skeleton_Body_Part
+    count,has:=aa.skeleton_body_rows(view.bones,map_,&body,&rows)
+    doc:aa.Document;defer aa.document_destroy(&doc)
+    desc:=aa.Skeleton_Desc{id=id,bones=view.bones,sockets=view.sockets,source=view.source}
+    if has {desc.body,desc.body_parts=&body,rows[:count]}
+    if error:=aa.skeleton_document(&doc,&s.app.assets.types,desc,s.app.allocator);error!=.None {authoring_failure(call,"parts","Invalid_Body","each part on a bone of its own",fmt.tprintf("%v",error),"The body could not be saved",api.SERVER_ERROR if error==.Out_Of_Memory else api.INVALID_PARAMS);return}
+    Body_Written :: struct {view:aa.Skeleton_View,map_:lib.Body_Map}
+    written:=Body_Written{view,map_}
+    authoring_publish(s,call,file,&doc,proc(call:^api.Call,data:rawptr) {w:=(^Body_Written)(data);body_write(call,w.view,w.map_)},&written)
+}
+
+// The body fields of a result: parts, missing parts, bones outside the body and a fix.
+@(private)
+body_write :: proc(call:^api.Call,view:aa.Skeleton_View,map_:lib.Body_Map) {
+    out:=call.out
+    api.write_numbers(out,"forward",map_.forward);api.write_numbers(out,"up",map_.up)
+    api.write_key(out,"axes_confidence");api.write_number(out,map_.axes_confidence);api.write_bool(out,"manual_axes",map_.manual_axes)
+    api.write_key(out,"parts");serial.text_write_raw(out,"[")
+    written:=0
+    for bone,part in map_.bones {
+        if bone<0 {continue}
+        if written>0 {serial.text_write_raw(out,",")};written+=1
+        serial.text_write_raw(out,"{");api.write_text(out,"part",fmt.tprintf("%v",part),true)
+        api.write_text(out,"bone",base.text_get(view.bones[bone].path[:]));api.write_text(out,"name",base.text_get(view.bones[bone].name[:]))
+        api.write_key(out,"confidence");api.write_number(out,map_.confidence[part]);api.write_bool(out,"manual",part in map_.manual)
+        serial.text_write_raw(out,"}")
+    }
+    serial.text_write_raw(out,"]")
+    api.write_key(out,"missing");serial.text_write_raw(out,"[")
+    missing:=0
+    for bone,part in map_.bones {
+        if bone>=0 {continue}
+        if missing>0 {serial.text_write_raw(out,",")};missing+=1
+        serial.write_u8(out,'"');serial.text_write_raw(out,fmt.tprintf("%v",part));serial.write_u8(out,'"')
+    }
+    serial.text_write_raw(out,"]")
+    regions:=make([]i8,len(view.bones),call.allocator)
+    outside:=make([]i32,len(view.bones),call.allocator)
+    total,_:=lib.body_unassigned(body_parents(view,call.allocator),map_,regions,outside)
+    api.write_uint(out,"unassigned_total",u64(total))
+    api.write_key(out,"unassigned");serial.text_write_raw(out,"[")
+    for bone,i in outside[:min(total,32)] {
+        if i>0 {serial.text_write_raw(out,",")}
+        serial.write_u8(out,'"');serial.text_write_raw(out,base.text_get(view.bones[bone].path[:]));serial.write_u8(out,'"')
+    }
+    serial.text_write_raw(out,"]")
+    fix:=""
+    weakest:=lib.Body_Part.Pelvis;lowest:=f32(2)
+    for bone,part in map_.bones {if bone>=0 && map_.confidence[part]<lowest {weakest,lowest=part,map_.confidence[part]}}
+    switch {
+    case missing==len(lib.Body_Part): fix="No body part was recognized: name them with skeleton.body.set"
+    case missing>0: fix=fmt.tprintf("Missing parts can be set with skeleton.body.set, for example {{\"parts\":[{{\"part\":\"%v\",\"bone\":\"<path>\"}}]}}",body_first_missing(map_))
+    case lowest<.6: fix=fmt.tprintf("%v has confidence %.2f: check it and correct it with skeleton.body.set",weakest,lowest)
+    }
+    api.write_text(out,"fix",fix)
+}
+
+@(private)
+body_first_missing :: proc(map_:lib.Body_Map) -> lib.Body_Part {
+    for bone,part in map_.bones {if bone<0 {return part}}
+    return .Pelvis
+}
+
+@(private)
+body_parents :: proc(view:aa.Skeleton_View,allocator:=context.temp_allocator) -> []i32 {
+    parents:=make([]i32,len(view.bones),allocator)
+    for &bone,i in view.bones {parents[i]=bone.parent}
+    return parents
+}
+
+@(private)
+body_unit :: proc(v:mm.Vec3) -> (mm.Vec3,bool) {
+    length:=linalg.length(v)
+    if !(length>1e-6) {return {},false}
+    return v/length,true
+}

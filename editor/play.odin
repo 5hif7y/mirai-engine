@@ -1,0 +1,97 @@
+package editor
+
+import "mirai:platform"
+import "mirai:ui"
+
+play_paused :: proc "contextless" (s:^Session) -> bool {return s.mode==.Paused || s.mode==.Simulation_Paused}
+
+// The editor shows the game of the user, playing or paused: the chat and the
+// panels behave as in a game.
+play_shown :: proc "contextless" (s:^Session) -> bool {return s.mode==.Play || s.mode==.Paused}
+
+play_release_input :: proc(s:^Session) {
+    if s.mode!=.Play || s.play_input_released {return}
+    s.play_relative_mouse=platform.window_relative_mouse(s.app.platform)
+    s.play_input_released=true
+    platform.window_set_relative_mouse(s.app.platform,false)
+}
+
+play_chat_set :: proc(s:^Session,open:bool) {
+    if s.ai==nil || !play_shown(s) {return}
+    s.ai.chat_open=open
+    if s.play_chat_open==open {return}
+    s.play_chat_open=open
+    if open {
+        s.play_chat_input_released=s.play_input_released
+        if s.mode==.Play {play_release_input(s)} else {s.play_input_released=true}
+        library_select(s,.Ai)
+    } else {
+        s.gui.layout.left_open=false
+        s.ai.focus=false
+        if s.gui.ctx!=nil {s.gui.ctx.edit={};ui.popup_close(s.gui.ctx)}
+        s.play_input_released=s.play_chat_input_released
+        s.play_capture_click=false
+        if s.mode==.Play {platform.window_set_relative_mouse(s.app.platform,!s.play_input_released && s.play_relative_mouse)}
+    }
+}
+
+// The click that recaptures the scene and the Tab that toggles chat never reach the game.
+@(private)
+play_input_update :: proc(s:^Session) {
+    app,g:=s.app,s.gui
+    frame:=platform.input_frame(app.platform)
+    if simulating(s) || s.mode==.Watch {
+        app.game_input_blocked=true
+        if s.mode==.Watch {_=platform.input_tick_take(app.platform)}
+        return
+    }
+    if s.mode==.Play || s.mode==.Paused {
+        if .Tab in frame.keys_pressed && app.ui_input.modifiers=={} && s.gui.modal==.None && s.gui.ctx!=nil && !s.gui.ctx.modal_open && s.gui.ctx.popup.count==0 {
+            play_chat_set(s,!s.play_chat_open)
+            app.ui_input.keys_pressed-={.Tab}
+            app.ui_input.keys_repeated-={.Tab}
+        } else if s.ai!=nil && s.ai.chat_open!=s.play_chat_open {play_chat_set(s,s.ai.chat_open)}
+    }
+    app.game_input_blocked=s.mode!=.Play && !s.viewport.hovered
+    if s.mode!=.Play {
+        app.game_input_blocked=app.game_input_blocked || s.play_chat_open
+        // What the mouse and the keys do while the game is paused is for the
+        // editor: a game that resumes does not get it all in its first tick.
+        if s.mode==.Paused {_=platform.input_tick_take(app.platform)}
+        return
+    }
+    if .F1 in frame.keys_pressed {play_release_input(s)}
+    if s.play_capture_click && frame.mouse_down=={} {s.play_capture_click=false}
+    if s.play_input_released && !s.play_chat_open && !player_processes_captured(s) && .F1 not_in frame.keys_pressed && .Left in frame.mouse_pressed && frame.mouse_inside && g.modal==.None && g.ctx!=nil && g.ctx.popup.count==0 && g.ctx.edit.id==0 {
+        point:=app.ui_input.pointer/(app.ui_input.scale>0?app.ui_input.scale:f32(1))
+        over_panel:=false
+        panels:=[?]ui.Rect{g.rects.bar,g.rects.left,g.rects.right,g.rects.bottom}
+        for rect in panels {
+            if ui.rect_contains(rect,point) {over_panel=true;break}
+        }
+        if !over_panel && player_process_at(s,point)==0 {
+            s.play_input_released=false
+            s.play_capture_click=true
+            platform.window_set_relative_mouse(app.platform,s.play_relative_mouse)
+        }
+    }
+    app.game_input_blocked=s.play_input_released || s.play_capture_click
+    if app.game_input_blocked {_=platform.input_tick_take(app.platform)}
+}
+
+// Resuming plays on from the newest frame the game played; with here, from
+// the frame its history went back to, dropping the frames after it.
+play_pause :: proc(s:^Session,paused:bool,here:=false) {
+    if !playing(s) {return}
+    r:=run_find(s,0)
+    if paused && (s.mode==.Play || s.mode==.Simulate) {
+        if !s.play_input_released {s.play_relative_mouse=platform.window_relative_mouse(s.app.platform)}
+        platform.window_set_relative_mouse(s.app.platform,false)
+        s.mode=simulating(s)?.Simulation_Paused:.Paused
+        if r!=nil && r.history!=nil {r.history.held=true}
+    } else if !paused && play_paused(s) {
+        if r!=nil {history_resume(s,r,here)}
+        platform.window_set_relative_mouse(s.app.platform,!s.play_input_released && s.play_relative_mouse)
+        s.mode=simulating(s)?.Simulate:.Play
+    }
+}

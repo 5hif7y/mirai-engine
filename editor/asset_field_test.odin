@@ -1,0 +1,36 @@
+package editor
+
+import "core:reflect"
+import "core:testing"
+import "mirai:asset"
+import "mirai:std/base"
+
+@(private="file")
+Asset_Field_Test :: struct {
+    any:base.Asset_Id,
+    sound:base.Asset_Id,
+    source:base.Asset_Id `mirai:"section=Clip,kind=.anim .match .graph"`,
+    unknown:base.Asset_Id `mirai:"kind=.graph"`,
+}
+
+@(test)
+asset_field_takes_the_kinds_its_tag_names_and_those_a_plugin_declares :: proc(t:^testing.T) {
+    MATCH :: asset.Fourcc(0x4354_4d41)
+    s:Session
+    s.providers.library=s.library_generation+1
+    s.providers.kinds[0]={kind=MATCH,label="Matching",extension=".match"}
+    s.providers.kind_count=1
+    kinds :: proc(s:^Session,name:string) -> Asset_Kinds {
+        field:=reflect.struct_field_by_name(Asset_Field_Test,name)
+        return field_asset_kinds(s,field.tag,field.name)
+    }
+    source:=kinds(&s,"source")
+    testing.expect_value(t,source,Asset_Kinds{0=asset.KIND_ANIMATION,1=MATCH})
+    testing.expect(t,asset_kind_takes(source,asset.KIND_ANIMATION) && asset_kind_takes(source,MATCH))
+    testing.expect(t,!asset_kind_takes(source,asset.KIND_MESH))
+    // A tag whose kinds none declares falls back to the name of the field.
+    testing.expect_value(t,kinds(&s,"unknown"),Asset_Kinds{})
+    sound:=kinds(&s,"sound")
+    testing.expect(t,asset_kind_takes(sound,asset.KIND_SOUND_SET) && !asset_kind_takes(sound,asset.KIND_MESH))
+    testing.expect(t,asset_kind_takes(kinds(&s,"any"),asset.KIND_MESH))
+}

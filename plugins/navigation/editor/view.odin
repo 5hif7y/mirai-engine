@@ -1,0 +1,258 @@
+package navigation_editor
+
+import "core:fmt"
+import "core:math/linalg"
+import "core:strings"
+import "mirai:core"
+import "mirai:editor"
+import erender "mirai:engine/render"
+import "mirai:host"
+import gpu "mirai:render"
+import "mirai:std/ai"
+import "mirai:std/base"
+import mm "mirai:std/math"
+import nav "plugins:navigation/runtime"
+
+// The Navigation modes of the viewport: the mesh of a class over the lit
+// image (navigation is the first class, navigation.<class> each one), its
+// polygons by area, walls brighter, the borders between tiles and the links
+// with their arc and direction; for a class of the air, its zones and the
+// free nodes of their octrees. The lines are made again only when the mesh
+// or the volume changes.
+
+NAV_VIEW_LINES :: 1<<17 // the most lines drawn; the rest are counted
+NAV_VIEW_PREFIX :: "navigation."
+NAV_VIEW_LIFT :: f32(0.04) // m above the surface, so the lines are not hidden by it
+
+@(storage,free="nav_view_free")
+Nav_View :: struct {
+    vertices:[dynamic]gpu.Debug_Vertex, // made the first time a mode is shown
+    world:rawptr,   // what the lines were made from
+    revision:u64,
+    class:int,
+    count,dropped:int,
+    ready:bool,
+    agents:[dynamic]gpu.Debug_Vertex, // the paths of the selected agents, made every frame
+    shown:int,      // the class the mode of this frame shows, or -1
+}
+NAV_VIEW_DEFAULT :: Nav_View{shown=-1,class=-1}
+
+nav_view_free :: proc(v:^Nav_View) {
+    delete(v.vertices)
+    delete(v.agents)
+    v^=NAV_VIEW_DEFAULT
+}
+
+@(step="frame")
+navigation_view_modes :: proc(s:^editor.Session,view:^Nav_View) {
+    w:=editor.shown_world(s)
+    n:^nav.Navigation
+    if w.data!=nil {n=core.world_storage_of(w,nav.Navigation)}
+    reason:=""
+    if n==nil {reason="The world shown has no navigation"} else if !n.ready || n.count==0 {reason="The navigation meshes are not made yet"}
+    current:=editor.view_mode_current(s.viewport)
+    view.shown=-1
+    editor.view_mode_declare(s,{name="navigation",label="Navigation",title="Navigation",group="Advanced",submenu="Navigation",icon=.Target,reason=reason,record=navigation_view_record})
+    if strings.equal_fold(current,"navigation") && reason=="" {view.shown=0}
+    if n==nil {return}
+    for i in 0..<n.count {
+        name:=base.text_get(n.classes[i].class.name[:])
+        mode:=fmt.tprintf("%s%s",NAV_VIEW_PREFIX,name)
+        editor.view_mode_declare(s,{name=mode,label=name,title=fmt.tprintf("Navigation: %s",name),group="Advanced",submenu="Navigation",icon=.Layers,reason=reason,record=navigation_view_record})
+        if strings.equal_fold(current,mode) && reason=="" {view.shown=i}
+    }
+    if editor.document_is_prefab(s) {view.shown=-1}
+}
+
+@(step="render",after="render_sync")
+navigation_view_lines :: proc(s:^editor.Session,view:^Nav_View,app:^host.App) {
+    if view.shown<0 {return}
+    w:=editor.shown_world(s)
+    n:=core.world_storage_of(w,nav.Navigation)
+    if n==nil || view.shown>=n.count {return}
+    if len(view.vertices)==0 {resize(&view.vertices,2*NAV_VIEW_LINES)}
+    lines:=gpu.debug_lines_make(view.vertices[:])
+    if !view.ready || view.world!=w.data || view.revision!=n.revision || view.class!=view.shown {
+        if nav.class_in_volume(n,view.shown) {draw_volume(&lines,&n.classes[view.shown].volume)} else {draw_mesh(&lines,&n.classes[view.shown].mesh)}
+        view.world,view.revision,view.class=w.data,n.revision,view.shown
+        view.count,view.dropped,view.ready=lines.count,lines.dropped,true
+    }
+    lines.count,lines.dropped=view.count,view.dropped
+    if lines.count>0 {host.app_debug_lines_add(app,lines)}
+    if s.selection==nil || len(s.selection.entities)==0 {return}
+    paths:=core.world_table_of(w,nav.Nav_Path)
+    if paths==nil {return}
+    if len(view.agents)==0 {resize(&view.agents,2*NAV_VIEW_AGENT_LINES)}
+    agent_lines:=gpu.debug_lines_make(view.agents[:],depth_test=false)
+    for e in s.selection.entities {
+        p,found:=core.get(core.read(paths),e)
+        if !found || p.class<0 || int(p.class)>=n.count {continue}
+        if nav.class_in_volume(n,int(p.class)) {draw_flier(&agent_lines,&n.classes[p.class].volume,p)} else {draw_agent(&agent_lines,&n.classes[p.class].mesh,p)}
+    }
+    if agent_lines.count>0 {host.app_debug_lines_add(app,agent_lines)}
+}
+
+NAV_VIEW_AGENT_LINES :: 4096
+AGENT_COLOR :: mm.Vec4{1,1,1,0.95}
+CORRIDOR_COLOR :: mm.Vec4{0.35,0.6,1,0.6}
+
+// The path of an agent: the outlines of its corridor and its next corners to the goal.
+draw_agent :: proc(lines:^gpu.Debug_Lines,mesh:^ai.Nav_Mesh,p:nav.Nav_Path) {
+    up:=mm.Vec3{0,NAV_VIEW_LIFT*2,0}
+    corridor:=p.corridor
+    for ref in corridor.path[:clamp(corridor.count,0,ai.NAV_CORRIDOR_CAPACITY)] {
+        tile,poly:=ai.nav_poly_of(mesh,ref)
+        if poly==nil {continue}
+        corners:[ai.NAV_VERTS_PER_POLY]mm.Vec3
+        count:=ai.nav_poly_vertices(tile,poly,&corners)
+        for i in 0..<count {gpu.debug_line(lines,corners[i]+up,corners[(i+1)%count]+up,CORRIDOR_COLOR)}
+    }
+    if p.state!=.Moving && p.state!=.Crossing {return}
+    corners:[16]ai.Nav_Corner
+    count,_:=ai.nav_straight_path(mesh,corridor.position,corridor.target,corridor.path[:clamp(corridor.count,0,ai.NAV_CORRIDOR_CAPACITY)],corners[:])
+    for i in 1..<count {gpu.debug_line(lines,corners[i-1].position+up,corners[i].position+up,AGENT_COLOR)}
+    if p.state==.Crossing {gpu.debug_line(lines,p.from+up,p.to+up,LINK_COLOR)}
+}
+
+// The path of an agent that flies: the cells of its corridor and its path pulled tight to the goal.
+draw_flier :: proc(lines:^gpu.Debug_Lines,volume:^ai.Nav_Volume,p:nav.Nav_Path) {
+    corridor:=p.corridor
+    path:=corridor.path[:clamp(corridor.count,0,ai.NAV_CORRIDOR_CAPACITY)]
+    for ref in path {
+        if box,ok:=ai.nav_volume_ref_box(volume,ref);ok {draw_box(lines,box,CORRIDOR_COLOR)}
+    }
+    if p.state!=.Moving {return}
+    corners:[32]mm.Vec3
+    count,_:=ai.nav_volume_straight_path(volume,corridor.position,corridor.target,path,corners[:])
+    for i in 1..<count {gpu.debug_line(lines,corners[i-1],corners[i],AGENT_COLOR)}
+}
+
+ZONE_COLOR :: mm.Vec4{0.6,0.6,0.6,0.35}
+FREE_COLOR :: mm.Vec4{0.3,0.85,1,0.25}
+
+draw_box :: proc(lines:^gpu.Debug_Lines,box:mm.Aabb,color:mm.Vec4) {
+    corner :: #force_inline proc "contextless" (box:mm.Aabb,i:int) -> mm.Vec3 {
+        return {box.max.x if i&1!=0 else box.min.x,box.max.y if i&2!=0 else box.min.y,box.max.z if i&4!=0 else box.min.z}
+    }
+    edges:=[12][2]int{{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}}
+    for e in edges {gpu.debug_line(lines,corner(box,e[0]),corner(box,e[1]),color)}
+}
+
+// The zones of a volume and the free nodes of their octrees bigger than a
+// block: the blocks and voxels along the obstacles are too many to read.
+draw_volume :: proc(lines:^gpu.Debug_Lines,volume:^ai.Nav_Volume) {
+    Item :: struct {layer:int,index:u32,cell:[3]i32}
+    stack:[8*ai.NAV_VOLUME_MAX_LAYERS+8]Item
+    for &zone in volume.zones {
+        if !zone.used {continue}
+        data:=&zone.data
+        draw_box(lines,ai.nav_volume_zone_box(volume,data.coord),ZONE_COLOR)
+        stack[0]={int(data.layers),0,{}}
+        top:=1
+        for top>0 {
+            top-=1
+            item:=stack[top]
+            node:=data.nodes[int(data.first[item.layer])+int(item.index)]
+            switch node.cell {
+            case .Blocked:
+            case .Free:
+                if item.layer==int(data.layers) || item.layer==0 {continue}
+                box:=ai.nav_volume_cell_box(volume,data.coord,item.layer,item.cell)
+                inset:=volume.voxel*0.1
+                draw_box(lines,{box.min+inset,box.max-inset},FREE_COLOR)
+            case .Mixed:
+                if item.layer<=1 {continue}
+                for o in u32(0)..<8 {
+                    stack[top]={item.layer-1,node.children+o,{item.cell.x*2+i32(o&1),item.cell.y*2+i32((o>>1)&1),item.cell.z*2+i32((o>>2)&1)}}
+                    top+=1
+                }
+            }
+        }
+    }
+}
+
+// The lines go over the lit image: the pass of the mode draws nothing.
+@(private)
+navigation_view_record :: proc(pass:^erender.Pass,user:rawptr) {}
+
+// A color for an area: walkable in green, blocked never drawn, the rest spread around the hue circle.
+area_color :: proc "contextless" (area:u8,bright:bool) -> mm.Vec4 {
+    alpha:=f32(0.95) if bright else 0.35
+    if area==ai.NAV_AREA_WALKABLE {return {0.25,0.9,0.45,alpha}}
+    hue:=f32(area)*0.618034
+    hue-=f32(int(hue))
+    // A hue as three ramps.
+    r:=clamp(abs(hue*6-3)-1,0,1)
+    g:=clamp(2-abs(hue*6-2),0,1)
+    b:=clamp(2-abs(hue*6-4),0,1)
+    return {r,g,b,alpha}
+}
+
+LINK_COLOR :: mm.Vec4{1,0.8,0.2,0.95}
+LINK_GENERATED_COLOR :: mm.Vec4{0.95,0.55,1,0.9}
+LINK_LOOSE_COLOR :: mm.Vec4{1,0.25,0.2,0.9}
+PORTAL_COLOR :: mm.Vec4{0.3,0.85,1,0.6}
+TILE_COLOR :: mm.Vec4{0.6,0.6,0.6,0.35}
+
+draw_mesh :: proc(lines:^gpu.Debug_Lines,mesh:^ai.Nav_Mesh) {
+    up:=mm.Vec3{0,NAV_VIEW_LIFT,0}
+    for &tile in mesh.tiles {
+        if !tile.used {continue}
+        b:=tile.data.bounds
+        y:=b.min.y
+        rect:=[4]mm.Vec3{{b.min.x,y,b.min.z},{b.max.x,y,b.min.z},{b.max.x,y,b.max.z},{b.min.x,y,b.max.z}}
+        for i in 0..<4 {gpu.debug_line(lines,rect[i],rect[(i+1)%4],TILE_COLOR)}
+        for &poly,p in tile.data.polys {
+            corners:[ai.NAV_VERTS_PER_POLY]mm.Vec3
+            count:=ai.nav_poly_vertices(&tile,&poly,&corners)
+            for e in 0..<count {
+                neighbor:=poly.neighbor[e]
+                a,c:=corners[e]+up,corners[(e+1)%count]+up
+                switch {
+                case neighbor==ai.NAV_EDGE_WALL:
+                    gpu.debug_line(lines,a,c,area_color(poly.area,true))
+                case neighbor&ai.NAV_EDGE_PORTAL!=0:
+                    gpu.debug_line(lines,a,c,PORTAL_COLOR)
+                case int(neighbor)-1>p:
+                    gpu.debug_line(lines,a,c,area_color(poly.area,false))
+                }
+            }
+        }
+    }
+    for &link in mesh.links {
+        if !link.used {continue}
+        draw_link(lines,&link)
+    }
+}
+
+// A link as the arc an agent jumps (a straight line when its ends are level
+// or one under the other), with a head at each end it can be left by.
+draw_link :: proc(lines:^gpu.Debug_Lines,link:^ai.Nav_Link) {
+    rested:=link.start_poly!=0 && link.end_poly!=0
+    a:=link.start_point if rested else link.desc.start
+    b:=link.end_point if rested else link.desc.end
+    color:=LINK_LOOSE_COLOR
+    if rested {color=LINK_GENERATED_COLOR if link.desc.owner&nav.LINK_OWNER_GENERATED!=0 else LINK_COLOR}
+    SEGMENTS :: 12
+    rise:=max(0.25,abs(b.y-a.y)*0.25)
+    previous:=a
+    for i in 1..=SEGMENTS {
+        t:=f32(i)/SEGMENTS
+        p:=a+(b-a)*t
+        p.y+=4*rise*t*(1-t)
+        gpu.debug_line(lines,previous,p,color)
+        previous=p
+    }
+    head :: proc(lines:^gpu.Debug_Lines,at,from:mm.Vec3,color:mm.Vec4) {
+        d:=at-from
+        d.y=0
+        length:=linalg.length(d)
+        if !(length>1e-4) {return}
+        d/=length
+        side:=mm.Vec3{-d.z,0,d.x}
+        gpu.debug_line(lines,at,at-d*0.25+side*0.12,color)
+        gpu.debug_line(lines,at,at-d*0.25-side*0.12,color)
+    }
+    head(lines,b,a,color)
+    if link.desc.two_way {head(lines,a,b,color)}
+}

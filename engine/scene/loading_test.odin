@@ -1,0 +1,403 @@
+package scene
+
+import "base:runtime"
+import "core:fmt"
+import "core:os"
+import "core:testing"
+import "core:thread"
+import "core:time"
+import "mirai:asset"
+import "mirai:core"
+import "mirai:host"
+import "mirai:std/base"
+import "mirai:std/jobs"
+import mm "mirai:std/math"
+
+@(private) Loading_Model :: struct {mesh:base.Asset_Id}
+
+@(private)
+Loading_World :: struct {
+    entities:core.Entities,
+    ids:core.Table(core.Id),
+    names:core.Table(core.Name),
+    transforms:core.Table(core.Transform),
+    parents:core.Table(core.Parent),
+    models:core.Table(Loading_Model),
+    references:core.Table(Scene_Reference),
+}
+
+@(private)
+loading_init :: proc(data:rawptr,allocator:runtime.Allocator) -> bool {
+    w:=cast(^Loading_World)data
+    w^={}
+    core.table_init(&w.ids,"Id",allocator);core.table_init(&w.names,"Name",allocator);core.table_init(&w.transforms,"Transform",allocator)
+    core.table_init(&w.parents,"Parent",allocator);core.table_init(&w.models,"Loading_Model",allocator)
+    core.table_init(&w.references,"Scene_Reference",allocator)
+    return core.entities_init(&w.entities,allocator)
+}
+
+@(private)
+loading_destroy :: proc(data:rawptr) {
+    w:=cast(^Loading_World)data
+    core.table_destroy(&w.ids);core.table_destroy(&w.names);core.table_destroy(&w.transforms);core.table_destroy(&w.parents)
+    core.table_destroy(&w.models);core.table_destroy(&w.references)
+    core.entities_destroy(&w.entities)
+}
+
+@(private)
+loading_copy :: proc(dst,src:rawptr) -> bool {
+    d,s:=cast(^Loading_World)dst,cast(^Loading_World)src
+    return core.entities_copy(&d.entities,&s.entities) && core.table_copy(&d.ids,&s.ids) && core.table_copy(&d.names,&s.names) &&
+        core.table_copy(&d.transforms,&s.transforms) && core.table_copy(&d.parents,&s.parents) && core.table_copy(&d.models,&s.models) &&
+        core.table_copy(&d.references,&s.references)
+}
+
+@(private)
+loading_swap :: proc(a,b:rawptr) {
+    a,b:=cast(^Loading_World)a,cast(^Loading_World)b
+    a.entities,b.entities=b.entities,a.entities
+    core.table_swap(&a.ids,&b.ids);core.table_swap(&a.names,&b.names);core.table_swap(&a.transforms,&b.transforms);core.table_swap(&a.parents,&b.parents)
+    core.table_swap(&a.models,&b.models);core.table_swap(&a.references,&b.references)
+}
+
+@(private)
+loading_settle :: proc(world,shared,editor:rawptr) {
+    w:=cast(^Loading_World)world
+    core.table_settle(&w.ids,&w.entities);core.table_settle(&w.names,&w.entities);core.table_settle(&w.transforms,&w.entities);core.table_settle(&w.parents,&w.entities)
+    core.table_settle(&w.models,&w.entities);core.table_settle(&w.references,&w.entities)
+    core.entities_settle(&w.entities)
+}
+
+@(private)
+loading_clear :: proc(data:rawptr) {
+    w:=cast(^Loading_World)data
+    core.table_clear(&w.ids);core.table_clear(&w.names);core.table_clear(&w.transforms);core.table_clear(&w.parents)
+    core.table_clear(&w.models);core.table_clear(&w.references)
+    core.entities_clear(&w.entities)
+}
+
+// A project in a temporary folder of assets, with job threads or without,
+// and a World of it its application made.
+@(private)
+Loading_Project :: struct {
+    folder:string,
+    types:asset.Types,
+    tables:[6]core.Table_Info,
+    info:core.World_Info,
+    assets:host.Assets,
+    app:host.App,
+    world:^Loading_World,
+}
+
+@(private)
+loading_open :: proc(t:^testing.T,p:^Loading_Project,name:string,threads:int) -> bool {
+    directory,_:=os.temp_directory(context.temp_allocator)
+    p.folder=fmt.tprintf("%s/mirai-loading-%s-%d",directory,name,os.get_pid())
+    os.remove_all(p.folder)
+    if !testing.expect(t,os.make_directory_all(p.folder)==nil) {return false}
+    asset.types_init(&p.types)
+    p.tables={
+        {name="Id",type=core.Id,info=type_info_of(core.Id),offset=offset_of(Loading_World,ids)},
+        {name="Name",type=core.Name,info=type_info_of(core.Name),offset=offset_of(Loading_World,names)},
+        {name="Transform",type=core.Transform,info=type_info_of(core.Transform),offset=offset_of(Loading_World,transforms)},
+        {name="Parent",type=core.Parent,info=type_info_of(core.Parent),offset=offset_of(Loading_World,parents)},
+        {name="Loading_Model",type=Loading_Model,info=type_info_of(Loading_Model),offset=offset_of(Loading_World,models)},
+        {name="Scene_Reference",type=Scene_Reference,info=type_info_of(Scene_Reference),offset=offset_of(Loading_World,references)},
+    }
+    p.info={entities=offset_of(Loading_World,entities),tables=p.tables[:],copy=loading_copy,swap=loading_swap,settle=loading_settle,clear=loading_clear}
+    p.info.sizes[.World],p.info.aligns[.World]=size_of(Loading_World),align_of(Loading_World)
+    p.info.init[.World],p.info.destroy[.World]=loading_init,loading_destroy
+    core.world_info_index(&p.info)
+    if !testing.expect(t,host.assets_init(&p.assets,{root=p.folder,capacity=64})) {return false}
+    p.app={info=&p.info,assets=&p.assets,allocator=context.allocator}
+    if threads>0 && !testing.expect(t,jobs.system_init(&p.app.jobs,{threads=threads})) {return false}
+    p.world=cast(^Loading_World)host.app_world_create(&p.app)
+    return testing.expect(t,p.world!=nil)
+}
+
+@(private)
+loading_close :: proc(p:^Loading_Project) {
+    host.app_world_free(&p.app,p.world)
+    host.app_assets_releases_stop(&p.app)
+    if jobs.worker_count(&p.app.jobs)>0 {jobs.system_destroy(&p.app.jobs)}
+    delete(p.app.worlds)
+    host.assets_marks_free(&p.app.asset_marks)
+    host.assets_destroy(&p.assets)
+    asset.types_destroy(&p.types)
+    core.world_schema_destroy(p.info.schema)
+    delete(p.info.tables_by_type);delete(p.info.storages_by_type)
+    os.remove_all(p.folder)
+}
+
+// A mesh of about bytes of clusters, with the material of its slot.
+@(private)
+loading_mesh :: proc(t:^testing.T,p:^Loading_Project,id:base.Asset_Id,bytes:int,material:=base.Asset_Id{}) {
+    count:=max(bytes/(size_of(asset.Cluster_Vertex)+1),3)
+    count-=count%3
+    vertices:=make([]asset.Vertex,count)
+    defer delete(vertices)
+    indices:=make([]u32,count)
+    defer delete(indices)
+    for &v,i in vertices {v={position={f32(i%977),f32(i/977),f32(i%13)},normal=mm.normal_pack({0,0,1})}}
+    for &index,i in indices {index=u32(i)}
+    slots:=[1]asset.Material_Slot{{material=material}}
+    desc:=asset.Mesh_Desc{id=id}
+    testing.expect(t,asset.mesh_build({vertices=vertices},indices,nil,&desc.geometry,context.temp_allocator))
+    if material!={} {desc.slots=slots[:]}
+    testing.expect_value(t,asset.mesh_save(fmt.tprintf("%s/%x-%x.mesh",p.folder,id[0],id[1]),&p.types,desc),asset.Error.None)
+}
+
+// A scene with an entity for each mesh, and the references given.
+@(private)
+loading_scene :: proc(t:^testing.T,p:^Loading_Project,id:base.Asset_Id,meshes:[]base.Asset_Id,references:[]Scene_Reference=nil,kind:=asset.KIND_SCENE) {
+    document:asset.Scene;asset.scene_init(&document,&p.types,kind,id);defer asset.scene_destroy(&document)
+    for mesh,i in meshes {
+        asset.scene_entity_add(&document,base.Entity_Id(i+1),0,"Model")
+        asset.scene_set(&document,base.Entity_Id(i+1),"Loading_Model",&Loading_Model{mesh})
+    }
+    for &reference,i in references {
+        asset.scene_entity_add(&document,base.Entity_Id(100+i),0,"Section")
+        asset.scene_set(&document,base.Entity_Id(100+i),"Scene_Reference",&reference)
+    }
+    if kind==asset.KIND_PREFAB && len(meshes)>0 {document.info.root=1}
+    extension:=kind==asset.KIND_PREFAB?"prefab":"scene"
+    testing.expect_value(t,asset.scene_save(&document,fmt.tprintf("%s/%x-%x.%s",p.folder,id[0],id[1],extension)),asset.Error.None)
+}
+
+// Steps loads frame after frame, each at most until it is done, waiting for
+// their jobs between frames: the frames it took and, of each, the bytes
+// the loads gave the renderer and how many assets each one took.
+@(private)
+Loading_Frame :: struct {bytes:int,taken:[4]int}
+
+@(private)
+loading_frames :: proc(t:^testing.T,p:^Loading_Project,loads:[]^Load_Job,frames:^[dynamic]Loading_Frame) -> bool {
+    done:=make([]bool,len(loads),context.temp_allocator)
+    started:=time.tick_now()
+    for {
+        p.app.stats.frames+=1
+        frame:Loading_Frame
+        all:=true
+        for job,i in loads {
+            if done[i] {continue}
+            before:=job.phase==.Warming?job.taken:0
+            done[i]=load_step(job)
+            if job.phase==.Warming || job.phase==.Idle {frame.taken[i]=job.taken-before}
+            all&&=done[i]
+        }
+        if p.assets.loads.frame==p.app.stats.frames {frame.bytes=p.assets.loads.bytes}
+        append(frames,frame)
+        if all {return true}
+        if !testing.expect(t,time.duration_seconds(time.tick_since(started))<60,"the loads end") {return false}
+        thread.yield()
+    }
+}
+
+// A load reads its documents and the assets its scene names in jobs: of a
+// mesh larger than the bytes of a frame and of a mesh with a material and a
+// texture, textures first. The main thread gives the renderer the part of
+// each frame the load has, and the large mesh in a frame of its own.
+@(test)
+a_load_reads_in_jobs_and_a_large_asset_goes_in_a_frame_alone :: proc(t:^testing.T) {
+    p:Loading_Project
+    if !loading_open(t,&p,"jobs",2) {return}
+    defer loading_close(&p)
+    BIG :: base.Asset_Id{0x10ad,1}
+    SMALL :: base.Asset_Id{0x10ad,2}
+    MATERIAL :: base.Asset_Id{0x10ad,3}
+    TEXTURE :: base.Asset_Id{0x10ad,4}
+    LEVEL :: base.Asset_Id{0x10ad,5}
+    loading_mesh(t,&p,BIG,host.LOAD_FRAME_BYTES+(1<<20))
+    loading_mesh(t,&p,SMALL,host.LOAD_FRAME_BYTES/4,MATERIAL)
+    pixels:=make([]u8,256*256*4)
+    defer delete(pixels)
+    mips:=[1][]u8{pixels}
+    testing.expect_value(t,asset.texture_save(fmt.tprintf("%s/stone.tex",p.folder),&p.types,{id=TEXTURE,width=256,height=256,format=.RGBA8,mips=mips[:]}),asset.Error.None)
+    info:=asset.MATERIAL_DEFAULTS
+    info.maps.base_color.texture=TEXTURE
+    testing.expect_value(t,asset.material_save(fmt.tprintf("%s/stone.mat",p.folder),&p.types,{id=MATERIAL,info=info}),asset.Error.None)
+    loading_scene(t,&p,LEVEL,{SMALL,BIG})
+    host.assets_scan(&p.assets)
+
+    job,error:=load_begin(&p.app,LEVEL)
+    if !testing.expect_value(t,error,Error.None) {return}
+    testing.expect_value(t,load_progress(job).phase,Load_Phase.Reading)
+    frames:=make([dynamic]Loading_Frame,context.temp_allocator)
+    warming:=false
+    for !warming && !load_step(job) {
+        warming=job.phase==.Warming
+        thread.yield()
+    }
+    if !testing.expect(t,warming) {return}
+    // Each asset after what it takes: the texture, its material, then the meshes.
+    kinds:=[4]asset.Fourcc{asset.KIND_TEXTURE,asset.KIND_MATERIAL,asset.KIND_MESH,asset.KIND_MESH}
+    if testing.expect_value(t,len(job.items),4) {
+        for item,i in job.items {testing.expect_value(t,item.prepared.source.kind,kinds[i])}
+    }
+    if !loading_frames(t,&p,{job},&frames) {return}
+    for frame in frames {
+        testing.expect(t,frame.bytes<=host.LOAD_FRAME_BYTES || frame.taken[0]==1,"past the bytes of a frame only one asset, alone")
+    }
+    for id in ([4]base.Asset_Id{BIG,SMALL,MATERIAL,TEXTURE}) {testing.expect(t,host.assets_loaded(&p.assets,id))}
+    testing.expect_value(t,p.assets.stats.loads,4)
+    _,error=load_end(job,host.app_world_ref(&p.app,p.world))
+    testing.expect_value(t,error,Error.None)
+    testing.expect_value(t,core.count(core.read(&p.world.models)),2)
+}
+
+// Three loads at once share the bytes of every frame: each takes its part in
+// each frame, and together no more than a frame has.
+@(test)
+loads_under_way_share_every_frame :: proc(t:^testing.T) {
+    p:Loading_Project
+    if !loading_open(t,&p,"share",2) {return}
+    defer loading_close(&p)
+    loads:[3]^Load_Job
+    defer {for job in loads {if job!=nil {load_free(job)}}}
+    for &job,l in loads {
+        meshes:[4]base.Asset_Id
+        for &mesh,i in meshes {
+            mesh={0x5a,u64(l*4+i+1)}
+            loading_mesh(t,&p,mesh,host.LOAD_FRAME_BYTES/8)
+        }
+        loading_scene(t,&p,{0x5b,u64(l+1)},meshes[:])
+    }
+    host.assets_scan(&p.assets)
+    for &job,l in loads {
+        error:Error
+        job,error=load_begin(&p.app,{0x5b,u64(l+1)})
+        if !testing.expect_value(t,error,Error.None) {return}
+    }
+    // All of them read and prepared, the frames show only how they share.
+    for job in loads {
+        for job.phase==.Reading {
+            if jobs.pending(&job.counter) {jobs.wait(&p.app.jobs,jobs.OWNER,&job.counter)}
+            if job.error!=.None || len(job.wanted)>0 {break}
+            load_named(job)
+        }
+        if !testing.expect_value(t,job.phase,Load_Phase.Warming) {return}
+        jobs.wait(&p.app.jobs,jobs.OWNER,&job.counter)
+    }
+    frames:=make([dynamic]Loading_Frame,context.temp_allocator)
+    if !loading_frames(t,&p,loads[:],&frames) {return}
+    first:=frames[0]
+    testing.expect(t,first.taken[0]>0 && first.taken[1]>0 && first.taken[2]>0,"each load takes its part of the first frame")
+    for frame in frames {testing.expect(t,frame.bytes<=host.LOAD_FRAME_BYTES,"together no more than a frame")}
+    for job in loads {testing.expect_value(t,job.taken,4)}
+}
+
+// A load reads the scenes of the references that load with its document and
+// leaves those another rule loads, and only what it reads it takes from the
+// registry.
+@(test)
+a_load_reads_only_the_sections_that_load_with_it :: proc(t:^testing.T) {
+    p:Loading_Project
+    if !loading_open(t,&p,"rule",0) {return}
+    defer loading_close(&p)
+    WITH :: base.Asset_Id{0x7e,1}
+    MANUAL :: base.Asset_Id{0x7e,2}
+    LEVEL :: base.Asset_Id{0x7e,3}
+    OTHER :: base.Asset_Id{0x7e,4}
+    loading_scene(t,&p,WITH,nil)
+    loading_scene(t,&p,MANUAL,nil)
+    loading_scene(t,&p,OTHER,nil)
+    loading_scene(t,&p,LEVEL,nil,{{scene=WITH},{scene=MANUAL,rule=.Manual}})
+    host.assets_scan(&p.assets)
+    job,error:=load_begin(&p.app,LEVEL)
+    if !testing.expect_value(t,error,Error.None) {return}
+    defer load_free(job)
+    testing.expect(t,load_step(job,all=true))
+    testing.expect_value(t,job.error,Error.None)
+    testing.expect_value(t,job.asked,2)
+    testing.expect(t,WITH in job.documents && !(MANUAL in job.documents) && !(OTHER in job.documents))
+    testing.expect_value(t,job.report.sections,1)
+}
+
+// The sections loading apart tell how far they are: reading what they need
+// as it is found, then their assets as they reach the renderer; a section
+// that loaded is no longer there.
+@(test)
+the_sections_loading_tell_how_far_they_are :: proc(t:^testing.T) {
+    p:Loading_Project
+    if !loading_open(t,&p,"sections",0) {return}
+    defer loading_close(&p)
+    ROOM :: base.Asset_Id{0x5ec,1}
+    LAMP :: base.Asset_Id{0x5ec,2}
+    meshes:=[2]base.Asset_Id{{0x5ec,3},{0x5ec,4}}
+    for mesh in meshes {loading_mesh(t,&p,mesh,host.LOAD_FRAME_BYTES*6/10)}
+    loading_scene(t,&p,LAMP,meshes[1:],kind=asset.KIND_PREFAB)
+    {
+        lamp:asset.Scene
+        file:asset.Asset
+        if !testing.expect_value(t,asset.asset_load(&file,fmt.tprintf("%s/%x-%x.prefab",p.folder,LAMP[0],LAMP[1])),asset.Error.None) {return}
+        defer asset.asset_close(&file)
+        testing.expect_value(t,asset.scene_from_asset(&lamp,&p.types,&file),asset.Error.None)
+        defer asset.scene_destroy(&lamp)
+        room:asset.Scene;asset.scene_init(&room,&p.types,asset.KIND_SCENE,ROOM);defer asset.scene_destroy(&room)
+        asset.scene_entity_add(&room,1,0,"Model")
+        asset.scene_set(&room,1,"Loading_Model",&Loading_Model{meshes[0]})
+        _,_,placed:=asset.scene_instantiate(&room,&lamp,LAMP,0)
+        testing.expect_value(t,placed,asset.Error.None)
+        testing.expect_value(t,asset.scene_save(&room,fmt.tprintf("%s/room.scene",p.folder)),asset.Error.None)
+    }
+    host.assets_scan(&p.assets)
+
+    w:=p.world
+    world:=host.app_world_ref(&p.app,w)
+    e:=core.create(&w.entities)
+    core.add(&w.ids,e,core.Id{9})
+    core.add(&w.references,e,Scene_Reference{scene=ROOM,rule=.Manual})
+    loading_settle(w,nil,nil)
+    requests:Section_Requests
+    loads:Section_Loads
+    loading:Section_Loading
+    problems:core.Problems
+    defer {for l in loads.items {if l.job!=nil {load_free(l.job)}}}
+    step :: proc(p:^Loading_Project,world:core.World_Ref,requests:^Section_Requests,loads:^Section_Loads,loading:^Section_Loading,problems:^core.Problems) {
+        p.app.stats.frames+=1
+        w:=cast(^Loading_World)world.data
+        scene_sections(world,&p.app,&w.references,requests,loads,loading,{},{},nil,problems)
+        loading_settle(w,nil,nil)
+    }
+    // Its scene is read and asks for the prefab its instance follows.
+    step(&p,world,&requests,&loads,&loading,&problems)
+    if !testing.expect_value(t,loading.count,1) {return}
+    item:=loading.items[0]
+    testing.expect_value(t,item.entity,e)
+    testing.expect_value(t,item.loading.phase,Load_Phase.Reading)
+    testing.expect_value(t,item.loading.scene,ROOM)
+    testing.expect(t,item.loading.done==1 && item.loading.total==2,"read one of the two documents found")
+    // The prefab, and the first mesh: the second does not fit in the frame.
+    step(&p,world,&requests,&loads,&loading,&problems)
+    if !testing.expect_value(t,loading.count,1) {return}
+    item=loading.items[0]
+    testing.expect_value(t,item.loading.phase,Load_Phase.Warming)
+    testing.expect(t,item.loading.done==1 && item.loading.total==2,"one of its two meshes")
+    step(&p,world,&requests,&loads,&loading,&problems)
+    testing.expect_value(t,loading.count,0)
+    reference,_:=core.get(core.read(&w.references),e)
+    testing.expect_value(t,reference.loaded,ROOM)
+    testing.expect_value(t,core.count(core.read(&w.models)),2)
+}
+
+// A section load that waits for the libraries ends once a frame passed in
+// which none named what it names, never in the frame it began to wait.
+@(test)
+a_load_waits_while_a_library_names_what_it_names :: proc(t:^testing.T) {
+    a,b:=base.Asset_Id{1,2},base.Asset_Id{3,4}
+    job:Load_Job
+    job.phase=.Waiting
+    job.names=make([dynamic]base.Asset_Id,context.temp_allocator)
+    append(&job.names,a)
+    loads:Section_Loads
+    loads.items[0]={job=&job}
+    loads_waits_settle(&loads,nil)
+    testing.expect(t,!job.ready,"the frame it began to wait")
+    loads_waits_settle(&loads,{a,b})
+    testing.expect(t,!job.ready,"a library still prepares what it names")
+    loads_waits_settle(&loads,{b})
+    testing.expect(t,job.ready,"a frame without its assets named")
+    named:=make([dynamic]base.Asset_Id,context.temp_allocator)
+    loads_waiting(&loads,&named)
+    testing.expect_value(t,len(named),1)
+}

@@ -1,0 +1,771 @@
+package scene
+
+import "base:runtime"
+import "core:fmt"
+import "core:mem"
+import "core:os"
+import "core:slice"
+import "core:testing"
+import "mirai:asset"
+import "mirai:core"
+import "mirai:host"
+import "mirai:std/base"
+import "mirai:std/serial"
+
+@(private="file") Scene_Test_Lamp :: struct {range,intensity:f32}
+@(private="file") Scene_Test_Link :: struct {target:core.Entity}
+
+@(private="file")
+Scene_Test :: struct {
+    entities:core.Entities,
+    ids:core.Table(core.Id),
+    names:core.Table(core.Name),
+    transforms:core.Table(core.Transform),
+    parents:core.Table(core.Parent),
+    lamps:core.Table(Scene_Test_Lamp),
+    references:core.Table(Scene_Reference),
+    links:core.Table(Scene_Test_Link),
+    unresolved:Unresolved_References,
+}
+
+@(private="file") TEST_LAMP :: base.Asset_Id{0x1a,1}
+
+@(private="file")
+lamp_write :: proc(t:^testing.T,types:^asset.Types,path:string,range:f32) -> (lamp:asset.Scene) {
+    asset.scene_init(&lamp,types,asset.KIND_PREFAB,TEST_LAMP)
+    asset.scene_entity_add(&lamp,1,0,"Lamp")
+    asset.scene_entity_add(&lamp,2,1,"Bulb")
+    lamp.info.root=1
+    light:=Scene_Test_Lamp{range,1}
+    asset.scene_set(&lamp,2,"Scene_Test_Lamp",&light)
+    testing.expect_value(t,asset.scene_save(&lamp,path),asset.Error.None)
+    return
+}
+
+@(private="file")
+scene_test_init :: proc(data:rawptr,allocator:runtime.Allocator) -> bool {
+    f:=cast(^Scene_Test)data
+    f^={}
+    core.entities_init(&f.entities,allocator)
+    core.table_init(&f.ids,"Id",allocator);core.table_init(&f.names,"Name",allocator);core.table_init(&f.transforms,"Transform",allocator)
+    core.table_init(&f.parents,"Parent",allocator);core.table_init(&f.lamps,"Scene_Test_Lamp",allocator)
+    core.table_init(&f.references,"Scene_Reference",allocator);core.table_init(&f.links,"Scene_Test_Link",allocator)
+    return len(f.entities.generation)>0
+}
+
+@(private="file")
+scene_test_destroy :: proc(data:rawptr) {
+    f:=cast(^Scene_Test)data
+    core.table_destroy(&f.ids);core.table_destroy(&f.names);core.table_destroy(&f.transforms)
+    core.table_destroy(&f.parents);core.table_destroy(&f.lamps);core.table_destroy(&f.references);core.table_destroy(&f.links)
+    delete(f.unresolved.items);delete(f.unresolved.resolved)
+    core.entities_destroy(&f.entities)
+}
+
+@(private="file")
+scene_test_copy :: proc(dst,src:rawptr) -> bool {
+    d,s:=cast(^Scene_Test)dst,cast(^Scene_Test)src
+    return core.entities_copy(&d.entities,&s.entities) && core.table_copy(&d.ids,&s.ids) && core.table_copy(&d.names,&s.names) &&
+        core.table_copy(&d.transforms,&s.transforms) && core.table_copy(&d.parents,&s.parents) && core.table_copy(&d.lamps,&s.lamps) && core.table_copy(&d.references,&s.references) && core.table_copy(&d.links,&s.links)
+}
+
+@(private="file")
+scene_test_swap :: proc(a,b:rawptr) {
+    a,b:=cast(^Scene_Test)a,cast(^Scene_Test)b
+    a.entities,b.entities=b.entities,a.entities
+    core.table_swap(&a.ids,&b.ids);core.table_swap(&a.names,&b.names);core.table_swap(&a.transforms,&b.transforms)
+    core.table_swap(&a.parents,&b.parents);core.table_swap(&a.lamps,&b.lamps);core.table_swap(&a.references,&b.references);core.table_swap(&a.links,&b.links)
+    a.unresolved,b.unresolved=b.unresolved,a.unresolved
+}
+
+@(private="file")
+scene_test_settle_lamps :: proc(world,shared,editor:rawptr) {
+    f:=cast(^Scene_Test)world
+    core.table_settle(&f.ids,&f.entities);core.table_settle(&f.names,&f.entities);core.table_settle(&f.transforms,&f.entities)
+    core.table_settle(&f.parents,&f.entities);core.table_settle(&f.lamps,&f.entities);core.table_settle(&f.references,&f.entities);core.table_settle(&f.links,&f.entities)
+    core.entities_settle(&f.entities)
+}
+
+@(private="file")
+scene_test_clear_lamps :: proc(data:rawptr) {
+    f:=cast(^Scene_Test)data
+    core.table_clear(&f.ids);core.table_clear(&f.names);core.table_clear(&f.transforms)
+    core.table_clear(&f.parents);core.table_clear(&f.lamps);core.table_clear(&f.references);core.table_clear(&f.links)
+    clear(&f.unresolved.items);clear(&f.unresolved.resolved)
+    core.entities_clear(&f.entities)
+}
+
+// A project with lamps in a temporary folder of assets, and a World of it
+// that its application made.
+@(private="file")
+Scene_Test_Project :: struct {
+    folder:string,
+    types:asset.Types,
+    tables:[7]core.Table_Info,
+    storages:[1]core.Storage_Info,
+    info:core.World_Info,
+    assets:host.Assets,
+    app:host.App,
+    world:^Scene_Test,
+}
+
+@(private="file")
+scene_test_project_open :: proc(t:^testing.T,p:^Scene_Test_Project,name:string) -> bool {
+    directory,_:=os.temp_directory(context.temp_allocator)
+    p.folder=fmt.tprintf("%s/mirai-scene-%s-%d",directory,name,os.get_pid())
+    os.remove_all(p.folder)
+    if !testing.expect(t,os.make_directory_all(p.folder)==nil) {return false}
+    asset.types_init(&p.types)
+    p.tables={
+        {name="Id",type=core.Id,info=type_info_of(core.Id),offset=offset_of(Scene_Test,ids)},
+        {name="Name",type=core.Name,info=type_info_of(core.Name),offset=offset_of(Scene_Test,names)},
+        {name="Transform",type=core.Transform,info=type_info_of(core.Transform),offset=offset_of(Scene_Test,transforms)},
+        {name="Parent",type=core.Parent,info=type_info_of(core.Parent),offset=offset_of(Scene_Test,parents)},
+        {name="Scene_Test_Lamp",type=Scene_Test_Lamp,info=type_info_of(Scene_Test_Lamp),offset=offset_of(Scene_Test,lamps)},
+        {name="Scene_Reference",type=Scene_Reference,info=type_info_of(Scene_Reference),offset=offset_of(Scene_Test,references)},
+        {name="Scene_Test_Link",type=Scene_Test_Link,info=type_info_of(Scene_Test_Link),offset=offset_of(Scene_Test,links)},
+    }
+    p.storages={{name="Unresolved_References",type=Unresolved_References,info=type_info_of(Unresolved_References),offset=offset_of(Scene_Test,unresolved)}}
+    p.info={entities=offset_of(Scene_Test,entities),tables=p.tables[:],storages=p.storages[:],copy=scene_test_copy,swap=scene_test_swap,settle=scene_test_settle_lamps,clear=scene_test_clear_lamps}
+    p.info.sizes[.World],p.info.aligns[.World]=size_of(Scene_Test),align_of(Scene_Test)
+    p.info.init[.World],p.info.destroy[.World]=scene_test_init,scene_test_destroy
+    core.world_info_index(&p.info)
+    if !testing.expect(t,host.assets_init(&p.assets,{root=p.folder,capacity=8})) {return false}
+    p.app={info=&p.info,assets=&p.assets,allocator=context.allocator}
+    p.world=cast(^Scene_Test)host.app_world_create(&p.app)
+    return testing.expect(t,p.world!=nil)
+}
+
+@(private="file")
+scene_test_project_close :: proc(p:^Scene_Test_Project) {
+    host.app_world_free(&p.app,p.world)
+    delete(p.app.worlds)
+    host.assets_destroy(&p.assets)
+    asset.types_destroy(&p.types)
+    core.world_schema_destroy(p.info.schema)
+    delete(p.info.tables_by_type);delete(p.info.storages_by_type)
+    os.remove_all(p.folder)
+}
+
+// The ranges of the lamps of the world, in the order of its table.
+@(private="file")
+scene_test_ranges :: proc(f:^Scene_Test) -> []f32 {
+    lamps:=core.read(&f.lamps)
+    ranges:=make([]f32,core.count(lamps),context.temp_allocator)
+    for &range,row in ranges {range=core.at(lamps,row).range}
+    return ranges
+}
+
+@(test)
+a_load_brings_instances_up_to_date_with_their_prefabs_unless_the_assets_are_cooked :: proc(t:^testing.T) {
+    p:Scene_Test_Project
+    if !scene_test_project_open(t,&p,"resolve") {return}
+    defer scene_test_project_close(&p)
+    lamp_path:=fmt.tprintf("%s/lamp.prefab",p.folder)
+    lamp:=lamp_write(t,&p.types,lamp_path,1)
+    level:asset.Scene;asset.scene_init(&level,&p.types,asset.KIND_SCENE,{0x1a,2});defer asset.scene_destroy(&level)
+    _,_,placed:=asset.scene_instantiate(&level,&lamp,TEST_LAMP,0)
+    testing.expect_value(t,placed,asset.Error.None)
+    testing.expect_value(t,asset.scene_save(&level,fmt.tprintf("%s/level.scene",p.folder)),asset.Error.None)
+    asset.scene_destroy(&lamp)
+    // The prefab changes after the scene was saved.
+    lamp=lamp_write(t,&p.types,lamp_path,5)
+    asset.scene_destroy(&lamp)
+
+    w:=host.app_world_ref(&p.app,p.world)
+    _,error:=load(w,&p.app,"level.scene")
+    testing.expect_value(t,error,Error.None)
+    testing.expect(t,slice.equal(scene_test_ranges(p.world),[]f32{5}))
+    // A cooked folder was resolved by its cook: its files are loaded as they are.
+    p.assets.indexed=true
+    _,error=load(w,&p.app,"level.scene")
+    testing.expect_value(t,error,Error.None)
+    testing.expect(t,slice.equal(scene_test_ranges(p.world),[]f32{1}))
+}
+
+// A lamp as a scene saved it before its fields changed.
+@(private="file") Scene_Test_Old_Lamp :: struct {intensity:f32,flicker:i32}
+
+// A component the scene keeps with another layout loads by field names: what
+// both have comes back, a field the scene lacks starts at its default, one
+// the world lacks is left out, and the load counts the table it migrated.
+@(test)
+a_scene_saved_with_another_layout_of_a_component_loads_it_by_field_names :: proc(t:^testing.T) {
+    p:Scene_Test_Project
+    if !scene_test_project_open(t,&p,"migrate") {return}
+    defer scene_test_project_close(&p)
+    old:asset.Scene;asset.scene_init(&old,&p.types,asset.KIND_SCENE,{0x3a,1});defer asset.scene_destroy(&old)
+    asset.scene_entity_add(&old,1,0,"Lamp")
+    testing.expect_value(t,asset.scene_set(&old,1,"Scene_Test_Lamp",&Scene_Test_Old_Lamp{intensity=4,flicker=7}),asset.Error.None)
+    testing.expect_value(t,asset.scene_save(&old,fmt.tprintf("%s/old.scene",p.folder)),asset.Error.None)
+
+    report,error:=load(host.app_world_ref(&p.app,p.world),&p.app,"old.scene")
+    testing.expect_value(t,error,Error.None)
+    testing.expect_value(t,report.migrated,1)
+    testing.expect_value(t,report.unknown,0)
+    lamps:=core.read(&p.world.lamps)
+    if !testing.expect_value(t,core.count(lamps),1) {return}
+    testing.expect_value(t,core.at(lamps,0),Scene_Test_Lamp{range=0,intensity=4})
+}
+
+// A room referenced twice by a level: its entities hang from each reference
+// with Ids combined with the reference's, the same in every load and never
+// repeated; a scene that references itself and a prefab that references a
+// scene do not load, and a reference to a scene that is not there is counted.
+@(test)
+a_referenced_scene_hangs_from_each_reference_with_its_own_ids :: proc(t:^testing.T) {
+    p:Scene_Test_Project
+    if !scene_test_project_open(t,&p,"reference") {return}
+    defer scene_test_project_close(&p)
+    ROOM :: base.Asset_Id{0x2a,1}
+    LEVEL :: base.Asset_Id{0x2a,2}
+    room:asset.Scene;asset.scene_init(&room,&p.types,asset.KIND_SCENE,ROOM);defer asset.scene_destroy(&room)
+    asset.scene_entity_add(&room,1,0,"Lamp")
+    light:=Scene_Test_Lamp{3,1}
+    asset.scene_set(&room,1,"Scene_Test_Lamp",&light)
+    testing.expect_value(t,asset.scene_save(&room,fmt.tprintf("%s/room.scene",p.folder)),asset.Error.None)
+    level:asset.Scene;asset.scene_init(&level,&p.types,asset.KIND_SCENE,LEVEL);defer asset.scene_destroy(&level)
+    for id in ([2]base.Entity_Id{10,20}) {
+        asset.scene_entity_add(&level,id,0,"Room")
+        asset.scene_set(&level,id,"Scene_Reference",&Scene_Reference{scene=ROOM})
+    }
+    asset.scene_entity_add(&level,30,0,"Gone")
+    asset.scene_set(&level,30,"Scene_Reference",&Scene_Reference{scene={0x2a,9}})
+    // Fields of the level that name the lamp of the first room and what the missing scene would hold.
+    asset.scene_entity_add(&level,40,0,"Switch")
+    asset.scene_set(&level,40,"Scene_Test_Link",&Scene_Test_Link{core.Entity(id_in(10,1))})
+    asset.scene_entity_add(&level,41,0,"Far switch")
+    asset.scene_set(&level,41,"Scene_Test_Link",&Scene_Test_Link{core.Entity(id_in(30,1))})
+    testing.expect_value(t,asset.scene_save(&level,fmt.tprintf("%s/level.scene",p.folder)),asset.Error.None)
+
+    w:=host.app_world_ref(&p.app,p.world)
+    report,error:=load(w,&p.app,"level.scene")
+    testing.expect_value(t,error,Error.None)
+    testing.expect_value(t,report.sections,2)
+    testing.expect_value(t,report.missing,1)
+    testing.expect(t,slice.equal(scene_test_ranges(p.world),[]f32{3,3}),"the room under each reference")
+    links:=core.read(&p.world.links)
+    for row in 0..<core.count(links) {
+        e:=core.entity_at(links,row)
+        id,_:=core.get(core.read(&p.world.ids),e)
+        target:=core.at(links,row).target
+        if id.value==40 {
+            got,_:=core.get(core.read(&p.world.ids),target)
+            testing.expect_value(t,got.value,id_in(10,1))
+        } else {
+            testing.expect_value(t,target,core.NONE)
+            testing.expect_value(t,unresolved_target(&p.world.unresolved,e,base.name_hash("Scene_Test_Link"),0),id_in(30,1))
+        }
+    }
+    ids:=core.read(&p.world.ids)
+    seen:[dynamic]base.Entity_Id;defer delete(seen)
+    for row in 0..<core.count(ids) {
+        id:=core.at(ids,row).value
+        testing.expect(t,!slice.contains(seen[:],id),"no Id repeats")
+        append(&seen,id)
+    }
+    testing.expect(t,slice.contains(seen[:],id_in(10,1)) && slice.contains(seen[:],id_in(20,1)))
+    lamps:=core.read(&p.world.lamps)
+    parents:=core.read(&p.world.parents)
+    for row in 0..<core.count(lamps) {
+        parent,_:=core.get(parents,core.entity_at(lamps,row))
+        reference,_:=core.get(ids,parent.entity)
+        testing.expect(t,reference.value==10 || reference.value==20,"it hangs from its reference")
+    }
+
+    // A section loaded apart joins the world under its reference.
+    late:=core.create(&p.world.entities)
+    core.add(&p.world.ids,late,core.Id{50})
+    core.add(&p.world.references,late,Scene_Reference{scene=ROOM})
+    scene_test_settle_lamps(p.world,nil,nil)
+    job,begun:=section_load_begin(&p.app,w,late)
+    testing.expect_value(t,begun,Error.None)
+    if job!=nil {
+        for !load_step(job,all=true) {}
+        _,joined:=section_load_end(job,w,late)
+        testing.expect_value(t,joined,Error.None)
+        scene_test_settle_lamps(p.world,nil,nil)
+        testing.expect_value(t,len(scene_test_ranges(p.world)),3)
+        found:=false
+        for row in 0..<core.count(core.read(&p.world.ids)) {found||=core.at(core.read(&p.world.ids),row).value==id_in(50,1)}
+        testing.expect(t,found,"its lamp has the Id of the reference combined with its own")
+    }
+
+    // A loop references a hall that references the loop.
+    LOOP :: base.Asset_Id{0x2a,3}
+    HALL :: base.Asset_Id{0x2a,4}
+    for pair in ([2][2]base.Asset_Id{{LOOP,HALL},{HALL,LOOP}}) {
+        doc:asset.Scene;asset.scene_init(&doc,&p.types,asset.KIND_SCENE,pair[0]);defer asset.scene_destroy(&doc)
+        asset.scene_entity_add(&doc,1,0,"Next")
+        asset.scene_set(&doc,1,"Scene_Reference",&Scene_Reference{scene=pair[1]})
+        testing.expect_value(t,asset.scene_save(&doc,fmt.tprintf("%s/%s.scene",p.folder,"loop" if pair[0]==LOOP else "hall")),asset.Error.None)
+    }
+    _,error=load(w,&p.app,"loop.scene")
+    testing.expect_value(t,error,Error.Cycle)
+    testing.expect(t,slice.equal(scene_test_ranges(p.world),[]f32{3,3,3}),"a load that fails leaves the world as it was")
+}
+
+// A load in phases: it reads and instantiates apart, warms what the scene
+// uses, and trades the World only at its end; the requests made meanwhile
+// wait, and what the run holds (its requests) goes on in the World loaded.
+@(test)
+a_scene_loads_in_phases_and_replaces_the_world_at_its_end :: proc(t:^testing.T) {
+    p:Scene_Test_Project
+    if !scene_test_project_open(t,&p,"phases") {return}
+    defer scene_test_project_close(&p)
+    LEVEL :: base.Asset_Id{0x3a,1}
+    level:asset.Scene;asset.scene_init(&level,&p.types,asset.KIND_SCENE,LEVEL);defer asset.scene_destroy(&level)
+    light:=Scene_Test_Lamp{7,1}
+    asset.scene_entity_add(&level,1,0,"Lamp")
+    asset.scene_set(&level,1,"Scene_Test_Lamp",&light)
+    testing.expect_value(t,asset.scene_save(&level,fmt.tprintf("%s/level.scene",p.folder)),asset.Error.None)
+    host.assets_scan(&p.assets)
+
+    w:=host.app_world_ref(&p.app,p.world)
+    job,error:=load_begin(&p.app,LEVEL)
+    testing.expect_value(t,error,Error.None)
+    if job==nil {return}
+    progress:=load_progress(job)
+    testing.expect_value(t,progress.phase,Load_Phase.Reading)
+    testing.expect_value(t,len(scene_test_ranges(p.world)),0)
+    for !load_step(job,all=true) {}
+    _,error=load_end(job,w)
+    testing.expect_value(t,error,Error.None)
+    testing.expect(t,slice.equal(scene_test_ranges(p.world),[]f32{7}),"the World holds the scene once it ends")
+
+    _,missing:=load_begin(&p.app,base.Asset_Id{0x3a,9})
+    testing.expect_value(t,missing,Error.Not_Found)
+}
+
+// The bytes of a scene with a lamp on each of count entities, whose lamps
+// do not decompress when broken: what a load reads after it made the
+// entities. The content hash follows the bytes.
+@(private="file")
+scene_test_lamps :: proc(t:^testing.T,types:^asset.Types,id:base.Asset_Id,count:int,range:f32,broken:bool) -> []u8 {
+    level:asset.Scene;asset.scene_init(&level,types,asset.KIND_SCENE,id);defer asset.scene_destroy(&level)
+    light:=Scene_Test_Lamp{range,1}
+    for e in 1..=count {
+        asset.scene_entity_add(&level,base.Entity_Id(e),0,"Lamp")
+        asset.scene_set(&level,base.Entity_Id(e),"Scene_Test_Lamp",&light)
+    }
+    data,error:=asset.scene_bytes(&level,context.temp_allocator)
+    if !testing.expect_value(t,error,asset.Error.None) || !broken {return data}
+    file:asset.Asset
+    if !testing.expect(t,asset.asset_open(&file,data,context.temp_allocator)==.None) {return nil}
+    view,_:=asset.scene_view(&file,types)
+    entry:asset.Chunk_Entry
+    for &component in view.components {
+        if component.name=="Scene_Test_Lamp" {entry=asset.blob_chunk(&file.blob,component.table.columns[1].chunk)}
+    }
+    asset.asset_close(&file)
+    if !testing.expect_value(t,entry.compression,asset.Compression.LZ4) {return nil}
+    mem.set(&data[entry.offset],0xff,int(entry.size))
+    (cast(^asset.Header)raw_data(data)).content_hash=asset.blob_hash(data)
+    return data
+}
+
+// A load instantiates in another World and trades contents with the world
+// only when every entity got there: one that fails halfway leaves the world
+// as it was, and one that works replaces it.
+@(test)
+a_load_that_fails_halfway_leaves_the_world_as_it_was :: proc(t:^testing.T) {
+    p:Scene_Test_Project
+    if !scene_test_project_open(t,&p,"halfway") {return}
+    defer scene_test_project_close(&p)
+    Level :: struct {name:string,id:base.Asset_Id,range:f32,broken:bool}
+    levels:=[3]Level{{"first.scene",{0x1b,1},2,false},{"broken.scene",{0x1b,2},3,true},{"second.scene",{0x1b,3},4,false}}
+    for level in levels {
+        data:=scene_test_lamps(t,&p.types,level.id,64,level.range,level.broken)
+        if !testing.expect(t,data!=nil && serial.file_write_atomic(fmt.tprintf("%s/%s",p.folder,level.name),data)==.None) {return}
+    }
+    w:=host.app_world_ref(&p.app,p.world)
+    _,error:=load(w,&p.app,"first.scene")
+    if !testing.expect_value(t,error,Error.None) {return}
+    first:=core.entity_of(&p.world.entities,base.Entity_Id(1))
+    testing.expect_value(t,p.world.entities.alive,64)
+
+    _,error=load(w,&p.app,"broken.scene")
+    testing.expect_value(t,error,Error.Corrupt)
+    testing.expect_value(t,p.world.entities.alive,64)
+    testing.expect_value(t,core.entity_of(&p.world.entities,base.Entity_Id(1)),first)
+    ranges:=scene_test_ranges(p.world)
+    testing.expect(t,len(ranges)==64 && ranges[0]==2 && ranges[63]==2)
+    testing.expect_value(t,host.app_world_count(&p.app),1)
+
+    _,error=load(w,&p.app,"second.scene")
+    testing.expect_value(t,error,Error.None)
+    testing.expect_value(t,p.world.entities.alive,64)
+    testing.expect(t,!core.alive(&p.world.entities,first))
+    ranges=scene_test_ranges(p.world)
+    testing.expect(t,len(ranges)==64 && ranges[0]==4 && ranges[63]==4)
+}
+
+// The shape of input.Drivable: Entity fields of a component.
+@(private="file") Scene_Test_Drivable :: struct {seat,camera:core.Entity}
+
+@(private="file")
+Scene_Test_World :: struct {
+    entities:core.Entities,
+    ids:core.Table(core.Id),
+    names:core.Table(core.Name),
+    transforms:core.Table(core.Transform),
+    parents:core.Table(core.Parent),
+    worlds:core.Table(core.World_Transform),
+    drivables:core.Table(Scene_Test_Drivable),
+    references:core.Table(Scene_Reference),
+    members:core.Table(Section_Member),
+    dormants:core.Table(Dormant),
+    tombstones:core.Table(Tombstone),
+    disabled:core.Table(core.Disabled),
+    held:core.Table(Section_Held),
+    hierarchy:core.Hierarchy,
+    propagation:core.Propagation,
+    jumps:core.Jumps,
+    time:core.Time,
+    frame:core.Frame_Time,
+}
+
+@(private="file")
+scene_test_settle :: proc(world,shared,editor:rawptr) {
+    w:=cast(^Scene_Test_World)world
+    core.table_settle(&w.ids,&w.entities);core.table_settle(&w.names,&w.entities);core.table_settle(&w.transforms,&w.entities)
+    core.table_settle(&w.parents,&w.entities);core.table_settle(&w.worlds,&w.entities);core.table_settle(&w.drivables,&w.entities)
+    core.table_settle(&w.references,&w.entities);core.table_settle(&w.members,&w.entities)
+    core.table_settle(&w.dormants,&w.entities);core.table_settle(&w.tombstones,&w.entities);core.table_settle(&w.disabled,&w.entities);core.table_settle(&w.held,&w.entities)
+    core.hierarchy_settle(&w.hierarchy,core.read(&w.parents),&w.entities)
+    core.entities_settle(&w.entities)
+}
+
+@(private="file")
+scene_test_clear :: proc(world:rawptr) {
+    w:=cast(^Scene_Test_World)world
+    core.entities_clear(&w.entities)
+    core.table_clear(&w.ids);core.table_clear(&w.names);core.table_clear(&w.transforms);core.table_clear(&w.parents);core.table_clear(&w.worlds);core.table_clear(&w.drivables);core.table_clear(&w.references);core.table_clear(&w.members)
+    core.table_clear(&w.dormants);core.table_clear(&w.tombstones);core.table_clear(&w.disabled);core.table_clear(&w.held)
+    core.hierarchy_clear(&w.hierarchy)
+}
+
+// transforms_propagate as the late phase of a generated world calls it.
+@(private="file")
+scene_test_propagate :: proc(world,shared,editor,app:rawptr,worker:int) {
+    w:=cast(^Scene_Test_World)world
+    core.transforms_propagate(core.read(&w.transforms),core.ref(&w.hierarchy),&w.worlds,&w.propagation,&w.jumps,w.frame)
+    core.table_settle(&w.worlds,&w.entities)
+}
+
+@(private="file")
+Scene_Test_Fixture :: struct {
+    w:Scene_Test_World,
+    tables:[12]core.Table_Info,
+    storages:[3]core.Storage_Info,
+    steps:[1]core.Step_Info,
+    order:[1]i32,
+    info:core.World_Info,
+}
+
+@(private="file")
+scene_fixture_init :: proc(s:^Scene_Test_Fixture) -> core.World_Ref {
+    w:=&s.w
+    core.entities_init(&w.entities)
+    core.table_init(&w.ids,"Id");core.table_init(&w.names,"Name");core.table_init(&w.transforms,"Transform");core.table_init(&w.parents,"Parent");core.table_init(&w.worlds,"World_Transform");core.table_init(&w.drivables,"Drivable");core.table_init(&w.references,"Scene_Reference");core.table_init(&w.members,"Section_Member")
+    core.table_init(&w.dormants,"Dormant");core.table_init(&w.tombstones,"Tombstone");core.table_init(&w.disabled,"Disabled");core.table_init(&w.held,"Section_Held")
+    s.tables={
+        {name="Id",type=core.Id,info=type_info_of(core.Id),offset=offset_of(Scene_Test_World,ids)},
+        {name="Name",type=core.Name,info=type_info_of(core.Name),offset=offset_of(Scene_Test_World,names)},
+        {name="Transform",type=core.Transform,info=type_info_of(core.Transform),offset=offset_of(Scene_Test_World,transforms)},
+        {name="Parent",type=core.Parent,info=type_info_of(core.Parent),offset=offset_of(Scene_Test_World,parents)},
+        {name="World_Transform",type=core.World_Transform,info=type_info_of(core.World_Transform),offset=offset_of(Scene_Test_World,worlds)},
+        {name="Drivable",type=Scene_Test_Drivable,info=type_info_of(Scene_Test_Drivable),offset=offset_of(Scene_Test_World,drivables)},
+        {name="Scene_Reference",type=Scene_Reference,info=type_info_of(Scene_Reference),offset=offset_of(Scene_Test_World,references)},
+        {name="Section_Member",type=Section_Member,info=type_info_of(Section_Member),offset=offset_of(Scene_Test_World,members)},
+        {name="Dormant",type=Dormant,info=type_info_of(Dormant),offset=offset_of(Scene_Test_World,dormants)},
+        {name="Tombstone",type=Tombstone,info=type_info_of(Tombstone),offset=offset_of(Scene_Test_World,tombstones)},
+        {name="Disabled",type=core.Disabled,info=type_info_of(core.Disabled),offset=offset_of(Scene_Test_World,disabled)},
+        {name="Section_Held",type=Section_Held,info=type_info_of(Section_Held),offset=offset_of(Scene_Test_World,held)},
+    }
+    s.storages={
+        {name="Time",type=core.Time,info=type_info_of(core.Time),offset=offset_of(Scene_Test_World,time)},
+        {name="Frame_Time",type=core.Frame_Time,info=type_info_of(core.Frame_Time),offset=offset_of(Scene_Test_World,frame)},
+        {name="Hierarchy",type=core.Hierarchy,info=type_info_of(core.Hierarchy),offset=offset_of(Scene_Test_World,hierarchy)},
+    }
+    s.steps={{name="transforms_propagate",library="core",call=scene_test_propagate}}
+    s.info={entities=offset_of(Scene_Test_World,entities),tables=s.tables[:],storages=s.storages[:],steps=s.steps[:],settle=scene_test_settle,clear=scene_test_clear}
+    s.info.order[.Game][.Late]=s.order[:]
+    return core.world_ref(w,&s.info)
+}
+
+@(private="file")
+scene_fixture_destroy :: proc(s:^Scene_Test_Fixture) {
+    w:=&s.w
+    core.table_destroy(&w.ids);core.table_destroy(&w.names);core.table_destroy(&w.transforms);core.table_destroy(&w.parents);core.table_destroy(&w.worlds);core.table_destroy(&w.drivables);core.table_destroy(&w.references);core.table_destroy(&w.members)
+    core.table_destroy(&w.dormants);core.table_destroy(&w.tombstones);core.table_destroy(&w.disabled);core.table_destroy(&w.held)
+    core.value_free(&w.hierarchy,type_info_of(core.Hierarchy));core.value_free(&w.propagation,type_info_of(core.Propagation));core.value_free(&w.jumps,type_info_of(core.Jumps))
+    core.entities_destroy(&w.entities)
+}
+
+// Saving a scene saves its references and not what hangs from them, which
+// their own scenes keep; a saved game keeps all of it.
+@(test)
+a_capture_leaves_out_what_hangs_from_a_reference :: proc(t:^testing.T) {
+    s:Scene_Test_Fixture
+    ref:=scene_fixture_init(&s)
+    defer scene_fixture_destroy(&s)
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    w:=&s.w
+    room,lamp:=core.create(&w.entities),core.create(&w.entities)
+    core.add(&w.ids,room,core.Id{1});core.add(&w.ids,lamp,core.Id{id_in(1,7)})
+    core.add(&w.references,room,Scene_Reference{scene={9,9}})
+    core.add(&w.parents,lamp,core.Parent{entity=room})
+    core.add(&w.members,lamp,Section_Member{7})
+    scene_test_settle(w,nil,nil)
+    for sections in ([2]bool{false,true}) {
+        document:asset.Scene
+        _,error:=capture(ref,&document,&types,{kind=asset.KIND_SCENE,id={1,2},sections=sections})
+        testing.expect_value(t,error,Error.None)
+        testing.expect_value(t,asset.scene_entity_count(&document),sections?2:1)
+        _,referenced:=asset.scene_get(&document,1,"Scene_Reference",Scene_Reference)
+        testing.expect(t,referenced)
+        asset.scene_destroy(&document)
+    }
+    // The section alone, as its own scene: its entities with the Ids of that scene.
+    section:asset.Scene
+    _,error:=capture(ref,&section,&types,{kind=asset.KIND_SCENE,id={9,9},section=room})
+    testing.expect_value(t,error,Error.None)
+    testing.expect_value(t,asset.scene_entity_count(&section),1)
+    _,found:=asset.scene_entity_find(&section,7)
+    testing.expect(t,found,"the lamp has its Id of the room")
+    asset.scene_destroy(&section)
+}
+
+// A section loaded and off holds what hangs from it under Disabled and keeps
+// its reference on; on again, it turns on only what it turned off.
+@(test)
+a_section_off_holds_what_hangs_from_it_and_lets_go_only_of_that :: proc(t:^testing.T) {
+    s:Scene_Test_Fixture
+    ref:=scene_fixture_init(&s)
+    defer scene_fixture_destroy(&s)
+    w:=&s.w
+    room,lamp,dark:=core.create(&w.entities),core.create(&w.entities),core.create(&w.entities)
+    core.add(&w.references,room,Scene_Reference{scene={9,9},state=.Loaded})
+    core.add(&w.parents,lamp,core.Parent{room,0});core.add(&w.parents,dark,core.Parent{room,1})
+    core.add(&w.disabled,dark,core.Disabled{})
+    scene_test_settle(w,nil,nil)
+    section_hold(ref,room,true)
+    scene_test_settle(w,nil,nil)
+    testing.expect(t,core.has(&w.disabled,lamp) && core.has(&w.disabled,dark) && !core.has(&w.disabled,room))
+    testing.expect(t,core.has(&w.references,room),"its state can still be asked")
+    section_hold(ref,room,false)
+    scene_test_settle(w,nil,nil)
+    testing.expect(t,!core.has(&w.disabled,lamp),"what it turned off turns on")
+    testing.expect(t,core.has(&w.disabled,dark),"what its author turned off stays off")
+}
+
+// A parent at (1,0,0) with a child 2 m above it, captured as a document.
+@(private="file")
+scene_fixture_document :: proc(t:^testing.T,s:^Scene_Test_Fixture,ref:core.World_Ref,types:^asset.Types,file:^asset.Asset) -> bool {
+    w:=&s.w
+    parent,child:=core.create(&w.entities),core.create(&w.entities)
+    core.add(&w.ids,parent,core.Id{1});core.add(&w.ids,child,core.Id{2})
+    core.add(&w.transforms,parent,core.Transform{position={1,0,0},rotation=1,scale={1,1,1}})
+    core.add(&w.transforms,child,core.Transform{position={0,2,0},rotation=1,scale={1,1,1}})
+    core.add(&w.parents,child,core.Parent{entity=parent})
+    scene_test_settle(w,nil,nil)
+    document:asset.Scene
+    _,error:=capture(ref,&document,types,{kind=asset.KIND_SCENE,id={1,2}})
+    if !testing.expect_value(t,error,Error.None) {return false}
+    defer asset.scene_destroy(&document)
+    out:serial.Writer;serial.writer_init(&out,0,context.allocator);defer serial.writer_destroy(&out)
+    if !testing.expect(t,asset.scene_write(&document,&out)==.None) {return false}
+    return testing.expect(t,asset.asset_open(file,serial.writer_bytes(&out),context.allocator)==.None)
+}
+
+// Instantiating gives each entity its Transform and leaves its world
+// transform to the propagation, which a load runs before it returns.
+@(test)
+instantiated_entities_get_their_world_transforms_from_the_propagation :: proc(t:^testing.T) {
+    s:Scene_Test_Fixture
+    ref:=scene_fixture_init(&s)
+    defer scene_fixture_destroy(&s)
+    w,info:=&s.w,&s.info
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    file:asset.Asset
+    if !scene_fixture_document(t,&s,ref,&types,&file) {return}
+    defer asset.asset_close(&file)
+
+    info.clear(w)
+    made:[2]core.Entity
+    report,made_error:=instantiate(ref,&file,&types,{entities=made[:]})
+    if !testing.expect_value(t,made_error,Error.None) {return}
+    scene_test_settle(w,nil,nil)
+    testing.expect_value(t,report.entities,2)
+    testing.expect_value(t,core.count(&w.transforms),2)
+    testing.expect_value(t,core.count(&w.worlds),0)
+
+    app:=host.App{allocator=context.allocator}
+    propagate(ref,&app)
+    testing.expect_value(t,core.count(&w.worlds),2)
+    for e in made {
+        local,_:=core.get(core.read(&w.transforms),e)
+        placed,found:=core.get(core.read(&w.worlds),e)
+        testing.expect(t,found && (local.position=={1,0,0} && placed.position==[3]f32{1,0,0} || local.position=={0,2,0} && placed.position==[3]f32{1,2,0}))
+    }
+}
+
+// Two copies of a document spawned to stay in one frame, beside the entities
+// it came from, each get Ids of their own: the world captures with no
+// Duplicate_Id.
+@(test)
+copies_spawned_to_stay_get_ids_of_their_own :: proc(t:^testing.T) {
+    s:Scene_Test_Fixture
+    ref:=scene_fixture_init(&s)
+    defer scene_fixture_destroy(&s)
+    w:=&s.w
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    file:asset.Asset
+    if !scene_fixture_document(t,&s,ref,&types,&file) {return}
+    defer asset.asset_close(&file)
+
+    for _ in 0..<2 {
+        _,error:=instantiate(ref,&file,&types,{fresh=true})
+        if !testing.expect_value(t,error,Error.None) {return}
+    }
+    scene_test_settle(w,nil,nil)
+    testing.expect_value(t,core.count(&w.ids),6)
+    seen:=make(map[base.Entity_Id]bool,context.temp_allocator)
+    for id in w.ids.values {seen[id.value]=true}
+    testing.expect_value(t,len(seen),6)
+    document:asset.Scene
+    _,error:=capture(ref,&document,&types,{kind=asset.KIND_SCENE,id={1,2}})
+    testing.expect_value(t,error,Error.None)
+    asset.scene_destroy(&document)
+}
+
+// A prefab whose root drives through its child camera, spawned twice as the
+// spawn plugin does (transient): each copy's root names its own child, and a
+// reference to an entity left out of the prefab becomes none.
+@(test)
+spawned_prefabs_keep_their_entity_references_inside :: proc(t:^testing.T) {
+    s:Scene_Test_Fixture
+    ref:=scene_fixture_init(&s)
+    defer scene_fixture_destroy(&s)
+    w,info:=&s.w,&s.info
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+
+    outside,root,camera:=core.create(&w.entities),core.create(&w.entities),core.create(&w.entities)
+    core.add(&w.ids,outside,core.Id{7});core.add(&w.ids,root,core.Id{1});core.add(&w.ids,camera,core.Id{2})
+    core.add(&w.parents,camera,core.Parent{entity=root})
+    core.add(&w.drivables,root,Scene_Test_Drivable{seat=outside,camera=camera})
+    scene_test_settle(w,nil,nil)
+    document:asset.Scene
+    captured,capture_error:=capture(ref,&document,&types,{root=root,id={3,4}})
+    if !testing.expect_value(t,capture_error,Error.None) {return}
+    testing.expect_value(t,captured.dangling,1)
+    defer asset.scene_destroy(&document)
+    out:serial.Writer;serial.writer_init(&out,0,context.allocator);defer serial.writer_destroy(&out)
+    if !testing.expect(t,asset.scene_write(&document,&out)==.None) {return}
+    file:asset.Asset
+    if !testing.expect(t,asset.asset_open(&file,serial.writer_bytes(&out),context.allocator)==.None) {return}
+    defer asset.asset_close(&file)
+    testing.expect_value(t,file.blob.header.kind,asset.KIND_PREFAB)
+
+    info.clear(w)
+    made:[2][2]core.Entity
+    for &copy in made {
+        report,error:=instantiate(ref,&file,&types,{transient=true,entities=copy[:]})
+        if !testing.expect_value(t,error,Error.None) {return}
+        testing.expect_value(t,report.root,copy[0])
+        testing.expect_value(t,report.dangling,0)
+    }
+    scene_test_settle(w,nil,nil)
+    for copy in made {
+        drivable,found:=core.get(core.read(&w.drivables),copy[0])
+        testing.expect(t,found)
+        testing.expect_value(t,drivable.camera,copy[1])
+        testing.expect_value(t,drivable.seat,core.NONE)
+    }
+}
+
+// What the world uses one of, as a sky.
+@(private="file") Scene_Test_Sky :: struct {luminance:f32}
+
+@(private="file")
+Sky_World :: struct {
+    entities:core.Entities,
+    ids:core.Table(core.Id),
+    names:core.Table(core.Name),
+    transforms:core.Table(core.Transform),
+    parents:core.Table(core.Parent),
+    skies:core.Table(Scene_Test_Sky),
+}
+
+@(private="file")
+sky_world_settle :: proc(data,shared,editor:rawptr) {
+    w:=cast(^Sky_World)data
+    core.table_settle(&w.ids,&w.entities);core.table_settle(&w.names,&w.entities);core.table_settle(&w.transforms,&w.entities)
+    core.table_settle(&w.parents,&w.entities);core.table_settle(&w.skies,&w.entities)
+    core.entities_settle(&w.entities)
+}
+
+// A prefab placed in a scene document loads with it as rows of the root, and
+// its sky comes off as that of a section or of a prefab placed while playing,
+// before the sky of the root in the document too: the root's rules. Turned on,
+// it rules; turned off again, the root's is on again.
+@(test)
+the_sky_of_a_prefab_in_a_scene_document_loads_off :: proc(t:^testing.T) {
+    w:Sky_World
+    core.entities_init(&w.entities)
+    core.table_init(&w.ids,"Id");core.table_init(&w.names,"Name");core.table_init(&w.transforms,"Transform")
+    core.table_init(&w.parents,"Parent");core.table_init(&w.skies,"Scene_Test_Sky")
+    w.skies.single=true
+    defer {
+        core.table_destroy(&w.ids);core.table_destroy(&w.names);core.table_destroy(&w.transforms)
+        core.table_destroy(&w.parents);core.table_destroy(&w.skies)
+        core.entities_destroy(&w.entities)
+    }
+    tables:=[?]core.Table_Info{
+        {name="Id",type=core.Id,info=type_info_of(core.Id),offset=offset_of(Sky_World,ids)},
+        {name="Name",type=core.Name,info=type_info_of(core.Name),offset=offset_of(Sky_World,names)},
+        {name="Transform",type=core.Transform,info=type_info_of(core.Transform),offset=offset_of(Sky_World,transforms)},
+        {name="Parent",type=core.Parent,info=type_info_of(core.Parent),offset=offset_of(Sky_World,parents)},
+        {name="Scene_Test_Sky",type=Scene_Test_Sky,info=type_info_of(Scene_Test_Sky),offset=offset_of(Sky_World,skies),single=true},
+    }
+    info:=core.World_Info{entities=offset_of(Sky_World,entities),tables=tables[:],settle=sky_world_settle}
+    ref:=core.world_ref(&w,&info)
+
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    doc:asset.Scene
+    if !testing.expect_value(t,asset.scene_init(&doc,&types,asset.KIND_SCENE,{0x5c,1}),asset.Error.None) {return}
+    defer asset.scene_destroy(&doc)
+    PLACED,ROOT_SKY :: base.Entity_Id(1),base.Entity_Id(5)
+    asset.scene_entity_add(&doc,PLACED,0,"Placed")
+    asset.scene_entity_add(&doc,ROOT_SKY,0,"Sky")
+    asset.scene_set(&doc,PLACED,"Scene_Test_Sky",&Scene_Test_Sky{2})
+    asset.scene_set(&doc,ROOT_SKY,"Scene_Test_Sky",&Scene_Test_Sky{1000})
+    append(&doc.instances,asset.Instance{id=1,prefab={0x5d,1},root=PLACED})
+    append(&doc.members,asset.Member{instance=1,source=1,entity=PLACED})
+    out:serial.Writer;serial.writer_init(&out,0,context.allocator);defer serial.writer_destroy(&out)
+    if !testing.expect(t,asset.scene_write(&doc,&out)==.None) {return}
+    file:asset.Asset
+    if !testing.expect(t,asset.asset_open(&file,serial.writer_bytes(&out),context.allocator)==.None) {return}
+    defer asset.asset_close(&file)
+
+    _,error:=instantiate(ref,&file,&types)
+    if !testing.expect_value(t,error,Error.None) {return}
+    core.world_settle(ref)
+    placed,root:=core.NONE,core.NONE
+    for id,row in w.ids.values {
+        if id.value==PLACED {placed=w.ids.entities[row]}
+        if id.value==ROOT_SKY {root=w.ids.entities[row]}
+    }
+    on :: proc(w:^Sky_World,e:core.Entity) -> bool {
+        on,_,_:=core.raw_state(core.raw(&w.skies),e)
+        return on
+    }
+    testing.expect(t,on(&w,root) && !on(&w,placed),"the sky of the root rules; that of the prefab loads off")
+    core.enable(&w.skies,placed)
+    core.world_settle(ref)
+    testing.expect(t,on(&w,placed) && !on(&w,root),"turned on, the prefab's rules")
+    core.disable(&w.skies,placed)
+    core.world_settle(ref)
+    testing.expect(t,on(&w,root) && !on(&w,placed),"turned off, the root's is on again")
+}

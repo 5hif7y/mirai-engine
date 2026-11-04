@@ -70,7 +70,7 @@ same scene, at the same time. Connect your favorite agent inside the editor, or 
   declare in their signature exactly what they read and write.
 - **ECS, not OOP.** No classes, no inheritance trees, no virtual `Update()` on every object
 
-### Zero C++, fast to build
+### Modern, fast to build
 
 - **All in [Odin](https://odin-lang.org).** One fast compiler, readable code, no header soup and no multi-hour engine rebuilds.
 - **Code reloads into the running editor.** Change your game, build, and keep editing the same

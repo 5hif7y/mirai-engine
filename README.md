@@ -23,6 +23,12 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-2ea44f">
 </p>
 
+<p align="center">
+  <a href="https://discord.gg/xeq5unRgG"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865f2?logo=discord&logoColor=white"></a>
+  <a href="https://x.com/mirai3d"><img alt="X" src="https://img.shields.io/badge/X-@mirai3d-000000?logo=x&logoColor=white"></a>
+  <a href="https://github.com/sponsors/tomaszbk"><img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-%E2%99%A5-db61a2?logo=githubsponsors&logoColor=white"></a>
+</p>
+
 ---
 
 Mirai is a native 3D engine and editor where people and AI agents build the same game, in the
@@ -141,9 +147,13 @@ The layers and contracts are in [ARCHITECTURE.md](docs/ARCHITECTURE.md) and the 
 ## Help us make it better
 
 Mirai is young and moves fast, so yes, there are bugs. If something breaks, looks wrong or is
-harder than it should be, [open an issue](https://github.com/mirai-engine/mirai/issues) with the steps
-to reproduce it — or send a pull request. Bug reports, fixes, plugins and demo scenes are all
-welcome, from humans and agents alike.
+harder than it should be, [open an issue](https://github.com/mirai-engine/mirai/issues) with the
+steps to reproduce it — or send a pull request. Bug reports, fixes, plugins and demo scenes are
+all welcome, from humans and agents alike.
+
+Come say hi on [Discord](https://discord.gg/xeq5unRgG), follow [@mirai3d](https://x.com/mirai3d)
+on X for news, and if Mirai is useful to you,
+[sponsor its development](https://github.com/sponsors/tomaszbk).
 
 ## License
 

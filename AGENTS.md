@@ -230,10 +230,6 @@ Every turn rereads the whole context: the cost grows with its size and with the 
 - **Short waits.** No command blocks for more than 4 minutes or polls with `sleep`, `until`,
   `tail -f` or a long `timeout`: what takes longer runs in the background and is read once when it
   finishes. A longer wait expires the cache and the next turn writes the context again.
-- **Bounded context.** Sessions and subagents compact on their own at ~600k tokens
-  (`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in `.claude/settings.json`). A subagent that passes that size
-  without compacting commits what it did on its branch, reports what it did, what is missing and
-  where it stopped, and ends.
 - **Closed assignment.** The prompt of a session or subagent names a concrete item, what done is
   and how it is verified; "solve section X" is not an assignment. The final report has at most 300
   words and does not copy diffs or outputs.

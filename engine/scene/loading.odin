@@ -239,7 +239,10 @@ load_read :: proc(job:^Load_Job,worker:int) {
         job.error=error
         return
     }
-    job.report,job.error=instantiate(w,root,&job.types,{documents=documents,salt=job.salt})
+    // One store per value until odin-lang/Odin#7937
+    report,instantiated:=instantiate(w,root,&job.types,{documents=documents,salt=job.salt})
+    job.report=report
+    job.error=instantiated
     if job.error!=.None {return}
     core.world_settle(w)
     if job.far {far_keep(w)}

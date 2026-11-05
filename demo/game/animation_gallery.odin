@@ -110,7 +110,7 @@ Animation_Gallery_Diagnostics :: struct {
 // The bodies of the gallery that walk on their own go back and forth along the walkway; the jumper
 // jumps its obstacle. One that fell or wandered off goes back to its station.
 @(step="fixed",after="gallery_player_move")
-gallery_move_inputs :: proc(gallery:core.Read(Animation_Gallery),inputs:^core.Table(inp.Move_Input),walks:core.Read(phys.Walk),worlds:core.Read(core.World_Transform),placer:core.Placer,seats:inp.Players,time:core.Time) {
+gallery_move_inputs :: proc(gallery:core.Read(Animation_Gallery),inputs:^core.Table(inp.Move_Input),walks:core.Read(phys.Walk),worlds:core.Read(core.World_Transform),placer:core.Placer,seats:inp.Players,walk_actions:inp.Input_Of(phys.Walk_Action),time:core.Time) {
     for row in 0..<core.count(gallery) {
         entity:=core.entity_at(gallery,row)
         item:=core.at(gallery,row)
@@ -151,7 +151,7 @@ gallery_move_inputs :: proc(gallery:core.Read(Animation_Gallery),inputs:^core.Ta
         gallery_move(input,placed.rotation,wish,time.dt)
         // The jumper takes off just before the obstacle at its origin when it walks toward it.
         ahead:=(item.origin.z-placed.position.z)*math.sign(delta)
-        if item.kind==.Jumper && ahead>.7 && ahead<1.05 {input.buttons|=inp.action_bit(phys.JUMP)}
+        if item.kind==.Jumper && ahead>.7 && ahead<1.05 {input.buttons|=inp.action_bit(inp.action_of(walk_actions,.Jump))}
         if placed.position.y< -2 || linalg.length((placed.position-item.origin).xz)>4 {core.place(placer,entity,home)}
     }
 }

@@ -101,9 +101,11 @@ the same attributes and no private paths. Declaration and parameter binding:
     game mode, after the step of that mode).
   - `animation_sample`/`animation_advance`: buffers and results of `Playback`.
   - The rest is requested.
-- **Input arrives through actions**, constants of `inp.Action` that the code declares and that are
-  read by id; the project's `input.mirai` gives them type and bindings by name, over the defaults
-  that a plugin declares as data. Reading raw `core.Input` is for cases like Escape.
+- **Input arrives through actions**, members of an enum `@(actions)` of each library, with their
+  kind and default bindings (`[E]inp.Action_Default`), read by member through `inp.Input_Of(E)`;
+  nobody writes an action's number. `input.mirai` is not
+  written by hand: it holds only what Project Settings > Input, `input.set` or the player changed.
+  Reading raw `core.Input` is for cases like Escape.
 - **Seats and movement.** A player is a seat (`inp.Seat`), of this machine or of a connection,
   without telling them apart; it drives a body with `Drivable` and carries its actions. Locomotion
   turns the body's `Move_Input` into movement: the seat writes it according to `move_relative_to`,

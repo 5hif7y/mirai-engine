@@ -52,16 +52,22 @@ physics_twins :: proc(state:^Physics_State,twins:core.Read(Body_Twin),cuts:core.
         case .Character: cut.body=sim.character_body(w,l.character)
         }
         c:=core.at(cuts,row)
-        for box in c.boxes[:clamp(c.count,0,COLLIDER_CUT_CAPACITY)] {
-            if count==len(list) {
-                core.report(problems,e,"physics.cuts","the simulation takes %d boxes of Collider_Cuts in all, and the entities that have one ask for more: the boxes after those are left out; cut fewer colliders at once",sim.CUT_CAPACITY)
-                break
-            }
+        // The pieces of a compound are cut as its first shape is.
+        pieces:=l.kind==.Compound?pieces_of(state,l):nil
+        boxes: for box in c.boxes[:clamp(c.count,0,COLLIDER_CUT_CAPACITY)] {
             rotation:=linalg.normalize(box.rotation)
             if !(abs(rotation.w)<=1) {rotation=1}
             cut.region={box.center,rotation,{abs(box.half.x),abs(box.half.y),abs(box.half.z)}}
-            list[count]=cut
-            count+=1
+            for at in -1..<len(pieces) {
+                if count==len(list) {
+                    core.report(problems,e,"physics.cuts","the simulation takes %d boxes of Collider_Cuts in all, and the entities that have one ask for more: the boxes after those are left out; cut fewer colliders at once",sim.CUT_CAPACITY)
+                    break boxes
+                }
+                if at>=0 {cut.shape=pieces[at].shape}
+                list[count]=cut
+                count+=1
+            }
+            if len(pieces)>0 {cut.shape=l.shape}
         }
     }
     if !sim.world_set_cuts(w,list[:count]) {
@@ -109,6 +115,15 @@ collider_raycast :: proc(physics:core.Ref(Physics_State),e:core.Entity,origin,di
     shape:=l.kind==.Character?sim.character_shape(&physics.world,l.character):l.shape
     length:=linalg.length(direction)
     if !(length>1e-12 && length<=max(f32)) {return}
-    found:=sim.shape_ray_cast(&physics.world,shape,origin,direction*(max_distance/length)) or_return
+    ray:=direction*(max_distance/length)
+    found:sim.Ray_Hit
+    found,ok=sim.shape_ray_cast(&physics.world,shape,origin,ray)
+    // The nearest of the pieces of a hull made of several.
+    for piece in pieces_of(physics.ptr,l) {
+        if near,hit_piece:=sim.shape_ray_cast(&physics.world,piece.shape,origin,ray);hit_piece && (!ok || near.fraction<found.fraction) {
+            found,ok=near,true
+        }
+    }
+    if !ok {return}
     return hit_of(&physics.world,found,max_distance),true
 }

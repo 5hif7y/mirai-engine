@@ -11,19 +11,28 @@ import "mirai:project"
 import "mirai:std/base"
 import "mirai:std/serial"
 
+// An enum @(actions) at the base 0, and an action of the game at 40.
+@(private="file") Input_Test_Action :: enum u8 {Move,Jump}
 @(private="file") MOVE :: input.Action(0)
-@(private="file") JUMP :: input.Action(2)
+@(private="file") JUMP :: input.Action(1)
 @(private="file") HIT :: input.Action(40)
 
-@(private="file") Input_Defaults :: struct {defaults:[2]input.Action_Default}
+@(private="file") Input_Defaults :: struct {defaults:[Input_Test_Action]input.Action_Default}
 @(private="file") Input_World :: struct {entities:core.Entities,bindings:input.Input_Map,defaults:Input_Defaults}
 
 @(private="file")
 input_defaults :: proc(dst:rawptr) {
     (^Input_Defaults)(dst)^={defaults={
-        input.action_default(MOVE,.Axis2,input.binding_keys(.A,.D,.S,.W),input.binding_gamepad_stick(.Left)),
-        input.action_default(JUMP,.Button,input.binding_key(.Space)),
+        .Move=input.action_default(.Axis2,input.binding_keys(.A,.D,.S,.W),input.binding_gamepad_stick(.Left)),
+        .Jump=input.action_default(.Button,input.binding_key(.Space)),
     }}
+}
+
+@(private="file")
+input_test_actions :: proc() -> []core.Actions_Info {
+    @(static) actions:[1]core.Actions_Info
+    actions[0]={type=Input_Test_Action,info=type_info_of(Input_Test_Action)}
+    return actions[:]
 }
 
 @(private="file")
@@ -56,7 +65,7 @@ input_fixture :: proc(t:^testing.T,f:^Input_Fixture) -> bool {
     f.folder=folder
     f.names={
         {type=input.Action,value=0,name="move",file="engine/input/input.odin",line=1},
-        {type=input.Action,value=2,name="jump",file="engine/input/input.odin",line=2},
+        {type=input.Action,value=1,name="jump",file="engine/input/input.odin",line=2},
         {type=input.Action,value=40,name="hit",library="game",file="game/game.odin",line=3,project=true},
     }
     f.storages={
@@ -64,7 +73,7 @@ input_fixture :: proc(t:^testing.T,f:^Input_Fixture) -> bool {
         {name="Input_Map",type=input.Input_Map,info=type_info_of(input.Input_Map),offset=offset_of(Input_World,bindings)},
         {name="Input_Defaults",type=Input_Defaults,info=type_info_of(Input_Defaults),offset=offset_of(Input_World,defaults),default=input_defaults},
     }
-    f.info={entities=offset_of(Input_World,entities),names=f.names[:],storages=f.storages[:],settle=input_settle}
+    f.info={entities=offset_of(Input_World,entities),names=f.names[:],storages=f.storages[:],actions=input_test_actions(),settle=input_settle}
     core.entities_init(&f.world.entities)
     f.session=Session{info=&f.info,edit_world=&f.world,editor_world=&f.api_storage,app=&f.app,selection=&f.selection,viewport=&f.viewport,gui=&f.gui,edits=&f.edits,inspector=&f.inspector,project_root=folder,has_project=true}
     edits_reset(&f.edits,edited_world(&f.session))
@@ -113,7 +122,7 @@ input_set_writes_only_what_differs_and_reset_brings_back_the_code :: proc(t:^tes
 
     text,error:=input_call(f,"input.get","{}")
     testing.expect_value(t,error.code,0)
-    for want in ([]string{`"tap_ticks":12`,`"hold_ticks":30`,`"problem":""`,`{"name":"move","value":0,"kind":"Axis2","source":"code","bindings":[{"keys": ["A", "D", "S", "W"]}, {"gamepad_stick": "Left"}]}`,`{"name":"hit","value":40,"kind":"Button","source":"code","bindings":[]}`}) {
+    for want in ([]string{`"tap_ticks":12`,`"hold_ticks":30`,`"problem":""`,`{"name":"move","kind":"Axis2","source":"code","bindings":[{"keys": ["A", "D", "S", "W"]}, {"gamepad_stick": "Left"}]}`,`{"name":"hit","kind":"Button","source":"code","bindings":[]}`}) {
         testing.expectf(t,strings.contains(text,want),"%q is not in %s",want,text)
     }
     _,exists:=input_file(f)
@@ -122,7 +131,7 @@ input_set_writes_only_what_differs_and_reset_brings_back_the_code :: proc(t:^tes
     f.world.bindings.built=true
     text,error=input_call(f,"input.set",`{"action":"jump","bindings":[{"key":"J"},{"gamepad_button":"South","gamepad":1}]}`)
     testing.expect_value(t,error.code,0)
-    testing.expect(t,strings.contains(text,`{"name":"jump","value":2,"kind":"Button","source":"file","bindings":[{"key": "J"}, {"gamepad_button": "South", "gamepad": 1}]}`),text)
+    testing.expect(t,strings.contains(text,`{"name":"jump","kind":"Button","source":"file","bindings":[{"key": "J"}, {"gamepad_button": "South", "gamepad": 1}]}`),text)
     testing.expect(t,!f.world.bindings.built,"the edited World builds its map again from the file")
     file,_:=input_file(f)
     testing.expect(t,strings.contains(file,`"jump"`) && !strings.contains(file,`"move"`) && !strings.contains(file,`"hit"`),file)
@@ -143,12 +152,12 @@ input_set_writes_only_what_differs_and_reset_brings_back_the_code :: proc(t:^tes
     actions:input.Actions
     device:=core.Input{keys_down={.E,.J},keys_pressed={.E,.J}}
     input.actions_update(&actions,&built,&device)
-    testing.expect_value(t,input.action_value(&actions,HIT),f32(2))
-    testing.expect(t,input.action_pressed(&actions,JUMP))
+    testing.expect_value(t,input.action(&actions,HIT).value,f32(2))
+    testing.expect(t,input.action(&actions,JUMP).pressed)
 
     text,error=input_call(f,"input.set",`{"action":"jump","reset":true}`)
     testing.expect_value(t,error.code,0)
-    testing.expect(t,strings.contains(text,`{"name":"jump","value":2,"kind":"Button","source":"code","bindings":[{"key": "Space"}]}`),text)
+    testing.expect(t,strings.contains(text,`{"name":"jump","kind":"Button","source":"code","bindings":[{"key": "Space"}]}`),text)
     file,_=input_file(f)
     testing.expect(t,!strings.contains(file,`"jump"`) && strings.contains(file,`"hit"`),file)
 
@@ -267,9 +276,9 @@ a_binding_chosen_from_the_menus_is_written :: proc(t:^testing.T) {
 // takes another key alone.
 @(test)
 a_listening_binding_takes_what_is_pressed :: proc(t:^testing.T) {
-    names:=[]core.Name_Info{{type=input.Action,value=0,name="move"},{type=input.Action,value=2,name="jump"}}
+    names:=[]core.Name_Info{{type=input.Action,value=0,name="move"},{type=input.Action,value=1,name="jump"}}
     storages:=[]core.Storage_Info{{name="Input_Defaults",type=Input_Defaults,info=type_info_of(Input_Defaults),default=input_defaults}}
-    info:=core.World_Info{names=names,storages=storages}
+    info:=core.World_Info{names=names,storages=storages,actions=input_test_actions()}
     st:=new(Input_Settings,context.temp_allocator)
     input.input_map_make(&st.code,&info,"","",nil)
     st.current=st.code

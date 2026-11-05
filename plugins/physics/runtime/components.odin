@@ -127,8 +127,8 @@ collider_character :: proc "contextless" (radius:f32=0.3,height:f32=1.8) -> Coll
 // opposite of the gravity it feels, at up_speed. Its Character_Move drives it,
 // which its locomotion writes in the mode it is in (locomotion.odin). Its
 // size, mass and step_height take effect by making the character again; the
-// simulation reads only its fields up to up_speed, and the locomotion writes
-// the rest.
+// simulation reads only its fields up to locks, and the locomotion writes the
+// rest.
 @(component,replicated,locks="core.Transform",description="A physical character that stands on walkable ground, steps and pushes, moved by its Move_Input in the mode it is in, with the parameters of the component of that mode (Walk, Fly...).")
 Character :: struct {
     mass:f32 `mirai:"min=0,unit=kg"`, // 0: from the density of the capsule
@@ -140,6 +140,7 @@ Character :: struct {
     push_force:f32 `mirai:"min=0,unit=N"`, // most of the traction passed to a dynamic body it leans on; 0: all of it
     density:f32 `mirai:"min=0,unit=kg/m3"`, // of the body in a fluid, whose volume is its mass over this: 985 a person; 0: no buoyancy
     up_speed:f32 `mirai:"angle,min=0,unit=deg/s"`, // its up turns toward the opposite of its gravity: around a planet; 0: it keeps its up
+    locks:Body_Locks,                       // world axes the simulation never moves its feet along, as for a Rigid_Body; a place still does. Its move turns it: the angular ones do nothing
     mode:Locomotion_Mode,                   // the one it starts in; then the one it is in
     move_relative_to:Move_Relative,         // forward, for the seat that drives it
     pitch_limit:f32 `mirai:"angle,min=0"`,  // of the look a seat gives it, up and down from level
@@ -171,7 +172,7 @@ character_default :: proc "contextless" () -> Character {
 character_body_same :: proc "contextless" (a,b:Character) -> bool {
     return a.mass==b.mass && a.max_slope==b.max_slope && a.step_height==b.step_height && a.traction_force==b.traction_force &&
         a.adhesion_force==b.adhesion_force && a.gravity_scale==b.gravity_scale && a.push_force==b.push_force && a.density==b.density &&
-        a.up_speed==b.up_speed
+        a.up_speed==b.up_speed && a.locks==b.locks
 
 }
 

@@ -175,22 +175,48 @@ entity_named :: proc(names:core.Read(core.Name),text:string) -> core.Entity {
     return core.NONE
 }
 
-// The actions the game reads; ../input.mirai binds them. move, look and jump are of physics.
-USE :: inp.Action(16)
-FLASHLIGHT :: inp.Action(17)
-THROW :: inp.Action(18)
-BARK :: inp.Action(19)
-SWITCH_BODY :: inp.Action(20)
-OVERHEAD_VIEW :: inp.Action(21)
-GALLERY_PREVIOUS :: inp.Action(22)
-GALLERY_NEXT :: inp.Action(23)
-GALLERY_OVERVIEW :: inp.Action(24)
-PHYSICS_RESET :: inp.Action(25)
-PORTAL_BLUE :: inp.Action(27)
-PORTAL_ORANGE :: inp.Action(28)
-GRAB :: inp.Action(29)
-CAMERA_MODE :: inp.Action(30)
-AIM :: inp.Action(31)
+// The actions the game reads, bound by Demo_Actions, those of interface_demo.odin too; move and
+// jump are of physics (phys.Walk_Action) and look of the engine (inp.Look_Action).
+@(actions)
+Action :: enum u8 {
+    Use,Flashlight,Throw,Bark,Switch_Body,Overhead_View,
+    Gallery_Previous,Gallery_Next,Gallery_Overview,Physics_Reset,
+    Portal_Blue,Portal_Orange,Grab,Camera_Mode,Aim,
+    Hud_Style,Menu,Inventory,Talk,
+}
+
+// The bindings of the actions of the demo. The editor (Project Settings > Input), input.set and
+// the player write in an input.mirai only what they change.
+@(storage,host)
+Demo_Actions :: struct {defaults:[Action]inp.Action_Default}
+
+demo_actions_default :: proc "contextless" () -> Demo_Actions {
+    key :: inp.binding_key
+    pad :: inp.binding_gamepad_button
+    mouse :: inp.binding_mouse_button
+    trigger :: inp.binding_gamepad_axis
+    return {defaults={
+        .Use=inp.action_default(.Button,key(.E),pad(.West)),
+        .Flashlight=inp.action_default(.Button,key(.F),pad(.East)),
+        .Throw=inp.action_default(.Button,mouse(.Left),trigger(.Right_Trigger)),
+        .Bark=inp.action_default(.Button,key(.E),pad(.West)),
+        .Switch_Body=inp.action_default(.Button,key(.Tab),pad(.North)),
+        .Overhead_View=inp.action_default(.Button,key(.V),pad(.Right_Shoulder)),
+        .Gallery_Previous=inp.action_default(.Button,key(.Left)),
+        .Gallery_Next=inp.action_default(.Button,key(.Right)),
+        .Gallery_Overview=inp.action_default(.Button,key(.Home)),
+        .Physics_Reset=inp.action_default(.Button,key(.R)),
+        .Portal_Blue=inp.action_default(.Button,mouse(.Left),trigger(.Left_Trigger)),
+        .Portal_Orange=inp.action_default(.Button,mouse(.Right),pad(.Left_Shoulder)),
+        .Grab=inp.action_default(.Button,key(.E),pad(.West)),
+        .Camera_Mode=inp.action_default(.Button,key(.C),pad(.Left_Stick)),
+        .Aim=inp.action_default(.Button,mouse(.Right),trigger(.Left_Trigger)),
+        .Hud_Style=inp.action_default(.Button,key(.H),pad(.Dpad_Up)),
+        .Menu=inp.action_default(.Button,key(.M),pad(.Start)),
+        .Inventory=inp.action_default(.Button,key(.I),pad(.Back)),
+        .Talk=inp.action_default(.Button,key(.T),pad(.Right_Stick)),
+    }}
+}
 
 // Keeps the mouse for the camera until Escape frees it; the animation gallery frees it while its
 // player adjusts a panel.
@@ -221,7 +247,7 @@ swatch_index :: proc(swatch:Swatch) -> int {return int(swatch.index)%%len(SWATCH
 @(step="fixed")
 game_use :: proc(
     players:^core.Table(Player),doors:^core.Table(Door),swatches:^core.Table(Swatch),inputs:core.Read(inp.Move_Input),
-    seats:inp.Players,worlds:core.Read(core.World_Transform),names:core.Read(core.Name),spawns:^scene.Spawns,
+    actions:inp.Input_Of(Action),worlds:core.Read(core.World_Transform),names:core.Read(core.Name),spawns:^scene.Spawns,
 ) {
     for row in 0..<core.count(players) {
         e:=core.entity_at(players,row)
@@ -229,7 +255,7 @@ game_use :: proc(
         placed,has_world:=core.get(worlds,e)
         if !has_input || !has_world {continue}
         feet:=placed.position
-        if inp.pressed(seats,e,USE) {
+        if inp.pressed(actions,e,.Use) {
             for at in 0..<core.count(doors) {
                 door:=core.at(doors,at)
                 other:=core.entity_at(doors,at)
@@ -242,7 +268,7 @@ game_use :: proc(
                 if in_reach(worlds,feet,core.entity_at(swatches,at),swatch.reach) {swatch.index=i32((swatch_index(swatch^)+1)%len(SWATCH_MATERIALS))}
             }
         }
-        if inp.pressed(seats,e,THROW) {
+        if inp.pressed(actions,e,.Throw) {
             aim:=aim_of(input.look_yaw,input.look_pitch)
             from:=feet+[3]f32{0,EYE_HEIGHT,0}+aim*0.8
             turn:=mm.quat_from_euler({input.look_pitch,input.look_yaw,0})

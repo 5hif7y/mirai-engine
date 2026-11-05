@@ -551,6 +551,8 @@ finalize_task :: proc(data:rawptr,first,last,worker:int) #no_bounds_check {
         index:=st.awake[i]
         body:=&w.bodies[index]
         solved:=&st.bodies[i]
+        // The passes after the last move of the substeps leave velocity along locked axes that never moves the body.
+        if body.flags&BODY_LOCKS!={} && st.params[i].inv_mass>0 {solved.v,solved.w=locks_apply(body.flags,solved.v,solved.w)}
         body.linear_velocity,body.angular_velocity=solved.v,solved.w
         body.center+=solved.dp
         body.rotation=q_normalize(solved.dq*body.rotation)

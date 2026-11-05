@@ -44,20 +44,20 @@ PHYSICS_GALLERY_VIEW_DEFAULT :: Physics_Gallery_View{station=-1}
 Physics_Gallery_Motion :: struct {origin:mm.Vec3,axis:mm.Vec3,amplitude,frequency:f32}
 
 @(step="input")
-physics_gallery_reset :: proc(views:core.Read(Physics_Gallery_View),actions:core.Ref(inp.Frame_Actions),scenes:^scene.Scene_Requests) {
-    if core.count(views)>0 && inp.action_pressed(&actions.actions,PHYSICS_RESET) {scene.request_path(scenes,PHYSICS_GALLERY_SCENE)}
+physics_gallery_reset :: proc(views:core.Read(Physics_Gallery_View),actions:inp.Frame_Input_Of(Action),scenes:^scene.Scene_Requests) {
+    if core.count(views)>0 && inp.pressed(actions,.Physics_Reset) {scene.request_path(scenes,PHYSICS_GALLERY_SCENE)}
 }
 
 @(step="fixed")
 physics_gallery_actions :: proc(
-    views:^core.Table(Physics_Gallery_View),stations:^core.Table(Physics_Gallery),actions:core.Ref(inp.Actions),
+    views:^core.Table(Physics_Gallery_View),stations:^core.Table(Physics_Gallery),actions:inp.Input_Of(Action),
     requests:^destruct.Destruct_Requests,bodies:^phys.Body_Requests,field_configs:^core.Table(fields.Physics_Field),
     caches:^cache.Geometry_Requests,ragdolls:^Ragdoll_Gallery_Requests,time:core.Time,
     view:destruct.Destruct_View,
 ) {
     if !time.playing || !(time.dt>0) || core.count(core.read(views))==0 {return}
-    previous,next,overview:=inp.action_pressed(actions.ptr,GALLERY_PREVIOUS),inp.action_pressed(actions.ptr,GALLERY_NEXT),inp.action_pressed(actions.ptr,GALLERY_OVERVIEW)
-    use:=inp.action_pressed(actions.ptr,USE)
+    previous,next,overview:=inp.pressed(actions,.Gallery_Previous),inp.pressed(actions,.Gallery_Next),inp.pressed(actions,.Gallery_Overview)
+    use:=inp.pressed(actions,.Use)
     if previous || next || overview || use {for &view in core.writable(views) {
         if overview {view.station=-1}
         if previous {view.station=(view.station+PHYSICS_GALLERY_STATIONS-1)%%PHYSICS_GALLERY_STATIONS if view.station>=0 else PHYSICS_GALLERY_STATIONS-1}

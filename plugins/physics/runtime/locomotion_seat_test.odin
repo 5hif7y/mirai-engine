@@ -68,7 +68,9 @@ seat_test_settle :: proc(f:^Seat_Test) {
 
 @(private="file")
 seat_test_run :: proc(f:^Seat_Test) {
-    locomotion_seat(core.read(&f.characters),&f.moves,core.read(&f.states),core.read(&f.drivables),core.read(&f.seats),core.ref(&f.bindings),core.read(&f.follows),core.ref(&f.shown),core.read(&f.cameras),core.read(&f.worlds),core.read(&f.remotes),{},{},{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&f.problems)
+    walk:=input.Input_Of(Walk_Action){seats=core.read(&f.seats),drivables=core.read(&f.drivables),base=TEST_WALK_BASE}
+    look:=input.Input_Of(input.Look_Action){seats=core.read(&f.seats),drivables=core.read(&f.drivables)}
+    locomotion_seat(core.read(&f.characters),&f.moves,core.read(&f.states),core.read(&f.drivables),walk,look,core.ref(&f.bindings),core.read(&f.follows),core.ref(&f.shown),core.read(&f.cameras),core.read(&f.worlds),core.read(&f.remotes),{},{},{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&f.problems)
 }
 
 // A character facing +X (yaw π/2, as locomotion_step leaves the look of one that stands so) and its Move_Input.
@@ -96,12 +98,13 @@ seat_test_seat :: proc(f:^Seat_Test) -> core.Entity {
 // The input map of a world whose code declares the walk actions, without input.mirai.
 @(private="file")
 seat_test_map :: proc(m:^input.Input_Map,problems:^core.Problems) {
-    names:=[]core.Name_Info{{type=input.Action,value=i64(MOVE),name="move"},{type=input.Action,value=i64(input.LOOK),name="look"},{type=input.Action,value=i64(JUMP),name="jump"}}
+    names:=[]core.Name_Info{{type=input.Action,value=0,name="look"},{type=input.Action,value=i64(TEST_MOVE),name="move"},{type=input.Action,value=i64(TEST_JUMP),name="jump"}}
     storages:=[]core.Storage_Info{
         {name="Walk_Actions",type=Walk_Actions,info=type_info_of(Walk_Actions),default=proc(dst:rawptr) {(cast(^Walk_Actions)dst)^=walk_actions_default()}},
         {name="Look_Actions",type=input.Look_Actions,info=type_info_of(input.Look_Actions),default=proc(dst:rawptr) {(cast(^input.Look_Actions)dst)^=input.look_actions_default()}},
     }
-    info:=core.World_Info{names=names,storages=storages}
+    actions:=[]core.Actions_Info{{type=input.Look_Action,info=type_info_of(input.Look_Action)},{type=Walk_Action,info=type_info_of(Walk_Action),base=i64(TEST_WALK_BASE)}}
+    info:=core.World_Info{names=names,storages=storages,actions=actions}
     input.input_map_make(m,&info,"","",problems)
 }
 
@@ -128,7 +131,7 @@ a_seat_walks_the_character_it_drives_and_leaves_the_others :: proc(t:^testing.T)
     wanted:=f32(math.PI/2)+0.1-10*input.LOOK_SPEED
     testing.expect(t,abs(walked.look_yaw-wanted)<1e-4)
     testing.expect_value(t,walked.move,[3]f32{0,0,-1})
-    testing.expect_value(t,walked.buttons,input.action_bit(JUMP))
+    testing.expect_value(t,walked.buttons,input.action_bit(TEST_JUMP))
     for e in ([3]core.Entity{idle,remote,by_game}) {
         left,_:=core.get(core.read(&f.moves),e)
         testing.expect_value(t,left,input.Move_Input{look_yaw=math.PI/2})
@@ -193,8 +196,8 @@ a_seat_without_the_walk_actions_is_a_problem :: proc(t:^testing.T) {
     defer free(f)
     seat_test_init(f)
     defer seat_test_destroy(f)
-    input.input_map_action(&f.bindings,MOVE,.Axis2)
-    input.input_map_action(&f.bindings,input.LOOK,.Button)
+    input.input_map_action(&f.bindings,TEST_MOVE,.Axis2)
+    input.input_map_action(&f.bindings,0,.Button)
 
     body:=seat_test_body(f)
     seat:=seat_test_seat(f)

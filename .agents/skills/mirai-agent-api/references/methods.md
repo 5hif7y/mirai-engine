@@ -232,6 +232,10 @@ and an error leaves nothing. Contract: [paint](../../mirai-plugins/references/pl
   within `radius` of the stroke. A stroke that reaches no vertex is `-32602` and does not write the
   copy. Each stroke writes a new unsaved `.mesh` copy; `paint.clear` goes back to what the entity
   showed before the first one.
+- `shapes.stamp` and `shapes.corner`: the Stamp and Corners modes of the Shapes tool at world
+  points ([shapes tool](../../mirai-plugins/references/shapes.md#shapes-tool)). A cut that touches
+  no outline shape, a refused stamp or a corner move that would cross edges is `-32602`. The
+  brushes of a Solid are child entities with `Shape_Brush`, edited with the `scene.*` methods.
 - `placement.drop`: creates the entities, simulates only physics on a copy of the scene with the
   environment fixed and commits when everything sleeps or when `time` runs out; `rested` says
   which ones slept. It cancels the user's open preview and leaves the tool that was active turned

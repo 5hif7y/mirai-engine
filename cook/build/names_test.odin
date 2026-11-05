@@ -51,12 +51,12 @@ MODE_SWIM :: core.Mode(16)
             `{typeid_of(p_core.Mode),i64(p_core.MODE_WALKING),"walking","core","core/data.odin",6,false,false,nil}`,
             `{typeid_of(p_core.Mode),i64(p_game.MODE_SWIM),"swim","game","game/game.odin",3,false,true,nil}`,
             `{typeid_of(p_core.Mode),i64(p_game.CLIMB),"ladder","game","game/game.odin",4,true,true,typeid_of(p_game.Ladder)}`,
-            `named_types[0]={typeid_of(p_core.Mode),"Mode","mirai:core","MODE_",min(min(i64(1)<<uint(min(8*size_of(p_core.Mode),63)),i64(8*size_of(p_core.Mode_Mask))),i64(8*size_of(p_game.Moves)))}`,
+            `named_types[0]={typeid_of(p_core.Mode),"Mode","mirai:core","MODE_",min(min(i64(1)<<uint(min(8*size_of(p_core.Mode),63)),i64(8*size_of(p_core.Mode_Mask))),i64(8*size_of(p_game.Moves))),false}`,
             `name_bits[0]={typeid_of(p_core.Mode_Mask),typeid_of(p_core.Mode)}`,
             `name_bits[1]={typeid_of(p_game.Moves),typeid_of(p_core.Mode)}`,
         }) {testing.expectf(t,strings.contains(text,line),"%s is not in\n%s",line,text)}
         testing.expect(t,!strings.contains(text,"LIMIT"),"a constant of another type has no name")
-        testing.expect(t,strings.contains(text,"info.named_types,info.names,info.name_bits=named_types,names,name_bits"))
+        testing.expect(t,strings.contains(text,"info.named_types,info.names,info.name_bits,info.actions=named_types,names,name_bits,actions"))
     }
 }
 

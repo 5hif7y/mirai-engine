@@ -22,24 +22,24 @@ import "mirai:std/math"
 // core.Input of the tick and from its own state of the tick before, so a tick
 // simulated again gives the same.
 //
-// Code declares the actions, as constants of Action, and the defaults of the
-// ones it wants driven without input.mirai (Action_Default). The map is built
-// once, in the first input phase: those defaults, and then input.mirai of the
-// project, which gives the kind and the bindings of the actions it names.
+// Each library declares its actions as an enum @(actions), and the defaults
+// of the ones it wants driven without input.mirai ([E]Action_Default). The
+// map is built once, in the first input phase: those defaults, and then
+// input.mirai of the project, which gives the kind and the bindings of the
+// actions it names. A step reads the actions of an enum through Input_Of(E).
 
 ACTION_CAPACITY :: 64
 BINDING_CAPACITY :: 192
 DEFAULT_BINDING_CAPACITY :: 4
 GAMEPAD_ANY :: u8(core.GAMEPAD_CAPACITY) // the buttons of every gamepad joined, and of each axis the widest value
 
-// An input action. Its values are the constants of this type in any package,
-// named as core/names.odin says: JUMP :: input.Action(2) is "jump". They are
-// below ACTION_CAPACITY; the engine and its plugins take the ones below
-// ACTION_GAME, and a game the rest.
-@(names)
+// An input action of the world: what the map, a seat, a mask and data that
+// names an action hold. Its values are the members of the @(actions) enums,
+// which the generator places one library after the other (core/names.odin):
+// Walk_Action.Jump is "jump". Code that needs the value of a member asks its
+// Input_Of (action_of).
+@(names,actions)
 Action :: distinct u8
-
-ACTION_GAME :: 16
 
 // Bit i is the action of value i.
 @(name_bits="Action")
@@ -65,17 +65,18 @@ CHORD_CAPACITY :: si.CHORD_CAPACITY
 // How a player looks around (Axis2: x right, y up, in points of mouse
 // movement): the locomotion turns a body with it, and a camera that orbits
 // turns with it. The sensitivity of a player is the scale of its bindings.
-LOOK :: Action(1)
+@(actions)
+Look_Action :: enum u8 {Look}
 
 // Radians the look turns per unit of the look action: a point of mouse movement.
 LOOK_SPEED :: f32(0.12*math.RAD_PER_DEG)
 
-// The bindings of LOOK when input.mirai of the project does not name it.
+// The bindings of look when input.mirai of the project does not name it.
 @(storage,host)
-Look_Actions :: struct {defaults:[1]Action_Default}
+Look_Actions :: struct {defaults:[Look_Action]Action_Default}
 
 look_actions_default :: proc "contextless" () -> Look_Actions {
-    return {defaults={action_default(LOOK,.Axis2,binding_mouse_delta(),binding_gamepad_stick(.Right,25))}}
+    return {defaults={.Look=action_default(.Axis2,binding_mouse_delta(),binding_gamepad_stick(.Right,25))}}
 }
 
 Action_Kind :: si.Action_Kind
@@ -120,27 +121,27 @@ Input_Binding :: struct {
 }
 
 // How an action is driven when input.mirai of the project does not name it.
-// Whoever declares an action gives its default in a storage of its package
-// that has a field [N]Action_Default, set by the default of the storage
-// (<name>_default() or <NAME>_DEFAULT): the map reads those defaults when it
-// is built, and nothing reads the storage.
+// Whoever declares an enum @(actions) gives the defaults of its members in a
+// storage of its package that has a field [E]Action_Default, set by the
+// default of the storage (<name>_default() or <NAME>_DEFAULT): the compiler
+// asks for every member, the map reads those defaults when it is built, and
+// nothing reads the storage.
 Action_Default :: struct {
-    action:Action,
     kind:Action_Kind,
     input_context:Input_Context,
     count:u8, // bindings given, also those beyond the capacity, which the map reports
     bindings:[DEFAULT_BINDING_CAPACITY]Input_Binding,
 }
 
-action_default :: proc "contextless" (action:Action,kind:Action_Kind,bindings:..Input_Binding) -> (d:Action_Default) {
-    d.action,d.kind,d.count=action,kind,u8(min(len(bindings),255))
+action_default :: proc "contextless" (kind:Action_Kind,bindings:..Input_Binding) -> (d:Action_Default) {
+    d.kind,d.count=kind,u8(min(len(bindings),255))
     for binding,i in bindings[:min(len(bindings),DEFAULT_BINDING_CAPACITY)] {d.bindings[i]=binding}
     return
 }
 
 // The default of an action of a context other than the base one.
-action_default_in :: proc "contextless" (input_context:Input_Context,action:Action,kind:Action_Kind,bindings:..Input_Binding) -> (d:Action_Default) {
-    d=action_default(action,kind,..bindings)
+action_default_in :: proc "contextless" (input_context:Input_Context,kind:Action_Kind,bindings:..Input_Binding) -> (d:Action_Default) {
+    d=action_default(kind,..bindings)
     d.input_context=input_context
     return
 }
@@ -167,6 +168,75 @@ Actions :: struct {
 // Presentation actions: edges and deltas last one frame, not one fixed tick.
 @(storage,keep)
 Frame_Actions :: struct {actions:Actions}
+
+// What a step reads of the actions of an enum @(actions) E: those of the
+// machine for the tick, and those of each seat. A step receives it as
+// Input_Of(E), and the generator gives it the base of E: pressed(input,.Jump),
+// pressed(input,body,.Jump), seat_pressed(input,seat,.Jump).
+@(params)
+Input_Of :: struct($E:typeid) where intrinsics.type_is_enum(E) {
+    actions:core.Ref(Actions),
+    seats:core.Read(Seat),
+    drivables:core.Read(Drivable),
+    base:Action,
+}
+
+// The actions of an enum @(actions) E of the machine for the frame, for presentation.
+@(params)
+Frame_Input_Of :: struct($E:typeid) where intrinsics.type_is_enum(E) {
+    actions:core.Ref(Frame_Actions),
+    base:Action,
+}
+
+// The action of the world a member is: what a mask, a hold or data take.
+action_of :: proc{input_action_of,frame_action_of}
+input_action_of :: #force_inline proc "contextless" (input:Input_Of($E),a:E) -> Action {return input.base+Action(a)}
+frame_action_of :: #force_inline proc "contextless" (input:Frame_Input_Of($E),a:E) -> Action {return input.base+Action(a)}
+
+// The state of an action: of the machine this tick or this frame, or of the
+// seat that drives body this tick. Released for one the map does not have.
+down :: proc{input_down,frame_down,body_down}
+pressed :: proc{input_pressed,frame_pressed,body_pressed}
+released :: proc{input_released,frame_released,body_released}
+tapped :: proc{input_tapped,frame_tapped,body_tapped}
+holding :: proc{input_holding,frame_holding,body_holding}
+value :: proc{input_value,frame_value,body_value}
+vector :: proc{input_vector,frame_vector,body_vector}
+
+input_state :: proc "contextless" (input:Input_Of($E),a:E) -> Action_State {return action(input.actions.ptr,action_of(input,a))}
+frame_state :: proc "contextless" (input:Frame_Input_Of($E),a:E) -> Action_State {return action(&input.actions.ptr.actions,action_of(input,a))}
+body_state :: proc(input:Input_Of($E),body:core.Entity,a:E) -> Action_State {return body_action({input.seats,input.drivables},body,action_of(input,a))}
+input_down :: proc "contextless" (input:Input_Of($E),a:E) -> bool {return input_state(input,a).down}
+input_pressed :: proc "contextless" (input:Input_Of($E),a:E) -> bool {return input_state(input,a).pressed}
+input_released :: proc "contextless" (input:Input_Of($E),a:E) -> bool {return input_state(input,a).released}
+input_tapped :: proc "contextless" (input:Input_Of($E),a:E) -> bool {return input_state(input,a).tapped}
+input_holding :: proc "contextless" (input:Input_Of($E),a:E) -> bool {return input_state(input,a).holding}
+input_value :: proc "contextless" (input:Input_Of($E),a:E) -> f32 {return input_state(input,a).value}
+input_vector :: proc "contextless" (input:Input_Of($E),a:E) -> math.Vec2 {return input_state(input,a).vector}
+frame_down :: proc "contextless" (input:Frame_Input_Of($E),a:E) -> bool {return frame_state(input,a).down}
+frame_pressed :: proc "contextless" (input:Frame_Input_Of($E),a:E) -> bool {return frame_state(input,a).pressed}
+frame_released :: proc "contextless" (input:Frame_Input_Of($E),a:E) -> bool {return frame_state(input,a).released}
+frame_tapped :: proc "contextless" (input:Frame_Input_Of($E),a:E) -> bool {return frame_state(input,a).tapped}
+frame_holding :: proc "contextless" (input:Frame_Input_Of($E),a:E) -> bool {return frame_state(input,a).holding}
+frame_value :: proc "contextless" (input:Frame_Input_Of($E),a:E) -> f32 {return frame_state(input,a).value}
+frame_vector :: proc "contextless" (input:Frame_Input_Of($E),a:E) -> math.Vec2 {return frame_state(input,a).vector}
+body_down :: proc(input:Input_Of($E),body:core.Entity,a:E) -> bool {return body_state(input,body,a).down}
+body_pressed :: proc(input:Input_Of($E),body:core.Entity,a:E) -> bool {return body_state(input,body,a).pressed}
+body_released :: proc(input:Input_Of($E),body:core.Entity,a:E) -> bool {return body_state(input,body,a).released}
+body_tapped :: proc(input:Input_Of($E),body:core.Entity,a:E) -> bool {return body_state(input,body,a).tapped}
+body_holding :: proc(input:Input_Of($E),body:core.Entity,a:E) -> bool {return body_state(input,body,a).holding}
+body_value :: proc(input:Input_Of($E),body:core.Entity,a:E) -> f32 {return body_state(input,body,a).value}
+body_vector :: proc(input:Input_Of($E),body:core.Entity,a:E) -> math.Vec2 {return body_state(input,body,a).vector}
+
+// The state of an action of a seat this tick, as seat_action sees it.
+seat_state :: proc(input:Input_Of($E),seat:core.Entity,a:E) -> Action_State {return seat_action(input.seats,seat,action_of(input,a))}
+seat_down :: proc(input:Input_Of($E),seat:core.Entity,a:E) -> bool {return seat_state(input,seat,a).down}
+seat_pressed :: proc(input:Input_Of($E),seat:core.Entity,a:E) -> bool {return seat_state(input,seat,a).pressed}
+seat_released :: proc(input:Input_Of($E),seat:core.Entity,a:E) -> bool {return seat_state(input,seat,a).released}
+seat_tapped :: proc(input:Input_Of($E),seat:core.Entity,a:E) -> bool {return seat_state(input,seat,a).tapped}
+seat_holding :: proc(input:Input_Of($E),seat:core.Entity,a:E) -> bool {return seat_state(input,seat,a).holding}
+seat_value :: proc(input:Input_Of($E),seat:core.Entity,a:E) -> f32 {return seat_state(input,seat,a).value}
+seat_vector :: proc(input:Input_Of($E),seat:core.Entity,a:E) -> math.Vec2 {return seat_state(input,seat,a).vector}
 
 Input_Map_Error :: enum u8 {
     None,
@@ -310,10 +380,6 @@ input_map_make :: proc(m:^Input_Map,info:^core.World_Info,file,text:string,probl
     result:Input_Map
     result.built=true
     names:=core.names_of(info,Action)
-    for entry in names {
-        if entry.value<ACTION_CAPACITY {continue}
-        input_report(problems,"input.action_value","the action %q (%s:%d) has the value %d; actions take values below %d (the engine and its plugins below %d): give it a free one",entry.name,entry.file,entry.line,entry.value,ACTION_CAPACITY,ACTION_GAME)
-    }
     for entry in core.names_of(info,Input_Context) {
         if entry.value<CONTEXT_CAPACITY {continue}
         input_report(problems,"input.context_value","the input context %q (%s:%d) has the value %d; contexts take values below %d: give it a free one",entry.name,entry.file,entry.line,entry.value,CONTEXT_CAPACITY)
@@ -321,26 +387,29 @@ input_map_make :: proc(m:^Input_Map,info:^core.World_Info,file,text:string,probl
     defaulted:Action_Mask
     if info!=nil {
         for &storage in info.storages {
-            for &d in action_defaults(&storage) {
-                name,declared:=core.name_of(info,Action,i64(d.action))
+            for &given in action_defaults(info,&storage) {
+                d,action:=given.default,given.action
+                name,declared:=core.name_of(info,Action,i64(action))
                 switch {
-                case !declared || int(d.action)>=ACTION_CAPACITY:
-                    input_report(problems,"input.default_unknown","%s gives a default to the action of value %d, which no constant of input.Action declares; declare the action or remove its default",storage.name,d.action)
-                case defaulted&action_bit(d.action)!=0:
+                case given.unknown!=nil:
+                    input_report(problems,"input.default_unknown","%s gives defaults to the members of %v, which is not an enum @(actions); mark it @(actions), or remove the defaults",storage.name,given.unknown)
+                case !declared || int(action)>=ACTION_CAPACITY:
+                    input_report(problems,"input.default_unknown","%s gives a default to the action of value %d, which no enum @(actions) declares; declare the action or remove its default",storage.name,action)
+                case defaulted&action_bit(action)!=0:
                     input_report(problems,"input.default_twice","the action %q has two defaults, the second in %s; leave one",name,storage.name)
                 case int(d.count)>DEFAULT_BINDING_CAPACITY:
                     input_report(problems,"input.default_bindings","the default of the action %q in %s has %d bindings, and a default holds %d; bind the rest in %s",name,storage.name,d.count,DEFAULT_BINDING_CAPACITY,project.INPUT_FILE)
                     fallthrough
                 case:
-                    defaulted|=action_bit(d.action)
-                    input_map_action(&result,d.action,d.kind)
+                    defaulted|=action_bit(action)
+                    input_map_action(&result,action,d.kind)
                     if int(d.input_context)<CONTEXT_CAPACITY {
-                        result.contexts[d.action]=d.input_context
+                        result.contexts[action]=d.input_context
                     } else {
                         input_report(problems,"input.default_context","the default of the action %q in %s puts it in the input context of value %d; contexts take values below %d: declare it as a free one",name,storage.name,d.input_context,CONTEXT_CAPACITY)
                     }
                     for binding in d.bindings[:min(int(d.count),DEFAULT_BINDING_CAPACITY)] {
-                        if !input_map_bind(&result,d.action,binding) {
+                        if !input_map_bind(&result,action,binding) {
                             input_report(problems,"input.default_binding","a default binding of the action %q in %s does not suit its kind %v, or the map holds %d bindings already; fix that binding",name,storage.name,d.kind,BINDING_CAPACITY)
                         }
                     }
@@ -355,15 +424,19 @@ input_map_make :: proc(m:^Input_Map,info:^core.World_Info,file,text:string,probl
         case .Unknown_Action:
             known:=strings.builder_make(context.temp_allocator)
             for entry,i in names {fmt.sbprintf(&known,"%s%s",i>0?", ":"",entry.name)}
-            input_report(problems,"input.unknown_action","%s names the action %q, which the code does not declare, and was not read; declare it (%s :: input.Action(<free value>)) or rename it to one the code declares: %s",file,at,strings.to_upper(at,context.temp_allocator),strings.to_string(known))
+            input_report(problems,"input.unknown_action","%s names the action %q, which the code does not declare, and was not read; declare it as a member %s of the enum @(actions) of the game, or rename it to one the code declares: %s",file,at,member_name(at),strings.to_string(known))
         case .Syntax, .Unknown_Context, .Unknown_Kind, .Unknown_Input, .Invalid, .Capacity:
             input_report(problems,"input.file","%s was not read: %v in the action %q; %s",file,error,at,input_map_error_fix(error))
         }
     }
-    // The options of the player: a file that does not read leaves the bindings of the project.
+    // The options of the player: a file that does not read leaves the bindings
+    // of the project; an action the game no longer declares is only left out.
     if options!="" {
-        if error,at:=input_map_parse(&result,info,options_text);error!=.None {
+        gone:=make([dynamic]string,context.temp_allocator)
+        if error,at:=input_map_parse(&result,info,options_text,&gone);error!=.None {
             input_report(problems,"input.options","%s, the bindings the player chose, was not read: %v in the action %q; the player binds again from the options menu, or delete the file",options,error,at)
+        } else if len(gone)>0 {
+            input_report(problems,"input.options_gone","%s binds %v, which the game no longer declares, and those were left out; the rest of what the player chose holds, and they go when the player changes the options again",options,gone[:])
         }
     }
     unbound:=strings.builder_make(context.temp_allocator)
@@ -374,7 +447,7 @@ input_map_make :: proc(m:^Input_Map,info:^core.World_Info,file,text:string,probl
     }
     if strings.builder_len(unbound)>0 {
         where_:=file!=""?file:project.INPUT_FILE
-        input_report(problems,"input.action_unbound","%s: no binding, neither in %s nor a default in code; give each its kind and bindings in %s, or an Action_Default where it is declared",strings.to_string(unbound),where_,where_)
+        input_report(problems,"input.action_unbound","%s: no binding, neither a default in code nor in %s; give each its kind and default bindings where it is declared (a host storage with a field [E]Action_Default), or bind it in Project Settings > Input",strings.to_string(unbound),where_)
     }
     m^=result
 }
@@ -400,24 +473,46 @@ input_map_error_fix :: proc(error:Input_Map_Error) -> string {
     return ""
 }
 
-// The Action_Default of a storage: those of its fields [N]Action_Default, in
-// the value its default gives it.
+// The identifier of the enum member an action name is: "layer_back" is Layer_Back.
 @(private)
-action_defaults :: proc(storage:^core.Storage_Info) -> []Action_Default {
+member_name :: proc(name:string) -> string {
+    b:=strings.builder_make(context.temp_allocator)
+    for c,i in transmute([]u8)name {
+        strings.write_byte(&b,(i==0 || name[i-1]=='_') && c>='a' && c<='z'?c-32:c)
+    }
+    return strings.to_string(b)
+}
+
+@(private)
+Given_Default :: struct {
+    action:Action,
+    default:Action_Default,
+    unknown:typeid, // the enum of a field [E]Action_Default that is not @(actions)
+}
+
+// The defaults of a storage: those of its fields [E]Action_Default, in the
+// value its default gives it, each with the action of its member.
+@(private)
+action_defaults :: proc(info:^core.World_Info,storage:^core.Storage_Info) -> []Given_Default {
     if storage.default==nil || storage.info==nil {return nil}
     record,is_struct:=runtime.type_info_base(storage.info).variant.(runtime.Type_Info_Struct)
     if !is_struct {return nil}
     value:[]u8
-    found:=make([dynamic]Action_Default,context.temp_allocator)
+    found:=make([dynamic]Given_Default,context.temp_allocator)
     for i in 0..<int(record.field_count) {
-        array,is_array:=runtime.type_info_base(record.types[i]).variant.(runtime.Type_Info_Array)
+        array,is_array:=runtime.type_info_base(record.types[i]).variant.(runtime.Type_Info_Enumerated_Array)
         if !is_array || array.elem.id!=Action_Default {continue}
+        actions:=core.actions_of(info,array.index.id)
+        if actions==nil {
+            append(&found,Given_Default{unknown=array.index.id})
+            continue
+        }
         if value==nil {
             value=make([]u8,storage.info.size,context.temp_allocator)
             storage.default(raw_data(value))
         }
         defaults:=([^]Action_Default)(&value[record.offsets[i]])[:array.count]
-        append(&found,..defaults)
+        for d,member in defaults {append(&found,Given_Default{action=Action(actions.base+i64(member)),default=d})}
     }
     return found[:]
 }
@@ -636,17 +731,11 @@ actions_update :: proc(actions:^Actions,m:^Input_Map,input:^core.Input,contexts:
     actions.count=u32(count)
 }
 
-// The state of an action this tick; released for one the map does not have.
+// The state of an action of the world this tick, as data names it; released
+// for one the map does not have. Code reads its own actions with Input_Of.
 action :: #force_inline proc "contextless" (actions:^Actions,a:Action) -> Action_State {
     return u32(a)<actions.count?actions.states[a]:{}
 }
-action_down :: proc "contextless" (actions:^Actions,a:Action) -> bool {return action(actions,a).down}
-action_pressed :: proc "contextless" (actions:^Actions,a:Action) -> bool {return action(actions,a).pressed}
-action_released :: proc "contextless" (actions:^Actions,a:Action) -> bool {return action(actions,a).released}
-action_tapped :: proc "contextless" (actions:^Actions,a:Action) -> bool {return action(actions,a).tapped}
-action_holding :: proc "contextless" (actions:^Actions,a:Action) -> bool {return action(actions,a).holding}
-action_value :: proc "contextless" (actions:^Actions,a:Action) -> f32 {return action(actions,a).value}
-action_vector :: proc "contextless" (actions:^Actions,a:Action) -> math.Vec2 {return action(actions,a).vector}
 
 // Reads the text of an input file over a map: each action of the file gets
 // its kind, and its bindings replace the ones the map had for it; the
@@ -658,15 +747,19 @@ action_vector :: proc "contextless" (actions:^Actions,a:Action) -> math.Vec2 {re
 //     {"name":"look","kind":"Axis2","bindings":[{"mouse":"Delta","scale":0.1}]},
 //     {"name":"jump","kind":"Button","bindings":[{"key":"Space"},{"gamepad_button":"South"}]}]}
 //
-// name is the name of a constant of Action (core/names.odin), and context, an
-// optional one of Input_Context. A binding names its input with one of key,
+// name is the name of an action (a member of an enum @(actions), in lower
+// case), and context, an optional one of Input_Context. A binding names its input with one of key,
 // keys (two for an Axis, four for an Axis2: left, right, down, up),
 // mouse_button, mouse (X, Y, Wheel_X, Wheel_Y, or Delta and Wheel for both
 // axes), gamepad_button, gamepad_axis and gamepad_stick (Left, Right), with
 // the names of the core enums. scale, dead_zone, gamepad (0 to 3; every
 // gamepad when absent) and chord (one or two of {"key"}, {"mouse_button"} and
 // {"gamepad_button"} held too) are optional.
-input_map_parse :: proc(m:^Input_Map,info:^core.World_Info,text:string) -> (error:Input_Map_Error,at:string) {
+//
+// With skipped, an action the code does not declare (renamed or removed since
+// the file was written) is left out and its name appended there, instead of
+// failing the whole file: what the options of a player do.
+input_map_parse :: proc(m:^Input_Map,info:^core.World_Info,text:string,skipped:^[dynamic]string=nil) -> (error:Input_Map_Error,at:string) {
     value,parse_error:=json.parse_string(text,json.DEFAULT_SPECIFICATION,true,context.temp_allocator)
     root,is_object:=value.(json.Object)
     if parse_error!=.None || !is_object {return .Syntax,""}
@@ -679,7 +772,11 @@ input_map_parse :: proc(m:^Input_Map,info:^core.World_Info,text:string) -> (erro
         if !is_action {return .Syntax,""}
         name,_:=entry["name"].(json.String)
         found,declared:=core.name_value(info,Action,name)
-        if !declared || found<0 || found>=ACTION_CAPACITY {return .Unknown_Action,name}
+        if !declared || found<0 || found>=ACTION_CAPACITY {
+            if skipped==nil {return .Unknown_Action,name}
+            append(skipped,name)
+            continue
+        }
         action:=Action(found)
         kind_name,_:=entry["kind"].(json.String)
         kind,known:=reflect.enum_from_name(Action_Kind,kind_name)

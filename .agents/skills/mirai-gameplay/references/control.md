@@ -63,36 +63,58 @@ tick.
 
 ## Actions
 
-An action is a value of `inp.Action`, a `@(names)` type
-([named ids](../../mirai-core/references/core.md#named-ids)): the code declares it as a
-constant and its name is the identifier's in lowercase (`JUMP :: inp.Action(2)` is `jump`).
-The code is the only source of the names; `input.mirai`, the API and the inspector use them, and a
-read indexes by the value.
+Each library declares its actions as an enum `@(actions)` of `u8`
+(`@(actions) Action :: enum u8 {Mode,Layer_Back,Stamp}`); the name of an action is its member in
+lowercase (`layer_back`). Nobody writes or sees a number: the generator gives the members of every
+enum, the engine first (`inp.Look_Action`), then the active plugins in order (locomotion:
+`phys.Walk_Action`) and the game, the next values of `inp.Action`, the `@(names,actions)` type
+([named ids](../../mirai-core/references/core.md#named-ids)) that the map, the seats, the masks
+and the data hold. The code is the only source of the names; `input.mirai`, the API and the
+inspector use them.
 
-- **Values.** The engine and the plugins use those below `ACTION_GAME`, visible where they declare
-  them (`inp.LOOK`; locomotion: `phys.MOVE` and `JUMP`), and the game its own from there. Every
-  `inp.Action`-typed constant is an action: a limit or offset is declared without a type.
-- **Type and bindings.** The project's `input.mirai` gives those of the actions it names. One it
-  does not name uses the default its owner declares in code: a `host` storage of its package with a
-  field `[N]inp.Action_Default` made by the storage's default (`walk_actions_default` of
-  locomotion). A game binds its actions in its `input.mirai`; a plugin, which does not write the
-  project's file, also provides its defaults.
+- **Reading.** A step receives `inp.Input_Of(E)` for the enum whose actions it reads, and another
+  for each enum of another library (`walk:inp.Input_Of(phys.Walk_Action)`): the generator binds it
+  as a [parameter group](../../mirai-core/references/generator.md#parameter-groups) (the
+  `Actions` of the tick, the seats and the `Drivable`s) and gives it the base of `E`. The machine:
+  `inp.pressed(input, .Stamp)` and `down`, `released`, `tapped`, `holding`, `value`, `vector`; the
+  seat that drives a body: `inp.pressed(input, body, .Jump)`; a seat: `inp.seat_pressed(input,
+  seat, .Jump)` and the other `seat_*`. `inp.Frame_Input_Of(E)` reads the `Frame_Actions` of
+  presentation the same way.
+- **The action of the world.** What holds an action as data (`Camera_Activation.action`, a
+  `Move_Input.buttons` mask, a hold, an interface by name) keeps an `inp.Action`; code that needs
+  that of a member asks its `Input_Of` (`inp.action_of(walk, .Jump)`), and data names it.
+  `inp.action`, `seat_action` and `body_action` read one of those. A scene, a prefab or a saved
+  game keeps the name of each action it holds
+  ([named ids](../../mirai-core/references/core.md#named-ids)).
+- **Type and bindings.** Whoever declares an action (the engine, a plugin or the game) gives its
+  kind and default bindings in code, next to it: a `host` storage of its package with a field
+  `[E]inp.Action_Default`, by member, made by the storage's default (`walk_actions_default` of
+  locomotion, `game_actions_default` of the templates); the compiler asks for every member. The
+  project's `input.mirai` only holds what Project Settings > Input and `input.set` changed of
+  those, and is not written by hand; the player's options keep another one with what the player
+  rebinds. A renamed or removed action has no backward compatibility: in the player's file it is
+  left out (`input.options_gone`) and the rest holds, and it goes when the options are written
+  again.
 - **Building.** `input_map_build` builds the map once, in the first `input` phase, without a game
   function. A name in the file that the code does not declare leaves the file unread and is the
   world problem `input.unknown_action`, which says how to declare it; an action without a default
   or entry, `input.action_unbound`; an invalid default, `input.default_*`.
-- **Renaming.** `names.rename` on `Action`, or the inspector, puts `@(name)` on the project's
-  constant and changes that name in `input.mirai`.
+- **Renaming.** The member is renamed in code, with the types in view (the rename of an editor of
+  code, or an agent), and the game built. Then `names.rename` on `Action` follows it: the project's
+  `input.mirai` and the documents that keep the action (scenes, prefabs, records) take the new
+  name, as edits, unsaved, one step of history each. It refuses while the built code still declares
+  the old name or does not declare the new one; the inspector offers no rename for actions.
+  Plugins' documents and players' saves keep the old name and lose it, as with the member of any
+  enum. `names.create` does not declare actions: the member and its default are written in code.
 - **Editing.** Project Settings > Input and `input.set` rewrite the project's `input.mirai` with
   only the actions and ticks that differ from the code (`input_map_text` against the defaults);
   without differences, the file does not exist. A file that is not read is not rewritten. When it
   is written, the edited world and those of the running Plays rebuild their map
   (`Input_Map.built`).
 
-`inp.seat_action(seats, seat, JUMP)` (and the `seat_*` shortcuts) gives the state of an action of a
-seat; it is empty for what is not a seat, while the action is blocked or while it waits for its
-release. Per body, `inp.pressed(players, body, JUMP)` and its peers read that of the seat that
-drives `body` (empty if nobody drives it); `inp.Players` is a
+The state of an action of a seat is empty for what is not a seat, while the action is blocked or
+while it waits for its release; that of a body is the one of the seat that drives it (empty if
+nobody drives it). `inp.Players` is a
 [parameter group](../../mirai-core/references/generator.md#parameter-groups) with the seats
 and the `Drivable`s.
 
@@ -276,7 +298,7 @@ is resolved every frame: it follows the body that is driven now.
     distance keeps no state and does not jump when crossing the threshold.
   - With `aim`, it turns with the `look_yaw`/`look_pitch` of the target's `inp.Move_Input` plus
     `yaw` and `pitch`: it looks where the body looks, which is what the server simulates.
-  - Without `aim`, with `turn` the `inp.LOOK` action of the focused local player who drives the
+  - Without `aim`, with `turn` the `look` action of the focused local player who drives the
     target turns it, and with `recenter` it returns behind a moving target that long after the last
     turn. `camera_look(&Camera_Input, camera, yaw, pitch)` turns it from the game.
 - `Eyes`: first person. It sits at `offset` from the target and looks with the look of its

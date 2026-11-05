@@ -14,6 +14,14 @@ import "mirai:std/serial"
 
 @(private="file") Scene_Test_Lamp :: struct {range,intensity:f32}
 @(private="file") Scene_Test_Link :: struct {target:core.Entity}
+@(private="file") Scene_Test_Shape :: enum u8 {Cube,Ramp}
+@(private="file")
+Scene_Test_Block :: struct {
+    size:[3]f32 `mirai:"min=0,max=100"`,
+    shape:Scene_Test_Shape,
+    material:base.Asset_Id,
+    link:core.Entity,
+}
 
 @(private="file")
 Scene_Test :: struct {
@@ -25,6 +33,7 @@ Scene_Test :: struct {
     lamps:core.Table(Scene_Test_Lamp),
     references:core.Table(Scene_Reference),
     links:core.Table(Scene_Test_Link),
+    blocks:core.Table(Scene_Test_Block),
     unresolved:Unresolved_References,
 }
 
@@ -50,6 +59,7 @@ scene_test_init :: proc(data:rawptr,allocator:runtime.Allocator) -> bool {
     core.table_init(&f.ids,"Id",allocator);core.table_init(&f.names,"Name",allocator);core.table_init(&f.transforms,"Transform",allocator)
     core.table_init(&f.parents,"Parent",allocator);core.table_init(&f.lamps,"Scene_Test_Lamp",allocator)
     core.table_init(&f.references,"Scene_Reference",allocator);core.table_init(&f.links,"Scene_Test_Link",allocator)
+    core.table_init(&f.blocks,"Scene_Test_Block",allocator)
     return len(f.entities.generation)>0
 }
 
@@ -58,6 +68,7 @@ scene_test_destroy :: proc(data:rawptr) {
     f:=cast(^Scene_Test)data
     core.table_destroy(&f.ids);core.table_destroy(&f.names);core.table_destroy(&f.transforms)
     core.table_destroy(&f.parents);core.table_destroy(&f.lamps);core.table_destroy(&f.references);core.table_destroy(&f.links)
+    core.table_destroy(&f.blocks)
     delete(f.unresolved.items);delete(f.unresolved.resolved)
     core.entities_destroy(&f.entities)
 }
@@ -66,7 +77,8 @@ scene_test_destroy :: proc(data:rawptr) {
 scene_test_copy :: proc(dst,src:rawptr) -> bool {
     d,s:=cast(^Scene_Test)dst,cast(^Scene_Test)src
     return core.entities_copy(&d.entities,&s.entities) && core.table_copy(&d.ids,&s.ids) && core.table_copy(&d.names,&s.names) &&
-        core.table_copy(&d.transforms,&s.transforms) && core.table_copy(&d.parents,&s.parents) && core.table_copy(&d.lamps,&s.lamps) && core.table_copy(&d.references,&s.references) && core.table_copy(&d.links,&s.links)
+        core.table_copy(&d.transforms,&s.transforms) && core.table_copy(&d.parents,&s.parents) && core.table_copy(&d.lamps,&s.lamps) && core.table_copy(&d.references,&s.references) && core.table_copy(&d.links,&s.links) &&
+        core.table_copy(&d.blocks,&s.blocks)
 }
 
 @(private="file")
@@ -75,6 +87,7 @@ scene_test_swap :: proc(a,b:rawptr) {
     a.entities,b.entities=b.entities,a.entities
     core.table_swap(&a.ids,&b.ids);core.table_swap(&a.names,&b.names);core.table_swap(&a.transforms,&b.transforms)
     core.table_swap(&a.parents,&b.parents);core.table_swap(&a.lamps,&b.lamps);core.table_swap(&a.references,&b.references);core.table_swap(&a.links,&b.links)
+    core.table_swap(&a.blocks,&b.blocks)
     a.unresolved,b.unresolved=b.unresolved,a.unresolved
 }
 
@@ -83,6 +96,7 @@ scene_test_settle_lamps :: proc(world,shared,editor:rawptr) {
     f:=cast(^Scene_Test)world
     core.table_settle(&f.ids,&f.entities);core.table_settle(&f.names,&f.entities);core.table_settle(&f.transforms,&f.entities)
     core.table_settle(&f.parents,&f.entities);core.table_settle(&f.lamps,&f.entities);core.table_settle(&f.references,&f.entities);core.table_settle(&f.links,&f.entities)
+    core.table_settle(&f.blocks,&f.entities)
     core.entities_settle(&f.entities)
 }
 
@@ -91,6 +105,7 @@ scene_test_clear_lamps :: proc(data:rawptr) {
     f:=cast(^Scene_Test)data
     core.table_clear(&f.ids);core.table_clear(&f.names);core.table_clear(&f.transforms)
     core.table_clear(&f.parents);core.table_clear(&f.lamps);core.table_clear(&f.references);core.table_clear(&f.links)
+    core.table_clear(&f.blocks)
     clear(&f.unresolved.items);clear(&f.unresolved.resolved)
     core.entities_clear(&f.entities)
 }
@@ -101,7 +116,7 @@ scene_test_clear_lamps :: proc(data:rawptr) {
 Scene_Test_Project :: struct {
     folder:string,
     types:asset.Types,
-    tables:[7]core.Table_Info,
+    tables:[8]core.Table_Info,
     storages:[1]core.Storage_Info,
     info:core.World_Info,
     assets:host.Assets,
@@ -124,6 +139,7 @@ scene_test_project_open :: proc(t:^testing.T,p:^Scene_Test_Project,name:string) 
         {name="Scene_Test_Lamp",type=Scene_Test_Lamp,info=type_info_of(Scene_Test_Lamp),offset=offset_of(Scene_Test,lamps)},
         {name="Scene_Reference",type=Scene_Reference,info=type_info_of(Scene_Reference),offset=offset_of(Scene_Test,references)},
         {name="Scene_Test_Link",type=Scene_Test_Link,info=type_info_of(Scene_Test_Link),offset=offset_of(Scene_Test,links)},
+        {name="Scene_Test_Block",type=Scene_Test_Block,info=type_info_of(Scene_Test_Block),offset=offset_of(Scene_Test,blocks)},
     }
     p.storages={{name="Unresolved_References",type=Unresolved_References,info=type_info_of(Unresolved_References),offset=offset_of(Scene_Test,unresolved)}}
     p.info={entities=offset_of(Scene_Test,entities),tables=p.tables[:],storages=p.storages[:],copy=scene_test_copy,swap=scene_test_swap,settle=scene_test_settle_lamps,clear=scene_test_clear_lamps}
@@ -768,4 +784,194 @@ the_sky_of_a_prefab_in_a_scene_document_loads_off :: proc(t:^testing.T) {
     core.disable(&w.skies,placed)
     core.world_settle(ref)
     testing.expect(t,on(&w,root) && !on(&w,placed),"turned off, the root's is on again")
+}
+
+@(private="file") UNTRUSTED_BLOCK :: Scene_Test_Block{size={1,2,3},shape=.Ramp,material=TEST_LAMP,link=core.Entity(2)}
+@(private="file") UNTRUSTED_ROOM :: base.Asset_Id{0x4a,1}
+@(private="file") UNTRUSTED_GUEST_ROOM :: base.Asset_Id{0x4a,2}
+
+// A project whose assets have the lamp prefab and a room scene, with a folder
+// of a player mounted under levels/ that has a room of its own.
+@(private="file")
+untrusted_project_open :: proc(t:^testing.T,p:^Scene_Test_Project,name:string) -> (guest:string,ok:bool) {
+    if !scene_test_project_open(t,p,name) {return}
+    guest=fmt.tprintf("%s-guest",p.folder)
+    os.remove_all(guest)
+    if !testing.expect(t,os.make_directory_all(guest)==nil) {return}
+    lamp:=lamp_write(t,&p.types,fmt.tprintf("%s/lamp.prefab",p.folder),1)
+    asset.scene_destroy(&lamp)
+    for room in ([2]base.Asset_Id{UNTRUSTED_ROOM,UNTRUSTED_GUEST_ROOM}) {
+        doc:asset.Scene;asset.scene_init(&doc,&p.types,asset.KIND_SCENE,room);defer asset.scene_destroy(&doc)
+        asset.scene_entity_add(&doc,1,0,"Lamp")
+        asset.scene_set(&doc,1,"Scene_Test_Lamp",&Scene_Test_Lamp{5,1})
+        if !testing.expect_value(t,asset.scene_save(&doc,fmt.tprintf("%s/room.scene",room==UNTRUSTED_ROOM?p.folder:guest)),asset.Error.None) {return}
+    }
+    host.assets_scan(&p.assets)
+    _,mounted:=host.assets_mount(&p.assets,guest,"levels")
+    return guest,testing.expect_value(t,mounted,asset.Error.None)
+}
+
+// A block linked to a lamp, the level a player made, as a file of the guest
+// folder; edit changes it first.
+@(private="file")
+untrusted_level_write :: proc(t:^testing.T,types:^asset.Types,path:string,id:base.Asset_Id,edit:proc(level:^asset.Scene)) -> bool {
+    level:asset.Scene;asset.scene_init(&level,types,asset.KIND_SCENE,id);defer asset.scene_destroy(&level)
+    asset.scene_entity_add(&level,1,0,"Block")
+    asset.scene_entity_add(&level,2,0,"Lamp")
+    block:=UNTRUSTED_BLOCK
+    asset.scene_set(&level,1,"Scene_Test_Block",&block)
+    asset.scene_set(&level,2,"Scene_Test_Lamp",&Scene_Test_Lamp{3,1})
+    if edit!=nil {edit(&level)}
+    return testing.expect_value(t,asset.scene_save(&level,path),asset.Error.None)
+}
+
+@(private="file")
+untrusted_block_set :: proc(level:^asset.Scene,block:Scene_Test_Block) {
+    block:=block
+    asset.scene_set(level,1,"Scene_Test_Block",&block)
+}
+
+// A level whose file the game did not ship loads only what the game lets a
+// player author, with values its fields allow and references to what is
+// there; anything else fails saying what failed, and leaves the world as it was.
+@(test)
+an_untrusted_level_loads_only_what_its_rules_allow :: proc(t:^testing.T) {
+    p:Scene_Test_Project
+    guest,ok:=untrusted_project_open(t,&p,"untrusted")
+    defer {scene_test_project_close(&p);os.remove_all(guest)}
+    if !ok {return}
+    allowed:=[]typeid{Scene_Test_Block,Scene_Test_Lamp}
+    referencing:=[]typeid{Scene_Test_Block,Scene_Test_Lamp,Scene_Reference}
+    w:=host.app_world_ref(&p.app,p.world)
+    if !untrusted_level_write(t,&p.types,fmt.tprintf("%s/ok.scene",guest),{0x4a,9},nil) {return}
+    report,error:=load_untrusted(w,&p.app,"levels/ok.scene",{components=allowed,max_entities=2})
+    if !testing.expect_value(t,error,Error.None) {return}
+    testing.expect_value(t,report.entities,2)
+    first:=core.entity_of(&p.world.entities,base.Entity_Id(1))
+    blocks:=core.read(&p.world.blocks)
+    if !testing.expect_value(t,core.count(blocks),1) {return}
+    lamp,_:=core.get(core.read(&p.world.ids),core.at(blocks,0).link)
+    testing.expect_value(t,lamp.value,base.Entity_Id(2))
+
+    Case :: struct {
+        name:string,
+        edit:proc(level:^asset.Scene),
+        rules:Untrusted,
+        error:Error,
+        component,field:string,
+        fault:serial.Value_Fault,
+    }
+    cases:=[]Case{
+        {"too many entities",nil,{components=allowed,max_entities=1},.Too_Large,"","",.None},
+        {"too many bytes",nil,{components=allowed,max_bytes=64},.Too_Large,"","",.None},
+        {"a component not listed",proc(l:^asset.Scene) {asset.scene_set(l,1,"Scene_Test_Link",&Scene_Test_Link{core.Entity(2)})},{components=allowed},.Not_Allowed,"Scene_Test_Link","",.None},
+        {"a float that is not finite",proc(l:^asset.Scene) {b:=UNTRUSTED_BLOCK;b.size[1]=transmute(f32)u32(0x7fc00000);untrusted_block_set(l,b)},{components=allowed},.Out_Of_Range,"Scene_Test_Block","size[1]",.Not_Finite},
+        {"a float over its max",proc(l:^asset.Scene) {b:=UNTRUSTED_BLOCK;b.size[2]=500;untrusted_block_set(l,b)},{components=allowed},.Out_Of_Range,"Scene_Test_Block","size[2]",.Above_Max},
+        {"a float under its min",proc(l:^asset.Scene) {b:=UNTRUSTED_BLOCK;b.size[0]=-1;untrusted_block_set(l,b)},{components=allowed},.Out_Of_Range,"Scene_Test_Block","size[0]",.Below_Min},
+        {"an enum that is none of its values",proc(l:^asset.Scene) {b:=UNTRUSTED_BLOCK;b.shape=Scene_Test_Shape(9);untrusted_block_set(l,b)},{components=allowed},.Out_Of_Range,"Scene_Test_Block","shape",.Not_A_Choice},
+        {"an entity outside the level",proc(l:^asset.Scene) {b:=UNTRUSTED_BLOCK;b.link=core.Entity(99);untrusted_block_set(l,b)},{components=allowed},.Unknown_Reference,"Scene_Test_Block","link",.Refused},
+        {"an asset the game does not have",proc(l:^asset.Scene) {b:=UNTRUSTED_BLOCK;b.material={0x77,7};untrusted_block_set(l,b)},{components=allowed},.Unknown_Reference,"Scene_Test_Block","material",.Refused},
+        {"an instance of a prefab the game does not have",proc(l:^asset.Scene) {
+            other:asset.Scene;asset.scene_init(&other,l.types,asset.KIND_PREFAB,{0x77,8});defer asset.scene_destroy(&other)
+            asset.scene_entity_add(&other,1,0,"Other")
+            other.info.root=1
+            asset.scene_instantiate(l,&other,{0x77,8},0)
+        },{components=allowed},.Unknown_Reference,"","",.None},
+        {"a reference to a scene of a player",proc(l:^asset.Scene) {
+            asset.scene_entity_add(l,3,0,"Room")
+            asset.scene_set(l,3,"Scene_Reference",&Scene_Reference{scene=UNTRUSTED_GUEST_ROOM})
+        },{components=referencing},.Not_Allowed,"Scene_Reference","",.None},
+        {"a reference to a scene that is not there",proc(l:^asset.Scene) {
+            asset.scene_entity_add(l,3,0,"Room")
+            asset.scene_set(l,3,"Scene_Reference",&Scene_Reference{scene={0x77,9}})
+        },{components=referencing},.Unknown_Reference,"Scene_Reference","scene",.Refused},
+        // What the rules allow loads, and replaces the world.
+        {"any component of the world",proc(l:^asset.Scene) {asset.scene_set(l,1,"Scene_Test_Link",&Scene_Test_Link{core.Entity(2)})},{},.None,"","",.None},
+        {"a reference to a scene the game ships",proc(l:^asset.Scene) {
+            asset.scene_entity_add(l,3,0,"Room")
+            asset.scene_set(l,3,"Scene_Reference",&Scene_Reference{scene=UNTRUSTED_ROOM})
+        },{components=referencing},.None,"","",.None},
+    }
+    for c,i in cases {
+        if !untrusted_level_write(t,&p.types,fmt.tprintf("%s/case%d.scene",guest,i),{0x4a,10+u64(i)},c.edit) {return}
+        report,error=load_untrusted(w,&p.app,fmt.tprintf("levels/case%d.scene",i),c.rules)
+        testing.expectf(t,error==c.error,"%s: %v, not %v",c.name,error,c.error)
+        if c.error==.None {continue}
+        testing.expectf(t,untrusted_text(report,error)!="","%s: says what failed",c.name)
+        testing.expectf(t,report.refused.component==c.component,"%s: component %q",c.name,report.refused.component)
+        testing.expectf(t,base.text_get(report.refused.field[:])==c.field,"%s: field %q",c.name,base.text_get(report.refused.field[:]))
+        testing.expectf(t,report.refused.fault==c.fault,"%s: fault %v",c.name,report.refused.fault)
+        testing.expectf(t,p.world.entities.alive==2 && core.entity_of(&p.world.entities,base.Entity_Id(1))==first,"%s: the world is as it was",c.name)
+        blocks=core.read(&p.world.blocks)
+        testing.expectf(t,core.count(blocks)==1 && core.at(blocks,0).size==UNTRUSTED_BLOCK.size,"%s: the block is as it was",c.name)
+    }
+}
+
+// Whatever the file of a level holds, random bytes or random values, its load
+// returns: it fails leaving the world as it was or loads, and frees all it took.
+@(test)
+an_untrusted_level_of_random_bytes_or_values_never_crashes :: proc(t:^testing.T) {
+    p:Scene_Test_Project
+    guest,ok:=untrusted_project_open(t,&p,"hostile")
+    defer {scene_test_project_close(&p);os.remove_all(guest)}
+    if !ok {return}
+    allowed:=[]typeid{Scene_Test_Block,Scene_Test_Lamp,Scene_Reference}
+    w:=host.app_world_ref(&p.app,p.world)
+    path:=fmt.tprintf("%s/hostile.scene",guest)
+    rng:=base.rng_make(0x5eed)
+    floats:=[]f32{transmute(f32)u32(0x7fc00000),transmute(f32)u32(0x7f800000),transmute(f32)u32(0xff800000),max(f32),-max(f32),0,1,99,100.5,-0.5}
+    assets:=[]base.Asset_Id{{},TEST_LAMP,UNTRUSTED_ROOM,UNTRUSTED_GUEST_ROOM,{0x77,1}}
+    pick :: proc(rng:^base.Rng,below:int) -> int {return int(base.rng_u64(rng)%u64(below))}
+    tracking:mem.Tracking_Allocator
+    mem.tracking_allocator_init(&tracking,context.allocator)
+    defer mem.tracking_allocator_destroy(&tracking)
+    loaded,refused:=0,0
+    for round in 0..<300 {
+        runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+        level:asset.Scene;asset.scene_init(&level,&p.types,asset.KIND_SCENE,{0x5a,u64(round)})
+        count:=1+pick(&rng,48)
+        for e in 1..=count {
+            asset.scene_entity_add(&level,base.Entity_Id(e),pick(&rng,3)==0?base.Entity_Id(1+pick(&rng,e)):0,"E")
+            switch pick(&rng,3) {
+            case 0:
+                b:Scene_Test_Block
+                for &v in b.size {v=floats[pick(&rng,len(floats))]}
+                b.shape=Scene_Test_Shape(pick(&rng,3))
+                b.material=assets[pick(&rng,len(assets))]
+                b.link=core.Entity(pick(&rng,count+8))
+                asset.scene_set(&level,base.Entity_Id(e),"Scene_Test_Block",&b)
+            case 1:
+                asset.scene_set(&level,base.Entity_Id(e),"Scene_Test_Lamp",&Scene_Test_Lamp{floats[pick(&rng,len(floats))],1})
+            case 2:
+                r:=Scene_Reference{scene=assets[pick(&rng,len(assets))],rule=Section_Rule(pick(&rng,4)),extents={floats[pick(&rng,len(floats))],1,1}}
+                asset.scene_set(&level,base.Entity_Id(e),"Scene_Reference",&r)
+            }
+        }
+        data,written:=asset.scene_bytes(&level,context.temp_allocator)
+        asset.scene_destroy(&level)
+        if !testing.expect_value(t,written,asset.Error.None) {return}
+        switch round%4 {
+        case 1:
+            // Random bytes.
+            data=make([]u8,pick(&rng,4096),context.temp_allocator)
+            for &b in data {b=u8(base.rng_u32(&rng))}
+        case 2,3:
+            // Bytes of the file changed at random; then its hash made to match them again.
+            for _ in 0..<1+pick(&rng,8) {data[pick(&rng,len(data))]=u8(base.rng_u32(&rng))}
+            if round%4==3 && len(data)>=asset.HEADER_SIZE {(cast(^asset.Header)raw_data(data)).content_hash=asset.blob_hash(data)}
+        }
+        if !testing.expect(t,serial.file_write_atomic(path,data)==.None) {return}
+        alive:=p.world.entities.alive
+        saved:=context.allocator
+        context.allocator=mem.tracking_allocator(&tracking)
+        report,error:=load_untrusted(w,&p.app,round%2==0?"levels/hostile.scene":path,{components=allowed,max_entities=40,max_bytes=1<<16})
+        _=untrusted_text(report,error)
+        context.allocator=saved
+        if error==.None {loaded+=1} else {
+            refused+=1
+            testing.expectf(t,p.world.entities.alive==alive,"round %d: a load that fails (%v) leaves the world as it was",round,error)
+        }
+        testing.expectf(t,len(tracking.allocation_map)==0 && len(tracking.bad_free_array)==0,"round %d: the load frees all it took",round)
+    }
+    testing.expect(t,loaded>0 && refused>0,"some levels load and some do not")
 }

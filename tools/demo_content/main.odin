@@ -18,6 +18,7 @@ import "mirai:host"
 import lib "mirai:std/anim"
 import "mirai:std/base"
 import mm "mirai:std/math"
+import "mirai:std/serial"
 import "mirai:ui"
 
 // Writes every generated asset of the demo project: the imports of
@@ -28,7 +29,7 @@ import "mirai:ui"
 // again gives the same bytes. The other scenes, the prefabs of
 // demo/assets/prefabs and the materials of demo/assets/materials are authored.
 //
-//   odin run tools/demo_content -collection:mirai=. -collection:plugins=plugins -custom-attribute:component,storage,step,loops,stage,after,before,server,shared,locks,host,by_world,copy,swap,free,replicated,setting,scene,description,queue,events,keep,reset,net_message,from,reliable,params,names,name_bits,name,record -- [root of the repository]
+//   odin run tools/demo_content -collection:mirai=. -collection:plugins=plugins -custom-attribute:component,storage,step,loops,stage,after,before,server,shared,locks,host,by_world,copy,copy_kept,swap,free,replicated,setting,description,queue,events,keep,persist,single,far,reset,net_message,from,reliable,params,names,name_bits,name,name_requires,presentation,record -- [root of the repository]
 
 @(private) id_of :: proc(kind,name:string) -> base.Asset_Id {return base.asset_id_named(fmt.tprintf("%s\x1fdemo_content\x1f%s",kind,name))}
 
@@ -40,6 +41,7 @@ HUM_SECONDS :: 2
 Out :: struct {
     root:string,
     types:asset.Types,
+    actions:[]serial.Choice, // the actions of the demo with their numbers, which types.schema names
     failed:bool,
     slabs:map[string]base.Asset_Id, // the meshes of slab(), by their file
 }
@@ -365,6 +367,8 @@ main :: proc() {
     o.root=len(os.args)>1?os.args[1]:"."
     asset.types_init(&o.types)
     defer asset.types_destroy(&o.types)
+    actions_load(&o)
+    if o.failed {os.exit(1)}
     for folder in ([]string{"assets/ui","assets/animations","assets/sounds","assets/textures","assets/scenes","assets/prefabs","assets/data"}) {os.make_directory_all(path(&o,folder))}
     if len(os.args)>2 && os.args[2]=="--physics-only" {
         write_destruction_scene(&o)

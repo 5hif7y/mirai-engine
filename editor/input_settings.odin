@@ -751,7 +751,7 @@ Api_Input :: struct {
 }
 Api_Input_Action :: struct {
     name:[64]u8 `mirai:"text,label=What input.set and input.mirai call it"`,
-    value:i64 `mirai:"label=Its value of input.Action in the code"`,
+
     kind:[8]u8 `mirai:"text,label=Button; Axis or Axis2"`,
     source:[8]u8 `mirai:"text,label=code: the default of the code; file: input.mirai of the project changes it"`,
     bindings:u8 `mirai:"any,label=The bindings in effect as input.mirai writes them"`,
@@ -797,7 +797,7 @@ input_api_write :: proc(s:^Session,out:^serial.Writer) {
         first=false
         serial.write_u8(out,'{')
         api.write_text(out,"name",entry.name,true)
-        api.write_int(out,"value",entry.value)
+
         api.write_text(out,"kind",reflect.enum_string(m.kinds[action]))
         api.write_text(out,"source",input.input_map_action_same(m,&st.code,action)?"code":"file")
         api.write_key(out,"bindings")

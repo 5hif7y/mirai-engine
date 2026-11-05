@@ -122,6 +122,7 @@ World_Info :: struct {
     named_types:[]Named_Type_Info, // the types @(names)
     names:[]Name_Info,          // their constants, together by type in the order they are declared
     name_bits:[]Name_Bits_Info, // the types @(name_bits)
+    actions:[]Actions_Info,     // the enums @(actions), in the order of their values
     records:[]Record_Info,      // the types @(record)
     steps:[]Step_Info,
     init:[Place]proc(data:rawptr,allocator:runtime.Allocator) -> bool,

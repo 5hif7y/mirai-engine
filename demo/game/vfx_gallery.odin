@@ -59,15 +59,15 @@ Vfx_Impacts :: struct {
 }
 
 @(step="input")
-vfx_gallery_reset :: proc(views:core.Read(Vfx_Gallery_View),actions:core.Ref(inp.Frame_Actions),scenes:^scene.Scene_Requests) {
-    if core.count(views)>0 && inp.action_pressed(&actions.actions,PHYSICS_RESET) {scene.request_path(scenes,VFX_GALLERY_SCENE)}
+vfx_gallery_reset :: proc(views:core.Read(Vfx_Gallery_View),actions:inp.Frame_Input_Of(Action),scenes:^scene.Scene_Requests) {
+    if core.count(views)>0 && inp.pressed(actions,.Physics_Reset) {scene.request_path(scenes,VFX_GALLERY_SCENE)}
 }
 
 @(step="fixed")
-vfx_gallery_actions :: proc(views:^core.Table(Vfx_Gallery_View),actions:core.Ref(inp.Actions),time:core.Time) {
+vfx_gallery_actions :: proc(views:^core.Table(Vfx_Gallery_View),actions:inp.Input_Of(Action),time:core.Time) {
     if !time.playing || !(time.dt>0) || core.count(core.read(views))==0 {return}
-    previous,next,overview:=inp.action_pressed(actions.ptr,GALLERY_PREVIOUS),inp.action_pressed(actions.ptr,GALLERY_NEXT),inp.action_pressed(actions.ptr,GALLERY_OVERVIEW)
-    use:=inp.action_pressed(actions.ptr,USE)
+    previous,next,overview:=inp.pressed(actions,.Gallery_Previous),inp.pressed(actions,.Gallery_Next),inp.pressed(actions,.Gallery_Overview)
+    use:=inp.pressed(actions,.Use)
     if !(previous || next || overview || use) {return}
     for &view in core.writable(views) {
         if overview {view.station=-1}

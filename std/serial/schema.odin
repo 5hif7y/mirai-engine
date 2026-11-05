@@ -29,13 +29,16 @@ Type_Kind :: enum u8 {
 }
 
 // An integer whose values have names (core @(names)) or whose bits do: text
-// and paths read and write it by those names, saved data keeps the number,
-// and its layout does not depend on them.
+// and paths read and write it by those names. Saved data keeps the number and
+// its layout does not depend on the names, unless its numbers are generated
+// (by_name): then the names are its layout and a value moves by name, as the
+// member of an enum does.
 Named_Kind :: enum u8 {None,Values,Bits}
 
 Type :: struct {
     kind:Type_Kind,
     named:Named_Kind, // Int and Uint: choices name its values or its bits
+    by_name:bool,     // named: saved data moves its values by name
     size,align:u32,
     name:string,     // "" for anonymous types
     name_hash:u64,
@@ -77,6 +80,7 @@ Choice :: struct {name:string,value:i64}
 Named :: struct {
     choices:[]Choice,
     bits:bool,
+    by_name:bool, // the numbers are generated, so the names are what stays
 }
 
 // A closed set of types. Names are owned by the schema, so it outlives the
@@ -148,6 +152,29 @@ schema_find :: proc(s:^Schema,name_hash:u64) -> (Type_Index,bool) {
     return TYPE_NONE,false
 }
 
+// Renames the choice old as name in every type that moves by name and has no
+// choice name yet: what data saved with a renamed action keeps of it. How
+// many types it renamed it in; it stops without memory.
+schema_choice_rename :: proc(s:^Schema,old,name:string) -> (renamed:int) {
+    if old==name || name=="" {return}
+    for type in s.types {
+        if type.named==.None || !type.by_name {continue}
+        choices:=s.choices[type.first:][:type.count]
+        at,taken:=-1,false
+        for choice,i in choices {
+            if choice.name==old {at=i}
+            taken||=choice.name==name
+        }
+        if at<0 || taken {continue}
+        copied,error:=strings.clone(name,s.allocator)
+        if error!=nil {return}
+        delete(choices[at].name,s.allocator)
+        choices[at].name=copied
+        renamed+=1
+    }
+    return
+}
+
 // Adds T and every type it contains. Fails, with s.error set, when T holds
 // anything that is not plain data: pointers, slices, strings, maps, unions.
 schema_add :: proc(s:^Schema,$T:typeid) -> (index:Type_Index,ok:bool) {
@@ -174,21 +201,36 @@ schema_layout_hash :: proc(s:^Schema,index:Type_Index) -> u64 {
             hash=base.hash_combine(hash,u64(field.offset))
             hash=base.hash_combine(hash,schema_layout_hash(s,field.type))
         }
-    case .Enum,.Bit_Set:
-        for choice in s.choices[type.first:][:type.count] {
-            hash=base.hash_combine(hash,base.name_hash(choice.name))
-            hash=base.hash_combine(hash,u64(choice.value))
-        }
     case .Array:
         hash=base.hash_combine(hash,schema_layout_hash(s,type.elem))
     }
+    if layout_named(type) {hash=layout_choices(s,type,hash)}
     return hash
 }
 
-// What the layout of a type counts: the names of an integer are not its layout.
+// What the layout of a type counts: how many names an integer has is not its
+// layout; layout_named says when the names themselves are.
 @(private)
 layout_count :: proc "contextless" (type:Type) -> u32 {
     return type.kind==.Int || type.kind==.Uint?0:type.count
+}
+
+// Whether the names of a type are its layout: an enum's, a bit set's and
+// those of an integer that moves by name.
+@(private)
+layout_named :: proc "contextless" (type:Type) -> bool {
+    return type.kind==.Enum || type.kind==.Bit_Set || type.named!=.None && type.by_name
+}
+
+@(private)
+layout_choices :: proc(s:^Schema,type:Type,hash:u64) -> u64 {
+    hash:=hash
+    if type.by_name {hash=base.hash_combine(hash,u64(type.named))}
+    for choice in s.choices[type.first:][:type.count] {
+        hash=base.hash_combine(hash,base.name_hash(choice.name))
+        hash=base.hash_combine(hash,u64(choice.value))
+    }
+    return hash
 }
 
 // How text and paths take a type: a named integer as its enum or its bit set.
@@ -246,6 +288,7 @@ schema_add_info :: proc(s:^Schema,info:^runtime.Type_Info,path:string) -> (Type_
         type.kind=variant.signed?.Int:.Uint
         if names,is_named:=s.named[info.id];is_named {
             type.named=names.bits?.Bits:.Values
+            type.by_name=names.by_name
             type.first,type.count=u32(len(s.choices)),u32(len(names.choices))
             for choice in names.choices {append(&s.choices,Choice{strings.clone(choice.name,s.allocator),choice.value})}
         }

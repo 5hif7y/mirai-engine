@@ -40,9 +40,9 @@ description: Mirai standard library for games, with the packages std/base, jobs,
     [perception](references/ai.md#perception-and-places-perceptionodin-placesodin).
 - Input actions and device types: [std/input](references/input.md). The rules of a game
   (inventories, dialogues, timers, statistics) are not in `std`.
-- Meshes, MikkTSpace tangents, convex hull, slicing, fracture, triangulation, simplification
-  (meshoptimizer port), clusters and their level DAG, and convex decomposition:
-  [std/geom](references/geom.md).
+- Meshes, MikkTSpace tangents, convex hull, slicing, fracture, triangulation and convex partition
+  of polygons, simplification (meshoptimizer port), clusters and their level DAG, and convex
+  decomposition: [std/geom](references/geom.md).
 - Uniform grid, spatial hash and octree: [std/spatial](references/spatial.md). The AABB tree and the
   BVH are in [physics](../mirai-physics/references/physics.md#stdspatial).
 - Streams, schemas, hashes, import and migration of values (`std/serial`):

@@ -4,30 +4,38 @@ import "core:strings"
 import "core:testing"
 import "mirai:core"
 
-@(private="file") MOVE :: Action(0)
-@(private="file") JUMP :: Action(2)
+// An enum @(actions) whose base the generator made 3, and an action of the game at 40.
+@(private="file") Test_Action :: enum u8 {Move,Jump}
+@(private="file") MOVE :: Action(3)
+@(private="file") JUMP :: Action(4)
 @(private="file") HIT :: Action(40)
 
 @(private="file")
 Test_Defaults :: struct {
     count:int,
-    defaults:[2]Action_Default,
+    defaults:[Test_Action]Action_Default,
 }
 
 @(private="file")
 test_defaults :: proc(dst:rawptr) {
     (cast(^Test_Defaults)dst)^={defaults={
-        action_default(MOVE,.Axis2,binding_keys(.A,.D,.S,.W),binding_gamepad_stick(.Left)),
-        action_default(JUMP,.Button,binding_key(.Space)),
+        .Move=action_default(.Axis2,binding_keys(.A,.D,.S,.W),binding_gamepad_stick(.Left)),
+        .Jump=action_default(.Button,binding_key(.Space)),
     }}
 }
 
-
 @(private="file")
 TEST_NAMES :: [3]core.Name_Info{
-    {type=Action,value=0,name="move",file="plugins/test/move.odin",line=3},
-    {type=Action,value=2,name="jump",file="plugins/test/move.odin",line=4},
+    {type=Action,value=3,name="move",file="plugins/test/move.odin",line=3},
+    {type=Action,value=4,name="jump",file="plugins/test/move.odin",line=4},
     {type=Action,value=40,name="hit",file="game/game.odin",line=7,project=true},
+}
+
+@(private="file")
+test_info :: proc(names:[]core.Name_Info,storages:[]core.Storage_Info) -> core.World_Info {
+    @(static) actions:=[1]core.Actions_Info{{type=Test_Action,base=3,library="test"}}
+    actions[0].info=type_info_of(Test_Action)
+    return {names=names,storages=storages,actions=actions[:]}
 }
 
 // The defaults the code gives its actions are in the map without a step that
@@ -36,7 +44,7 @@ TEST_NAMES :: [3]core.Name_Info{
 the_defaults_of_the_code_need_no_step :: proc(t:^testing.T) {
     names:=TEST_NAMES
     storages:=[]core.Storage_Info{{name="Test_Defaults",type=Test_Defaults,info=type_info_of(Test_Defaults),default=test_defaults}}
-    info:=core.World_Info{names=names[:],storages=storages}
+    info:=test_info(names[:],storages)
     problems:core.Problems
     m:Input_Map
     input_map_make(&m,&info,"input.mirai",`{"actions":[{"name":"hit","kind":"Button","bindings":[{"mouse_button":"Left"}]},{"name":"jump","kind":"Button","bindings":[{"key":"J"}]}]}`,&problems)
@@ -47,16 +55,63 @@ the_defaults_of_the_code_need_no_step :: proc(t:^testing.T) {
     device:=core.Input{keys_down={.W,.J,.Space},keys_pressed={.W,.J,.Space},mouse_down={.Left},mouse_pressed={.Left}}
     actions:Actions
     actions_update(&actions,&m,&device)
-    testing.expect(t,action_vector(&actions,MOVE)==[2]f32{0,1})
-    testing.expect(t,action_pressed(&actions,JUMP),"input.mirai binds jump to J")
-    testing.expect(t,action_pressed(&actions,HIT))
+    testing.expect(t,action(&actions,MOVE).vector==[2]f32{0,1})
+    testing.expect(t,action(&actions,JUMP).pressed,"input.mirai binds jump to J")
+    testing.expect(t,action(&actions,HIT).pressed)
     testing.expect_value(t,actions.count,u32(41))
 
     device={keys_down={.Space},keys_pressed={.Space}}
     actions_update(&actions,&m,&device)
-    testing.expect(t,!action_down(&actions,JUMP),"Space is no longer a binding of jump")
-    testing.expect(t,action_released(&actions,HIT))
+    testing.expect(t,!action(&actions,JUMP).down,"Space is no longer a binding of jump")
+    testing.expect(t,action(&actions,HIT).released)
     testing.expect(t,action(&actions,Action(50))=={},"a value the map does not have is released")
+}
+
+@(private="file") Loose :: enum u8 {Fire}
+@(private="file") Loose_Defaults :: struct {defaults:[Loose]Action_Default}
+
+// Defaults are given by member of an enum @(actions), which take the actions
+// from its base on; those of an enum that is not one are a problem.
+@(test)
+defaults_are_given_by_member_of_an_enum_of_actions :: proc(t:^testing.T) {
+    names:=TEST_NAMES
+    storages:=[]core.Storage_Info{
+        {name="Test_Defaults",type=Test_Defaults,info=type_info_of(Test_Defaults),default=test_defaults},
+        {name="Loose_Defaults",type=Loose_Defaults,info=type_info_of(Loose_Defaults),default=proc(dst:rawptr) {(cast(^Loose_Defaults)dst)^={defaults={.Fire=action_default(.Button,binding_key(.F))}}}},
+    }
+    info:=test_info(names[:],storages)
+    problems:core.Problems
+    m:Input_Map
+    input_map_make(&m,&info,"","",&problems)
+    testing.expect(t,input_map_has(&m,MOVE,.Axis2) && input_map_has(&m,JUMP,.Button),"the members take 3 and 4")
+    testing.expect(t,m.declared&(action_bit(0)|action_bit(1)|action_bit(2))==0,"below the base nothing is declared")
+    loose:=core.problem_find(&problems,core.NONE,"input.default_unknown")
+    testing.expect(t,loose!=nil && strings.contains(core.problem_text(loose),"Loose_Defaults gives defaults to the members of Loose, which is not an enum @(actions)"))
+}
+
+// A step reads the actions of its enum by member, and the base of the enum
+// makes them the actions of the world: of the tick and of the frame.
+@(test)
+typed_reads_take_the_actions_of_their_enum :: proc(t:^testing.T) {
+    names:=TEST_NAMES
+    storages:=[]core.Storage_Info{{name="Test_Defaults",type=Test_Defaults,info=type_info_of(Test_Defaults),default=test_defaults}}
+    info:=test_info(names[:],storages)
+    m:Input_Map
+    input_map_make(&m,&info,"","",nil)
+    device:=core.Input{keys_down={.D,.Space},keys_pressed={.D,.Space}}
+    tick:Actions
+    actions_update(&tick,&m,&device)
+    frame:Frame_Actions
+    device={keys_down={.D}}
+    actions_update(&frame.actions,&m,&device)
+
+    input:=Input_Of(Test_Action){actions=core.ref(&tick),base=3}
+    testing.expect_value(t,action_of(input,.Jump),JUMP)
+    testing.expect(t,pressed(input,.Jump) && down(input,.Jump) && !released(input,.Jump))
+    testing.expect_value(t,vector(input,.Move),[2]f32{1,0})
+    shown:=Frame_Input_Of(Test_Action){actions=core.ref(&frame),base=3}
+    testing.expect(t,!down(shown,.Jump) && vector(shown,.Move)=={1,0},"the frame has its own")
+    testing.expect_value(t,action_of(shown,.Move),MOVE)
 }
 
 // A name in input.mirai that the code does not declare is a problem that
@@ -66,14 +121,14 @@ the_defaults_of_the_code_need_no_step :: proc(t:^testing.T) {
 what_the_code_does_not_declare_is_a_problem :: proc(t:^testing.T) {
     names:=TEST_NAMES
     storages:=[]core.Storage_Info{{name="Test_Defaults",type=Test_Defaults,info=type_info_of(Test_Defaults),default=test_defaults}}
-    info:=core.World_Info{names=names[:],storages=storages}
+    info:=test_info(names[:],storages)
     problems:core.Problems
     m:Input_Map
     input_map_make(&m,&info,"demo/input.mirai",`{"actions":[{"name":"jump","kind":"Button","bindings":[{"key":"J"}]},{"name":"fire","kind":"Button","bindings":[{"key":"F"}]}]}`,&problems)
     unknown:=core.problem_find(&problems,core.NONE,"input.unknown_action")
     if testing.expect(t,unknown!=nil) {
         text:=core.problem_text(unknown)
-        for want in ([]string{`demo/input.mirai names the action "fire"`,"move, jump, hit","FIRE :: input.Action("}) {
+        for want in ([]string{`demo/input.mirai names the action "fire"`,"move, jump, hit","a member Fire of the enum @(actions)"}) {
             testing.expectf(t,strings.contains(text,want),"%q is not in %q",want,text)
         }
     }
@@ -88,12 +143,13 @@ what_the_code_does_not_declare_is_a_problem :: proc(t:^testing.T) {
 }
 
 // What the player rebinds goes to its options as the actions that differ from
-// the code and the project, and read over them gives the same map.
+// the code and the project, and read over them gives the same map; an action
+// the game no longer declares is left out of them, and the rest holds.
 @(test)
 the_bindings_the_player_changed_come_back_over_those_of_the_project :: proc(t:^testing.T) {
     names:=TEST_NAMES
     storages:=[]core.Storage_Info{{name="Test_Defaults",type=Test_Defaults,info=type_info_of(Test_Defaults),default=test_defaults}}
-    info:=core.World_Info{names=names[:],storages=storages}
+    info:=test_info(names[:],storages)
     problems:core.Problems
     PROJECT :: `{"actions":[{"name":"hit","kind":"Button","bindings":[{"mouse_button":"Left"}]}]}`
     below,m:Input_Map
@@ -115,11 +171,23 @@ the_bindings_the_player_changed_come_back_over_those_of_the_project :: proc(t:^t
     actions:Actions
     device:=core.Input{keys_down={.J},keys_pressed={.J}}
     actions_update(&actions,&again,&device)
-    testing.expect(t,action_pressed(&actions,JUMP),"the options bind jump to J")
+    testing.expect(t,action(&actions,JUMP).pressed,"the options bind jump to J")
     device={keys_down={.Space},keys_pressed={.Space}}
     actions_update(&actions,&again,&device)
-    testing.expect(t,!action_down(&actions,JUMP),"Space is the binding of the project, which the options replaced")
+    testing.expect(t,!action(&actions,JUMP).down,"Space is the binding of the project, which the options replaced")
     same:=again
     unchanged,_:=input_map_text(&same,&again,&info)
     testing.expect_value(t,unchanged,"")
+
+    // An update of the game renamed or removed an action the player had bound.
+    stale,_:=strings.replace(text,`"actions": [`,`"actions": [{"name": "gone", "kind": "Button", "bindings": [{"key": "G"}]},`,1,context.temp_allocator)
+    kept:Input_Map
+    problems={}
+    input_map_make(&kept,&info,"input.mirai",PROJECT,&problems,"options/input.mirai",stale)
+    testing.expect(t,problems.count==1 && strings.has_prefix(string(problems.entries[0].code[:]),"input.options_gone"),string(problems.entries[0].text[:]))
+    testing.expect_value(t,kept.hold_ticks,u32(40))
+    actions_update(&actions,&kept,&core.Input{keys_down={.J},keys_pressed={.J}})
+    testing.expect(t,action(&actions,JUMP).pressed,"the rest of the options holds")
+    rewritten,_:=input_map_text(&kept,&below,&info)
+    testing.expect(t,!strings.contains(rewritten,`"gone"`),"writing the options again drops it")
 }

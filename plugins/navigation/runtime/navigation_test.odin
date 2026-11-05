@@ -792,7 +792,7 @@ agents_test_step :: proc(f:^Nav_Test,g:^Agents_Test) {
         &g.roamings,&f.disabled,{&f.transforms,core.read(&f.parents),&f.places,&f.jumps},&f.requests,time,&f.problems)
     agents_test_settle(f,g)
     navigation_crossing(core.read(&g.paths),&f.moves,core.read(&f.characters),core.read(&g.walks),core.read(&f.motions),core.read(&g.worlds),core.ref(&f.state),time)
-    phys.locomotion_step(&f.characters,&f.moves,&g.inputs,core.read(&g.walks),core.read(&g.flights),core.read(&g.swims),core.read(&f.character_states),core.read(&f.motions),core.read(&g.worlds),core.read(&g.remotes),core.ref(&f.state),{},&g.loco,time,core.CLOCK_DEFAULT,&f.problems)
+    phys.locomotion_step(&f.characters,&f.moves,&g.inputs,core.read(&g.walks),core.read(&g.flights),core.read(&g.swims),core.read(&f.character_states),core.read(&f.motions),core.read(&g.worlds),core.read(&g.remotes),core.ref(&f.state),{},{},&g.loco,time,core.CLOCK_DEFAULT,&f.problems)
     agents_test_settle(f,g)
     phys.physics_step(
         &f.state,core.ref(&f.physics_settings),&f.requests,&f.events,&f.meshes,&f.app,time,
@@ -1552,12 +1552,13 @@ a_seated_agent_walks_where_it_is_asked_while_its_seat_drives_it :: proc(t:^testi
     }
     agents_test_settle(&f,&g)
     core.get(&g.agents,walkers[0]).seated=true
-    core.get(&g.inputs,walkers[0]).buttons=input.action_bit(phys.JUMP)
+    held:=input.action_bit(2) // a button the seat holds
+    core.get(&g.inputs,walkers[0]).buttons=held
     for e,i in walkers {nav_move_to(&g.requests,e,{6,0,f32(i)*4-2})}
     for _ in 0..<30 {agents_test_step(&f,&g)}
     seated,_:=core.get(core.read(&g.inputs),walkers[0])
     left,_:=core.get(core.read(&g.inputs),walkers[1])
-    testing.expect(t,seated.move!={} && seated.buttons==input.action_bit(phys.JUMP),"it steers and the seat keeps its buttons")
+    testing.expect(t,seated.move!={} && seated.buttons==held,"it steers and the seat keeps its buttons")
     testing.expect_value(t,left.move,[3]f32{})
     arrived,_,_,failed:=agents_test_travel(&f,&g,walkers[0],10)
     testing.expect(t,arrived && !failed,"the seated agent arrives")

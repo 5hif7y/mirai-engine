@@ -5,6 +5,7 @@ import "core:testing"
 import "mirai:core"
 import input "mirai:engine/input"
 import sim "plugins:physics/runtime/sim"
+import mm "mirai:std/math"
 
 // A character of the solver driven by locomotion_move, as locomotion_step drives one of the world.
 @(private="file")
@@ -30,21 +31,28 @@ loco_test_init :: proc(f:^Loco_Test,position:[3]f32,ground:=true) -> bool {
 }
 
 @(private="file")
-loco_test_box :: proc(f:^Loco_Test,half,position:[3]f32) {
+loco_test_box :: proc(f:^Loco_Test,half,position:[3]f32,rotation:=mm.QUAT_IDENTITY,type:=sim.Body_Type.Static,density:f32=1000) -> sim.Body_Handle {
     desc:=sim.BODY_DESC_DEFAULT
-    desc.type,desc.position=.Static,position
+    desc.type,desc.position,desc.rotation=type,position,rotation
     body:=sim.body_create(&f.w,desc)
     shape:=sim.SHAPE_DESC_DEFAULT
     shape.geometry=sim.Box{half}
+    shape.density=density
     sim.shape_create(&f.w,body,shape)
+    return body
 }
+
+// The actions of a test world: input.Look_Action from 0, and Walk_Action after it.
+@(private) TEST_WALK_BASE :: input.Action(len(input.Look_Action))
+@(private) TEST_MOVE :: TEST_WALK_BASE+input.Action(Walk_Action.Move)
+@(private) TEST_JUMP :: TEST_WALK_BASE+input.Action(Walk_Action.Jump)
 
 @(private="file")
 loco_test_tick :: proc(f:^Loco_Test,move:[3]f32,ticks:=1,buttons:=input.Action_Mask(0),yaw:f32=0,pitch:f32=0) {
     for _ in 0..<ticks {
         found:=character_state_of(sim.character_state(&f.w,f.ch))
         given:=input.Move_Input{move=move,look_yaw=yaw,look_pitch=pitch,buttons=buttons}
-        m:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,found,1,given,sim.character_velocity(&f.w,f.ch),f.w.gravity,1.0/60)
+        m:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,found,1,given,TEST_JUMP,sim.character_velocity(&f.w,f.ch),f.w.gravity,1.0/60)
         sim.character_set_move(&f.w,f.ch,m)
         sim.world_step(&f.w,1.0/60)
     }
@@ -85,7 +93,7 @@ a_jump_reaches_the_height_of_the_locomotion_once_per_press :: proc(t:^testing.T)
         apex:f32
         for i in 0..<120 {
             // The button stays down: only the press jumps.
-            loco_test_tick(&f,{},1,input.action_bit(JUMP))
+            loco_test_tick(&f,{},1,input.action_bit(TEST_JUMP))
             apex=max(apex,sim.character_position(&f.w,f.ch).y)
             if i==5 {testing.expect(t,f.loco.mode==MODE_FALLING && f.loco.jumped)}
         }
@@ -105,7 +113,7 @@ coyote_time_allows_a_jump_just_after_walking_off_a_ledge :: proc(t:^testing.T) {
         for f.loco.mode==MODE_WALKING {loco_test_tick(&f,{0,0,-1})}
         testing.expect(t,f.loco.coyote>0)
         loco_test_tick(&f,{0,0,-1},wait)
-        loco_test_tick(&f,{0,0,-1},1,input.action_bit(JUMP))
+        loco_test_tick(&f,{0,0,-1},1,input.action_bit(TEST_JUMP))
         loco_test_tick(&f,{0,0,-1},1)
         if i==0 {
             testing.expect(t,f.loco.jumped && sim.character_velocity(&f.w,f.ch).y>4)
@@ -219,14 +227,14 @@ a_mode_needs_its_component :: proc(t:^testing.T) {
     set_mode(&requests,flier,MODE_FLYING)
     physics:Physics_State
     problems:core.Problems
-    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&worlds),core.read(&remotes),core.ref(&physics),{},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
+    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&worlds),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
     walking,_:=core.get(core.read(&characters),walker)
     flying,_:=core.get(core.read(&characters),flier)
     testing.expect(t,walking.mode!=MODE_FLYING,"without a Fly it does not fly")
     testing.expect_value(t,flying.mode,MODE_FLYING)
     testing.expect(t,core.problem_find(&problems,walker,"locomotion.mode_component")!=nil)
     set_mode(&requests,walker,MODE_FLYING)
-    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&worlds),core.read(&remotes),core.ref(&physics),{},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
+    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&worlds),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
     walking,_=core.get(core.read(&characters),walker)
     testing.expect(t,walking.mode!=MODE_FLYING,"asking for flying without a Fly is refused")
     core.table_settle(&inputs,&es);core.table_settle(&moves,&es)
@@ -270,7 +278,7 @@ a_swimmer_walks_in_swims_dives_surfaces_and_climbs_out_onto_a_ledge :: proc(t:^t
     testing.expectf(t,near(head(&f),-SWIM_DEFAULT.surface_offset,0.03),"back on the surface, head %v",head(&f))
     // To the ledge, and out onto it.
     for i:=0;i<600 && sim.character_position(&f.w,f.ch).z>-11.6;i+=1 {loco_test_tick(&f,{0,0,-1})}
-    loco_test_tick(&f,{0,0,-1},1,input.action_bit(JUMP))
+    loco_test_tick(&f,{0,0,-1},1,input.action_bit(TEST_JUMP))
     testing.expect_value(t,f.loco.mode,MODE_FALLING)
     loco_test_tick(&f,{0,0,-1},40)
     loco_test_tick(&f,{},80)
@@ -294,9 +302,130 @@ without_gravity_a_swimmer_on_the_surface_does_not_climb :: proc(t:^testing.T) {
     f.loco.mode,f.swim=MODE_SWIMMING,SWIM_DEFAULT
     found:sim.Character_State
     found.fluid,found.head_depth,found.depth={.In_Fluid},-0.25,1.55
-    given:=input.Move_Input{buttons=input.action_bit(JUMP)}
-    move:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,character_state_of(found),1,given,{},{},1.0/60)
+    given:=input.Move_Input{buttons=input.action_bit(TEST_JUMP)}
+    move:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,character_state_of(found),1,given,TEST_JUMP,{},{},1.0/60)
     testing.expect_value(t,f.loco.mode,MODE_SWIMMING)
     testing.expect_value(t,f.loco.move_count,0)
     testing.expect(t,.Float in move.flags)
+}
+
+// A motion of a character in a world a setup makes, where it starts.
+@(private="file")
+Lock_Case :: struct {
+    name:string,
+    setup:proc(f:^Loco_Test),
+    move:[3]f32,
+    buttons:input.Action_Mask,
+    yaw,pitch:f32,
+    launch:[3]f32,
+}
+
+@(private="file")
+lock_test_ground :: proc(f:^Loco_Test) {loco_test_box(f,{50,1,50},{0,-1,0})}
+
+// With Linear_Z locked nothing the step does takes a character off its plane, in any motion; without the
+// lock each of them moves it along Z.
+@(test)
+a_character_locked_along_z_stays_in_its_plane_in_every_motion :: proc(t:^testing.T) {
+    diagonal:f32=0.25*cmath.PI
+    cases:=[?]Lock_Case{
+        {name="walk",setup=lock_test_ground,move={1,0,-1}},
+        {name="jump",setup=lock_test_ground,move={1,0,-1},buttons=input.action_bit(TEST_JUMP)},
+        {name="tilted gravity",move={1,0,0},setup=proc(f:^Loco_Test) {
+            lock_test_ground(f)
+            sim.world_set_gravity(&f.w,{0,-9.81,-4})
+            sim.character_set_position(&f.w,f.ch,{0,3,0})
+        }},
+        {name="slope",move={1,0,-1},setup=proc(f:^Loco_Test) {
+            loco_test_box(f,{20,1,20},{0,-1,0},mm.quat_axis_angle({1,0,0},-20*cmath.RAD_PER_DEG))
+            sim.character_set_position(&f.w,f.ch,{0,0.5,0})
+        }},
+        {name="step and slanted wall",move={1,0,0},setup=proc(f:^Loco_Test) {
+            lock_test_ground(f)
+            loco_test_box(f,{1,0.1,1},{1.5,0.1,0})
+            loco_test_box(f,{0.2,1,3},{4,1,0},mm.quat_axis_angle({0,1,0},0.25*cmath.PI))
+        }},
+        {name="push a box",move={1,0,0},setup=proc(f:^Loco_Test) {
+            lock_test_ground(f)
+            loco_test_box(f,{0.4,0.4,0.4},{1.2,0.4,0.3},mm.quat_axis_angle({0,1,0},0.25*cmath.PI),.Dynamic,300)
+        }},
+        {name="pushed by a box",setup=proc(f:^Loco_Test) {
+            lock_test_ground(f)
+            box:=loco_test_box(f,{0.3,0.3,0.3},{-2,0.9,2},type=.Dynamic,density=2000)
+            sim.body_set_velocity(&f.w,box,{6,0,-6},{})
+        }},
+        {name="launch",setup=lock_test_ground,launch={3,5,4}},
+        {name="overlap",setup=proc(f:^Loco_Test) {
+            lock_test_ground(f)
+            loco_test_box(f,{0.5,1,0.5},{0,1,0.65})
+        }},
+        {name="moving platform",setup=proc(f:^Loco_Test) {
+            platform:=loco_test_box(f,{3,0.25,3},{0,0.25,0},type=.Kinematic)
+            sim.body_set_velocity(&f.w,platform,{0.5,0,1},{0,0.8,0})
+            sim.character_set_position(&f.w,f.ch,{0.5,0.6,0.5})
+        }},
+        {name="fly",move={0,0,-1},yaw=diagonal,pitch=0.3,setup=proc(f:^Loco_Test) {
+            lock_test_ground(f)
+            f.loco.mode,f.fly=MODE_FLYING,FLY_DEFAULT
+        }},
+        {name="swim",move={0,0,-1},yaw=diagonal,pitch=-0.5,setup=proc(f:^Loco_Test) {
+            loco_test_box(f,{50,1,50},{0,-9,0})
+            sim.fluid_create(&f.w,{shape=.Plane,position={0,1,0},density=1000})
+            sim.character_set_position(&f.w,f.ch,{0,-3,0})
+            f.loco.mode,f.swim=MODE_SWIMMING,SWIM_DEFAULT
+        }},
+    }
+    for c in cases {
+        for locked in ([2]bool{false,true}) {
+            f:Loco_Test
+            if !testing.expect(t,loco_test_init(&f,{0,0,0},false)) {return}
+            if locked {sim.character_set_locks(&f.w,f.ch,{.Lock_Linear_Z})}
+            c.setup(&f)
+            start:=sim.character_position(&f.w,f.ch)
+            off:f32
+            for tick in 0..<150 {
+                if tick==20 && c.launch!={} {sim.character_launch(&f.w,f.ch,c.launch)}
+                loco_test_tick(&f,tick<20?{}:c.move,1,tick<20?{}:c.buttons,c.yaw,c.pitch)
+                off=max(off,abs(sim.character_position(&f.w,f.ch).z-start.z))
+            }
+            moved:=sim.character_position(&f.w,f.ch)-start
+            if locked {
+                testing.expectf(t,off<1e-3,"%s: locked along Z it left its plane by %v",c.name,off)
+                testing.expectf(t,abs(sim.character_velocity(&f.w,f.ch).z)<1e-6,"%s: velocity %v",c.name,sim.character_velocity(&f.w,f.ch))
+            } else {
+                testing.expectf(t,off>0.05,"%s: without the lock it moves along Z, only %v here",c.name,off)
+            }
+            testing.expectf(t,abs(moved.x)+abs(moved.y)<1e3,"%s: %v",c.name,moved)
+            sim.world_destroy(&f.w)
+        }
+    }
+}
+
+// A Character locked along Z walks on the plane where it was made; a place puts it on another plane, where
+// it stays, and the lock taken away lets its move take it along Z again.
+@(test)
+a_place_moves_a_character_locked_along_z_to_another_plane_where_it_stays :: proc(t:^testing.T) {
+    f:Physics_Test
+    physics_test_init(&f)
+    defer physics_test_destroy(&f)
+    f.gravity={0,-9.81,0}
+    physics_test_box(&f,{0,-1,0},{50,1,50})
+    e:=core.create(&f.entities)
+    core.add(&f.transforms,e,core.Transform{{0,0,0},1,{1,1,1}})
+    core.add(&f.colliders,e,collider_character())
+    config:=character_default()
+    config.locks={.Linear_Z}
+    core.add(&f.characters,e,config)
+    core.add(&f.moves,e,Character_Move{value={ground={velocity={2,0,2},force=3200},air={velocity={2,0,2},force=800}}})
+    for _ in 0..<30 {physics_test_step(&f)}
+    at:=physics_test_pose(&f,e).position
+    testing.expectf(t,abs(at.z)<1e-3 && at.x>0.5,"walked to %v",at)
+    teleport(&f.requests,e,{at.x,0,3})
+    for _ in 0..<60 {physics_test_step(&f)}
+    after:=physics_test_pose(&f,e).position
+    testing.expectf(t,abs(after.z-3)<1e-3 && after.x>at.x+1.5,"placed at z 3, it is at %v",after)
+    core.get(&f.characters,e).locks={}
+    for _ in 0..<30 {physics_test_step(&f)}
+    free:=physics_test_pose(&f,e).position
+    testing.expectf(t,free.z>3.5,"without the lock it walks along Z again: %v",free)
 }

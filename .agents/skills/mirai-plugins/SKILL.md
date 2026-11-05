@@ -72,6 +72,10 @@ project world. Layout, manifests and build:
   documentation in <https://github.com/tomaszbk/mirai-unreal>
 - `streaming` (loading of `Spatial` sections by proximity and what crosses sections):
   [libraries](../mirai-gameplay/references/libraries.md#plugin-streaming)
+- `shapes` (editable outlines and solids of brush entities saved as source, stamps and vertex
+  edits, the derived child with mesh and collider, static or dynamic; the Shapes tool and
+  `shapes.*`):
+  [shapes.md](references/shapes.md)
 - `physics_cache` (portable recording, `Geometry_Playback`):
   [physics-cache.md](references/physics-cache.md)
 - `physics_fields` (force and strain regions): [physics-fields.md](references/physics-fields.md)

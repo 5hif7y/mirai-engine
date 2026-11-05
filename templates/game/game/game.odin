@@ -11,9 +11,9 @@ import "mirai:std/base"
 import mm "mirai:std/math"
 
 // A small game built only with the public API of the engine, to copy from.
-// The player is a physics character driven by the input actions of
-// ../input.mirai: move, look, jump, hit (breaks the wall in front of it),
-// save and load (the slot "quick"). assets/scenes/main.scene holds a floor, a
+// The player is a physics character driven by the input actions move, look,
+// jump, hit (breaks the wall in front of it), save and load (the slot
+// "quick"), bound in code. assets/scenes/main.scene holds a floor, a
 // spawn point with the prefab of the player, a destructible wall, a speaker
 // that plays a sound, a HUD (UI_Screen) with a pulsing badge and a sign above
 // the speaker (World_Widget); both interfaces show the Status component of
@@ -45,10 +45,23 @@ Status :: struct {
     hits:i32,
 }
 
-// The actions of the game; ../input.mirai binds them. move, look and jump are of physics.
-HIT :: inp.Action(16)
-SAVE :: inp.Action(17)
-LOAD :: inp.Action(18)
+// The actions of the game, bound by Game_Actions; move and jump are of physics (phys.Walk_Action)
+// and look of the engine (inp.Look_Action).
+@(actions)
+Action :: enum u8 {Hit,Save,Load}
+
+// The bindings of the actions of the game. The editor (Project Settings > Input), input.set and the
+// player write in an input.mirai only what they change of these.
+@(storage,host)
+Game_Actions :: struct {defaults:[Action]inp.Action_Default}
+
+game_actions_default :: proc "contextless" () -> Game_Actions {
+    return {defaults={
+        .Hit=inp.action_default(.Button,inp.binding_mouse_button(.Left),inp.binding_gamepad_axis(.Right_Trigger)),
+        .Save=inp.action_default(.Button,inp.binding_key(.F5),inp.binding_gamepad_button(.Start)),
+        .Load=inp.action_default(.Button,inp.binding_key(.F9),inp.binding_gamepad_button(.Back)),
+    }}
+}
 
 @(storage)
 Game :: struct {
@@ -92,13 +105,13 @@ status_show :: proc(statuses:^core.Table(Status),message:string,hit:=false) {
 @(step="fixed",server)
 game_hit :: proc(
     players:core.Read(Player),inputs:core.Read(inp.Move_Input),worlds:core.Read(core.World_Transform),
-    seats:inp.Players,physics:core.Ref(phys.Physics_State),damage:^destruct.Destruct_Requests,
+    actions:inp.Input_Of(Action),physics:core.Ref(phys.Physics_State),damage:^destruct.Destruct_Requests,
 ) {
     for row in 0..<core.count(players) {
         e:=core.entity_at(players,row)
         input,has_input:=core.get(inputs,e)
         placed,has_world:=core.get(worlds,e)
-        if !has_input || !has_world || !inp.pressed(seats,e,HIT) {continue}
+        if !has_input || !has_world || !inp.pressed(actions,e,.Hit) {continue}
         eye:=placed.position+[3]f32{0,EYE_HEIGHT,0}
         ahead:=aim_of(input.look_yaw,input.look_pitch)
         if hit,found:=phys.raycast(physics,eye,ahead,HIT_REACH,e);found {destruct.damage(damage,hit.entity,hit.point,HIT_RADIUS,ahead*HIT_IMPULSE)}
@@ -110,12 +123,12 @@ game_hit :: proc(
 @(step="fixed")
 game_play :: proc(
     statuses:^core.Table(Status),broken:core.Ref(destruct.Destruct_Events),
-    network:core.Ref(core.Network),actions:core.Ref(inp.Actions),saves:^save.Save_Requests,results:core.Ref(save.Save_Results),
+    network:core.Ref(core.Network),actions:inp.Input_Of(Action),saves:^save.Save_Requests,results:core.Ref(save.Save_Results),
 ) {
     for _ in broken.applied.items {status_show(statuses,"Hit!",true)}
     if network.role!=.Standalone {return}
-    if inp.action_pressed(actions.ptr,SAVE) {save.request_save(saves,SAVE_SLOT)}
-    if inp.action_pressed(actions.ptr,LOAD) {save.request_load(saves,SAVE_SLOT)}
+    if inp.pressed(actions,.Save) {save.request_save(saves,SAVE_SLOT)}
+    if inp.pressed(actions,.Load) {save.request_load(saves,SAVE_SLOT)}
     for result in results.queue.items {
         if result.error!=.None {
             status_show(statuses,"The slot could not be used")

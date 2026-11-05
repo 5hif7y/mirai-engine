@@ -99,7 +99,7 @@ actions are read from the seat that drives the body, with its blocks ([control](
 
 `templates/game/game/game.odin` defines:
 
-- The game's actions, which `input.mirai` binds next to those of locomotion.
+- The game's actions and their default bindings (`Game_Actions`), next to those of locomotion.
 - The prefab's character is a `Character` with `Walk`, relative to its look direction: the seat's
   actions pass to its `Move_Input` (the player of this machine; on the server, that of each
   connection).

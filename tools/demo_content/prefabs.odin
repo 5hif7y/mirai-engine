@@ -1,7 +1,9 @@
 package main
 
 import "mirai:asset"
+import "core:fmt"
 import "mirai:core"
+import build "mirai:cook/build"
 import game "mirai:demo/game"
 import audio "mirai:engine/audio"
 import inp "mirai:engine/input"
@@ -9,7 +11,10 @@ import multiplayer "plugins:multiplayer/runtime"
 import cam "mirai:engine/camera"
 import phys "plugins:physics/runtime"
 import render "mirai:engine/render"
+import "core:strings"
+import "mirai:project"
 import "mirai:std/base"
+import "mirai:std/serial"
 import portals "plugins:portals/runtime"
 
 // The prefabs the game spawns: the bodies the spawn points of the scenes give
@@ -47,9 +52,43 @@ behind_camera :: proc(s:^Scene_Out,name:string,height:f32) -> base.Entity_Id {
     return view
 }
 
+// The actions of the demo project as its generator numbers them: the schema
+// of what this writes names them, so data keeps an action by its name.
+@(private)
+actions_load :: proc(o:^Out) {
+    p,error:=project.open(fmt.tprintf("%s/demo",o.root),o.root,context.temp_allocator)
+    if error.code!=.None {
+        fmt.eprintfln("demo_content: the demo project could not be opened: %v",error)
+        o.failed=true
+        return
+    }
+    actions,errors:=build.world_actions(&p)
+    if len(errors)>0 {
+        fmt.eprintfln("demo_content: the actions of the demo are not known: %v",errors)
+        o.failed=true
+        return
+    }
+    o.actions=actions
+    o.types.schema.named=make(map[typeid]serial.Named)
+    o.types.schema.named[inp.Action]={choices=actions,by_name=true}
+    o.types.schema.named[inp.Action_Mask]={choices=actions,bits=true,by_name=true}
+}
+
+// The action of the world a member of the actions of the demo is.
+@(private)
+demo_action :: proc(o:^Out,member:game.Action) -> inp.Action {
+    name:=strings.to_lower(fmt.tprint(member),context.temp_allocator)
+    for action in o.actions {
+        if action.name==name {return inp.Action(action.value)}
+    }
+    fmt.eprintfln("demo_content: the demo project declares no action %q",name)
+    o.failed=true
+    return max(inp.Action)
+}
+
 // A camera over the shoulder of the body that the seat that drives it sees
 // through while it holds aim.
-aim_camera :: proc(s:^Scene_Out,name:string) {
+aim_camera :: proc(s:^Scene_Out,name:string,aim:inp.Action) {
     setup:=cam.camera_preset(.Aim)
     view:=entity(s,name,{0.65,1.55,1.8},{1,1,1},1)
     lens:=render.Camera{}
@@ -58,7 +97,7 @@ aim_camera :: proc(s:^Scene_Out,name:string) {
     follow:=setup.follow
     follow.target=core.Entity(1)
     put(s,view,"Camera_Follow",&follow)
-    activation:=cam.Camera_Activation{action=game.AIM,blend={seconds=0.25,ease=.Cubic_Out}}
+    activation:=cam.Camera_Activation{action=aim,blend={seconds=0.25,ease=.Cubic_Out}}
     put(s,view,"Camera_Activation",&activation)
 }
 
@@ -94,7 +133,7 @@ write_prefabs :: proc(o:^Out) {
     view:=behind_camera(&person,"Person camera",1.0)
     put(&person,1,"Drivable",&inp.Drivable{camera=core.Entity(view)})
     control_visual(&person,1,false)
-    aim_camera(&person,"Person aim camera")
+    aim_camera(&person,"Person aim camera",demo_action(o,.Aim))
     prefab_save(o,&person,"assets/prefabs/Person.prefab")
 
     dog:Scene_Out

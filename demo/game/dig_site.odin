@@ -49,7 +49,7 @@ Dig_Inventory :: struct {
 @(step="fixed",stage="react")
 dig_site :: proc(
     commands:core.Commands,sites:core.Read(Dig_Site),pickups:core.Read(Dig_Pickup),players:core.Read(Player),
-    inputs:core.Read(inp.Move_Input),seats:inp.Players,worlds:core.Read(core.World_Transform),
+    inputs:core.Read(inp.Move_Input),actions:inp.Input_Of(Action),worlds:core.Read(core.World_Transform),
     requests:^terrain.Terrain_Requests,digs:core.Ref(terrain.Terrain_Digs),inventory:^Dig_Inventory,network:core.Network,time:core.Time,
 ) {
     if core.count(sites)==0 || network.role==.Client {return}
@@ -65,7 +65,7 @@ dig_site :: proc(
         e:=core.entity_at(players,row)
         input,has_input:=core.get(inputs,e)
         placed,has_world:=core.get(worlds,e)
-        if !has_input || !has_world || !inp.pressed(seats,e,USE) {continue}
+        if !has_input || !has_world || !inp.pressed(actions,e,.Use) {continue}
         site_world,_:=core.get(worlds,site_entity)
         at:=placed.position+[3]f32{0,EYE_HEIGHT,0}+aim_of(input.look_yaw,input.look_pitch)*DIG_REACH
         local:=at-site_world.position

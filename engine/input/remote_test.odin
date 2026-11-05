@@ -94,7 +94,7 @@ a_repeated_tick_holds_what_was_held_and_not_the_mouse :: proc(t:^testing.T) {
     testing.expect(t,jump.down && !jump.pressed && jump.held_ticks==2)
     testing.expect(t,move.down && move.vector==[2]f32{0,1})
     testing.expect(t,!look.down && look.vector==[2]f32{})
-    testing.expect(t,!action_pressed(&there.actions,TEST_CONFIRM))
+    testing.expect(t,!action(&there.actions,TEST_CONFIRM).pressed)
 }
 
 // What another end sends is hostile: counts, actions and values out of range

@@ -78,7 +78,8 @@ Registry_Stats :: struct {
 
 // A folder of assets seen under prefix/, beside the root: the assets of a
 // plugin. A prefix that starts with a dot is of the program's own assets.
-Registry_Mount :: struct {folder,prefix:string}
+// A guest is a folder the program did not ship (registry_mount_guest).
+Registry_Mount :: struct {folder,prefix:string,guest:bool}
 
 // Whether lists of what a project has show a file: those under a mount whose
 // prefix starts with a dot are the program's own, found by their path.
@@ -103,6 +104,7 @@ Registry :: struct {
     // With a cache: the ids of assets that no file is any more, also those that went while the
     // program was not running, for whoever keeps something per asset. Whoever reads them clears them.
     removed:[dynamic]base.Asset_Id,
+    refused:[dynamic]string,         // files of guest mounts left out: another file of the registry has their id
     memory_time:i64,                 // of the last change in memory
     // Whether scans give the newer of two files with one id an id of its own
     // in memory (registry_duplicates_resolve): what an editor wants of a
@@ -127,12 +129,125 @@ registry_init :: proc(r:^Registry,root:string,cache:="",allocator:=context.alloc
     r.mounts=make([dynamic]Registry_Mount,allocator)
     r.memory=make([dynamic]Registry_Memory,allocator)
     r.removed=make([dynamic]base.Asset_Id,allocator)
+    r.refused=make([dynamic]string,allocator)
 }
 
 // Adds folder to what the next scan sees, its files under prefix/. The prefix
 // is a relative path with '/' that names no folder of the root.
 registry_mount :: proc(r:^Registry,folder,prefix:string) {
-    append(&r.mounts,Registry_Mount{strings.clone(folder,r.allocator),strings.clone(prefix,r.allocator)})
+    append(&r.mounts,Registry_Mount{strings.clone(folder,r.allocator),strings.clone(prefix,r.allocator),false})
+}
+
+// Mounts now a folder the program did not ship (what a player saved or
+// downloaded) under prefix/, and reads its files, also over a packed index.
+// What the program has wins: a file of a guest whose id another file of the
+// registry has is left out and listed in refused, which counts those of this
+// folder. Not_Found without the folder; Invalid for a prefix that is not a
+// plain relative path (no dot first, no . or .. names), or that a mount or a
+// file or folder of the root already takes.
+registry_mount_guest :: proc(r:^Registry,folder,prefix:string) -> (refused:int,error:Error) {
+    if !registry_prefix_valid(prefix) {return 0,.Invalid}
+    for mount in r.mounts {
+        if mount.prefix==prefix || registry_under(mount.prefix,prefix) || registry_under(prefix,mount.prefix) {return 0,.Invalid}
+    }
+    for file in r.files {
+        if registry_under(file.path,prefix) {return 0,.Invalid}
+    }
+    if os.exists(strings.concatenate({r.root,"/",prefix},context.temp_allocator)) {return 0,.Invalid}
+    if !os.is_directory(folder) {return 0,.Not_Found}
+    r.revision+=1
+    mount:=Registry_Mount{strings.clone(folder,r.allocator),strings.clone(prefix,r.allocator),true}
+    append(&r.mounts,mount)
+    if error=registry_walk(r,mount,nil,nil,nil);error!=.None {
+        registry_unmount(r,prefix)
+        return
+    }
+    registry_index(r)
+    slice.sort(r.folders[:])
+    if r.cache!="" {registry_cache_write(r)}
+    for path in r.refused {
+        if registry_under(path,prefix) {refused+=1}
+    }
+    return
+}
+
+// Takes a guest mount out of the registry with its files, also those it
+// refused. Not_Found when no guest has that prefix; Invalid while the
+// registry holds in memory a file under it, an edit not written.
+registry_unmount :: proc(r:^Registry,prefix:string) -> Error {
+    at:=-1
+    for mount,i in r.mounts {
+        if mount.guest && mount.prefix==prefix {at=i;break}
+    }
+    if at<0 {return .Not_Found}
+    for held in r.memory {
+        if registry_under(held.path,prefix) {return .Invalid}
+    }
+    r.revision+=1
+    gone:=make([dynamic]base.Asset_Id,context.temp_allocator)
+    kept:=0
+    for file in r.files {
+        if registry_under(file.path,prefix) {
+            if file.state==.Asset {append(&gone,file.id)}
+            delete(file.path,r.allocator)
+            continue
+        }
+        r.files[kept]=file
+        kept+=1
+    }
+    resize(&r.files,kept)
+    kept=0
+    for folder in r.folders {
+        if registry_under(folder,prefix) {delete(folder,r.allocator);continue}
+        r.folders[kept]=folder
+        kept+=1
+    }
+    resize(&r.folders,kept)
+    registry_refused_clear(r,prefix)
+    delete(r.mounts[at].folder,r.allocator);delete(r.mounts[at].prefix,r.allocator)
+    ordered_remove(&r.mounts,at)
+    registry_index(r)
+    if r.cache!="" {registry_cache_write(r)}
+    for id in gone {registry_note_removed(r,id)}
+    return .None
+}
+
+// Whether a path of the registry is in a guest mount.
+registry_guest :: proc(r:^Registry,path:string) -> bool {
+    for mount in r.mounts {
+        if mount.guest && registry_under(path,mount.prefix) {return true}
+    }
+    return false
+}
+
+// Whether path is under prefix/ (a folder path of the registry may end in '/').
+@(private)
+registry_under :: proc "contextless" (path,prefix:string) -> bool {
+    return len(path)>len(prefix) && path[len(prefix)]=='/' && path[:len(prefix)]==prefix
+}
+
+@(private="file")
+registry_prefix_valid :: proc(prefix:string) -> bool {
+    if prefix=="" || prefix[0]=='.' || prefix[0]=='/' || prefix[len(prefix)-1]=='/' {return false}
+    for c in transmute([]u8)prefix {
+        if c=='\\' || c==':' || c<0x20 {return false}
+    }
+    for name in strings.split(prefix,"/",context.temp_allocator) {
+        if name=="" || name=="." || name==".." {return false}
+    }
+    return true
+}
+
+// Forgets the refused files under prefix/, every one with "".
+@(private)
+registry_refused_clear :: proc(r:^Registry,prefix:string) {
+    kept:=0
+    for path in r.refused {
+        if prefix=="" || registry_under(path,prefix) {delete(path,r.allocator);continue}
+        r.refused[kept]=path
+        kept+=1
+    }
+    resize(&r.refused,kept)
 }
 
 // The file a path of the registry is: under the root, under the folder of
@@ -140,9 +255,7 @@ registry_mount :: proc(r:^Registry,folder,prefix:string) {
 registry_file_path :: proc(r:^Registry,path:string,allocator:=context.allocator) -> string {
     if registry_outside(path) {return strings.clone(path,allocator)}
     for mount in r.mounts {
-        if len(path)>len(mount.prefix) && path[len(mount.prefix)]=='/' && strings.has_prefix(path,mount.prefix) {
-            return strings.concatenate({mount.folder,path[len(mount.prefix):]},allocator)
-        }
+        if registry_under(path,mount.prefix) {return strings.concatenate({mount.folder,path[len(mount.prefix):]},allocator)}
     }
     return strings.concatenate({r.root,"/",path},allocator)
 }
@@ -152,11 +265,9 @@ registry_file_path :: proc(r:^Registry,path:string,allocator:=context.allocator)
 registry_relative :: proc(r:^Registry,file:string,allocator:=context.temp_allocator) -> (path:string,ok:bool) {
     if r==nil {return}
     for mount in r.mounts {
-        if len(file)>len(mount.folder) && file[len(mount.folder)]=='/' && strings.has_prefix(file,mount.folder) {
-            return strings.concatenate({mount.prefix,file[len(mount.folder):]},allocator),true
-        }
+        if registry_under(file,mount.folder) {return strings.concatenate({mount.prefix,file[len(mount.folder):]},allocator),true}
     }
-    if len(file)>len(r.root) && file[len(r.root)]=='/' && strings.has_prefix(file,r.root) {return file[len(r.root)+1:],true}
+    if registry_under(file,r.root) {return file[len(r.root)+1:],true}
     return
 }
 
@@ -172,6 +283,8 @@ registry_destroy :: proc(r:^Registry) {
     for &held in r.memory {registry_memory_free(r,&held)}
     delete(r.memory)
     delete(r.removed)
+    registry_refused_clear(r,"")
+    delete(r.refused)
     delete(r.root,r.allocator);delete(r.cache,r.allocator)
     r^={}
 }
@@ -311,65 +424,13 @@ registry_scan :: proc(r:^Registry) -> Error {
     if len(previous)==0 && r.cache!="" {registry_cache_read(r.cache,&previous,&previous_dependencies,allocator)}
     for file,at in previous {known[file.path]=u32(at)}
     r.stats={}
+    registry_refused_clear(r,"")
 
     if !os.is_directory(r.root) {return .Not_Found}
-    folders:=make([dynamic]Registry_Mount,allocator)
-    defer delete(folders)
-    append(&folders,Registry_Mount{r.root,""})
+    if error:=registry_walk(r,{r.root,"",false},known,previous[:],previous_dependencies[:]);error!=.None {return error}
     for mount in r.mounts {
-        if os.is_directory(mount.folder) {append(&folders,mount)}
-    }
-    relative:=make([dynamic]u8,allocator)
-    defer delete(relative)
-    for folder in folders {
-        root,root_error:=os.get_absolute_path(folder.folder,allocator)
-        if root_error!=nil {return .IO}
-        defer delete(root,allocator)
-        // Breadth first, each folder read and closed before the next: os.walker leaves the search
-        // of the last folder it read open on Windows, which keeps that folder from being renamed
-        // (odin-lang/Odin#8112).
-        todo:=make([dynamic]string,context.temp_allocator)
-        append(&todo,root)
-        for next:=0;next<len(todo);next+=1 {
-            handle,open_error:=os.open(todo[next])
-            if open_error!=nil {continue}
-            it:=os.read_directory_iterator_create(handle)
-            defer {
-                os.read_directory_iterator_destroy(&it)
-                os.close(handle)
-            }
-            for info in os.read_directory_iterator(&it) {
-                if strings.has_prefix(info.name,".") {continue}
-                directory:=info.type==.Directory
-                if directory {append(&todo,strings.clone(info.fullpath,context.temp_allocator))}
-                if !directory && (info.type!=.Regular || strings.has_suffix(info.name,".tmp")) || len(info.fullpath)<=len(root) {continue}
-                clear(&relative)
-                if folder.prefix!="" {append(&relative,folder.prefix)}
-                append(&relative,info.fullpath[len(root):])
-                for &c in relative {
-                    if c=='\\' {c='/'}
-                }
-                path:=strings.trim_left(string(relative[:]),"/")
-                if directory {
-                    append(&r.folders,strings.concatenate({path,"/"},allocator))
-                    continue
-                }
-                file:=Registry_File{size=info.size,time=time.time_to_unix_nano(info.modification_time)}
-                r.stats.files+=1
-                if at,seen:=known[path];seen && previous[at].size==file.size && previous[at].time==file.time {
-                    file=previous[at]
-                    file.first_dependency=u32(len(r.dependencies))
-                    append(&r.dependencies,..previous_dependencies[previous[at].first_dependency:][:previous[at].dependency_count])
-                    r.stats.reused+=1
-                } else {
-                    file.first_dependency=u32(len(r.dependencies))
-                    registry_probe(r,info.fullpath,&file,&r.dependencies)
-                    r.stats.opened+=1
-                }
-                file.path=strings.clone(path,allocator)
-                append(&r.files,file)
-            }
-        }
+        if !os.is_directory(mount.folder) {continue}
+        if error:=registry_walk(r,mount,known,previous[:],previous_dependencies[:]);error!=.None {return error}
     }
     registry_index(r)
     slice.sort(r.folders[:])
@@ -383,6 +444,61 @@ registry_scan :: proc(r:^Registry) -> Error {
     if r.resolve_duplicates {registry_duplicates_resolve(r)}
     for file in previous {
         if file.state==.Asset {registry_note_removed(r,file.id)}
+    }
+    return .None
+}
+
+// Appends the files and folders of a folder under its prefix; a file that
+// known says previous had with the same size and time is not opened again.
+@(private="file")
+registry_walk :: proc(r:^Registry,folder:Registry_Mount,known:map[string]u32,previous:[]Registry_File,previous_dependencies:[]base.Asset_Id) -> Error {
+    root,root_error:=os.get_absolute_path(folder.folder,context.temp_allocator)
+    if root_error!=nil {return .IO}
+    relative:=make([dynamic]u8,context.temp_allocator)
+    // Breadth first, each folder read and closed before the next: os.walker leaves the search
+    // of the last folder it read open on Windows, which keeps that folder from being renamed
+    // (odin-lang/Odin#8112).
+    todo:=make([dynamic]string,context.temp_allocator)
+    append(&todo,root)
+    for next:=0;next<len(todo);next+=1 {
+        handle,open_error:=os.open(todo[next])
+        if open_error!=nil {continue}
+        it:=os.read_directory_iterator_create(handle)
+        defer {
+            os.read_directory_iterator_destroy(&it)
+            os.close(handle)
+        }
+        for info in os.read_directory_iterator(&it) {
+            if strings.has_prefix(info.name,".") {continue}
+            directory:=info.type==.Directory
+            if directory {append(&todo,strings.clone(info.fullpath,context.temp_allocator))}
+            if !directory && (info.type!=.Regular || strings.has_suffix(info.name,".tmp")) || len(info.fullpath)<=len(root) {continue}
+            clear(&relative)
+            if folder.prefix!="" {append(&relative,folder.prefix)}
+            append(&relative,info.fullpath[len(root):])
+            for &c in relative {
+                if c=='\\' {c='/'}
+            }
+            path:=strings.trim_left(string(relative[:]),"/")
+            if directory {
+                append(&r.folders,strings.concatenate({path,"/"},r.allocator))
+                continue
+            }
+            file:=Registry_File{size=info.size,time=time.time_to_unix_nano(info.modification_time)}
+            r.stats.files+=1
+            if at,seen:=known[path];seen && previous[at].size==file.size && previous[at].time==file.time {
+                file=previous[at]
+                file.first_dependency=u32(len(r.dependencies))
+                append(&r.dependencies,..previous_dependencies[previous[at].first_dependency:][:previous[at].dependency_count])
+                r.stats.reused+=1
+            } else {
+                file.first_dependency=u32(len(r.dependencies))
+                registry_probe(r,info.fullpath,&file,&r.dependencies)
+                r.stats.opened+=1
+            }
+            file.path=strings.clone(path,r.allocator)
+            append(&r.files,file)
+        }
     }
     return .None
 }
@@ -496,6 +612,10 @@ registry_refresh :: proc(r:^Registry,paths:[]string) -> Error {
     gone:=make([dynamic]base.Asset_Id,context.temp_allocator)
     for path in paths {
         if path=="" || registry_outside(path) || registry_skipped(path) {continue}
+        // A file a guest mount refused comes in again: the index refuses it again if its id is taken.
+        for listed,at in r.refused {
+            if listed==path {delete(listed,r.allocator);ordered_remove(&r.refused,at);break}
+        }
         forgot:=registry_reassigned_forget(r,path)
         if _,held:=registry_memory_find(r,path);held {continue}
         full:=registry_file_path(r,path,context.temp_allocator)
@@ -572,6 +692,7 @@ registry_skipped :: proc(path:string) -> bool {
 @(private)
 registry_index :: proc(r:^Registry) {
     slice.sort_by(r.files[:],proc(a,b:Registry_File) -> bool {return a.path<b.path})
+    registry_guests_refuse(r)
     clear(&r.by_id);clear(&r.by_path);clear(&r.duplicates)
     clear(&r.dependents);clear(&r.dependent_files)
     r.stats.assets=0
@@ -615,6 +736,35 @@ registry_index :: proc(r:^Registry) {
             }
         }
     }
+}
+
+// Leaves out the files of guest mounts whose id a file outside them has, or
+// one before them in path order, and lists them in refused.
+@(private="file")
+registry_guests_refuse :: proc(r:^Registry) {
+    guests:=false
+    for mount in r.mounts {guests||=mount.guest}
+    if !guests {return}
+    taken:=make(map[base.Asset_Id]struct{},context.temp_allocator)
+    for file in r.files {
+        if file.state==.Asset && !registry_guest(r,file.path) {taken[file.id]={}}
+    }
+    kept:=0
+    for file in r.files {
+        if file.state==.Asset && registry_guest(r,file.path) {
+            if file.id in taken {
+                listed:=false
+                for path in r.refused {listed||=path==file.path}
+                if listed {delete(file.path,r.allocator)}
+                else {append(&r.refused,file.path)}
+                continue
+            }
+            taken[file.id]={}
+        }
+        r.files[kept]=file
+        kept+=1
+    }
+    resize(&r.files,kept)
 }
 
 // Writes what the registry holds as a packed index or a cache: the files with
@@ -667,9 +817,16 @@ registry_load :: proc(r:^Registry,path:string) -> Error {
     for file in r.files {delete(file.path,r.allocator)}
     clear(&r.files);clear(&r.dependencies)
     r.stats={}
+    for folder in r.folders {delete(folder,r.allocator)}
+    clear(&r.folders)
+    registry_refused_clear(r,"")
     state:=registry_cache_read(path,&r.files,&r.dependencies,r.allocator)
-    registry_index(r)
     r.stats.files,r.stats.reused=len(r.files),len(r.files)
+    for mount in r.mounts {
+        if mount.guest && os.is_directory(mount.folder) {registry_walk(r,mount,nil,nil,nil)}
+    }
+    registry_index(r)
+    slice.sort(r.folders[:])
     return state
 }
 

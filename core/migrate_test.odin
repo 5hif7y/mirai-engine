@@ -140,3 +140,79 @@ a_world_migrates_to_another_layout_by_names :: proc(t:^testing.T) {
     world_migration_destroy(&m)
     testing.expect_value(t,len(tracking.allocation_map),0)
 }
+
+@(private="file") Test_Action :: distinct u8
+@(private="file") Aim_Tag :: struct {action:Test_Action}
+
+@(private="file")
+Aim_World :: struct {
+    entities:Entities,
+    aim:Table(Aim_Tag),
+    kept:Table(Kept_Tag),
+}
+
+@(private="file")
+aim_init :: proc(data:rawptr,allocator:runtime.Allocator) -> bool {
+    w:=cast(^Aim_World)data
+    entities_init(&w.entities,allocator) or_return
+    table_init(&w.aim,"Aim_Tag",allocator)
+    table_init(&w.kept,"Kept_Tag",allocator)
+    return true
+}
+
+@(private="file")
+aim_destroy :: proc(data:rawptr) {
+    w:=cast(^Aim_World)data
+    entities_destroy(&w.entities)
+    table_destroy(&w.aim)
+    table_destroy(&w.kept)
+}
+
+// A library that gives an action another number converts what holds actions,
+// which keeps each by name; one that only renames an action moves them as they are.
+@(test)
+a_world_keeps_its_actions_by_name_when_their_numbers_move :: proc(t:^testing.T) {
+    tracking:mem.Tracking_Allocator
+    mem.tracking_allocator_init(&tracking,context.allocator)
+    defer mem.tracking_allocator_destroy(&tracking)
+    allocator:=mem.tracking_allocator(&tracking)
+    context.allocator=allocator
+
+    tables:=[]Table_Info{
+        {name="Aim_Tag",type=Aim_Tag,info=type_info_of(Aim_Tag),offset=offset_of(Aim_World,aim)},
+        {name="Kept_Tag",type=Kept_Tag,info=type_info_of(Kept_Tag),offset=offset_of(Aim_World,kept)},
+    }
+    types:=[]Named_Type_Info{{type=Test_Action,name="Test_Action",path="mirai:core",actions=true}}
+    world :: proc(tables:[]Table_Info,types:[]Named_Type_Info,names:[]Name_Info) -> (info:World_Info) {
+        info.sizes[.World],info.aligns[.World]=size_of(Aim_World),align_of(Aim_World)
+        info.entities=offset_of(Aim_World,entities)
+        info.tables,info.named_types,info.names=tables,types,names
+        info.init[.World],info.destroy[.World]=aim_init,aim_destroy
+        return
+    }
+    before:=world(tables,types,{{type=Test_Action,value=0,name="jump"},{type=Test_Action,value=1,name="aim"}})
+    moved:=world(tables,types,{{type=Test_Action,value=0,name="crouch"},{type=Test_Action,value=1,name="jump"},{type=Test_Action,value=2,name="aim"}})
+    renamed:=world(tables,types,{{type=Test_Action,value=0,name="jump"},{type=Test_Action,value=1,name="point"}})
+
+    m:World_Migration
+    testing.expect(t,world_migration_make(&m,&before,&moved))
+    testing.expect(t,.World in m.places)
+    testing.expect(t,m.tables[0]==.Convert && m.tables[1]==.Move)
+    old:=new(Aim_World)
+    testing.expect(t,aim_init(old,allocator))
+    a:=create(&old.entities)
+    add(&old.aim,a,Aim_Tag{1})
+    testing.expect(t,table_settle(&old.aim,&old.entities))
+    fresh:=new(Aim_World)
+    testing.expect(t,aim_init(fresh,allocator))
+    place_migrate(&m,.World,old,fresh,allocator)
+    testing.expect_value(t,(get(read(&fresh.aim),a) or_else Aim_Tag{}).action,Test_Action(2))
+    aim_destroy(old);mem.free(old)
+    aim_destroy(fresh);mem.free(fresh)
+    world_migration_destroy(&m)
+
+    testing.expect(t,world_migration_make(&m,&before,&renamed))
+    testing.expect(t,m.places=={} && m.tables[0]==.Move)
+    world_migration_destroy(&m)
+    testing.expect_value(t,len(tracking.allocation_map),0)
+}

@@ -1,5 +1,0 @@
-{
-  "actions": [
-    {"name": "reverse", "kind": "Button", "bindings": [{"key": "R"}, {"gamepad_button": "East"}]}
-  ]
-}

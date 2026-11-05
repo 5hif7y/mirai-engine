@@ -11,6 +11,7 @@ import "core:strings"
 import "mirai:core"
 import "mirai:project"
 import "mirai:std/base"
+import "mirai:std/serial"
 
 // The world of a project, generated from the attributes of its packages:
 //
@@ -21,13 +22,13 @@ import "mirai:std/base"
 //   @(storage,copy="state_copy") @(storage,free="state_free") @(storage,reset="state_reset")
 //   @(step="fixed late",loops="game editor",stage="end",after="a b",before="c",server)
 //   @(net_message) @(net_message,from="client",reliable) @(net_message,from="owner")
-//   @(params)
+//   @(params) @(names) @(name_bits="T") @(name="...") @(actions)
 //
 // The engine's libraries (core, engine/*), the runtime/ of the active plugins
 // and the game/ of the project go into World and Shared; the editor and the
 // editor/ of plugins and of the project into Editor_World.
 
-CUSTOM_ATTRIBUTES :: "component,storage,step,loops,stage,after,before,server,shared,locks,host,by_world,copy,copy_kept,swap,free,replicated,setting,description,queue,events,keep,persist,single,far,reset,net_message,from,reliable,params,names,name_bits,name,name_requires,presentation,record"
+CUSTOM_ATTRIBUTES :: "component,storage,step,loops,stage,after,before,server,shared,locks,host,by_world,copy,copy_kept,swap,free,replicated,setting,description,queue,events,keep,persist,single,far,reset,net_message,from,reliable,params,names,name_bits,name,name_requires,presentation,record,actions"
 
 PHASES :: [7]string{"input","fixed","frame","late","ui","render","release"}
 PHASE_TITLES :: [len(PHASES)]string{"Input","Fixed","Frame","Late","Ui","Render","Release"}
@@ -113,6 +114,7 @@ Param :: struct {
     kind:Param_Kind,
     type:^Type,
     record:^Record_Type, // Records
+    actions:^Action_Enum, // the enum of the generic @(params) it is a field of
     bundle:^Bundle, // the @(params) the step receives it in; nil when it receives it by itself
     name:string,    // of the field in the bundle, or of the parameter
     arg:int,        // the parameter of the step it binds, by position
@@ -129,6 +131,8 @@ Bundle :: struct {
     where_:string,
     fields:[dynamic]Param,
     valid:bool,
+    generic:bool,      // struct($E:typeid): received for an @(actions) enum, B(E)
+    base_field:string, // of a generic one: the field of the @(names,actions) type, which takes the base of E
 }
 
 // A distinct integer whose constants are its values with names, @(names), or
@@ -139,8 +143,25 @@ Named_Type :: struct {
     pkg:^Package,
     prefix:string,  // taken off the identifiers of its constants
     bits_of:string, // @(name_bits): the key of the type of its bits
+    bits:int,       // of its integer; 0: not known here
+    actions:bool,   // @(names,actions): its values are the members of the @(actions) enums
     where_:string,
 }
+
+// An enum @(actions): the actions of a library. Its members are values of
+// the @(names,actions) type from base on, the libraries one after the other.
+@(private="file")
+Action_Enum :: struct {
+    key,name:string,
+    pkg:^Package,
+    members:[dynamic]Action_Member,
+    base:int,
+    file:string, // full path
+    where_:string,
+}
+
+@(private="file")
+Action_Member :: struct {ident:string,line:int}
 
 // A constant whose type may have names: kept until every type is read.
 @(private="file")
@@ -153,6 +174,8 @@ Named_Value :: struct {
     explicit:bool, // @(name="...")
     requires:string, // @(name_requires="C"): the key of the component an entity needs to take this value
     requires_type:^Type,
+    action:^Action_Enum, // a member of an @(actions) enum, whose value is number
+    number:int,
     where_:string,
 }
 
@@ -181,6 +204,9 @@ Generator :: struct {
     named_types:map[string]^Named_Type,
     named_type_list:[dynamic]^Named_Type,
     named_values:[dynamic]Named_Value, // the constants of named types, once names_settle kept them
+    action_enums:[dynamic]^Action_Enum, // in the order of the libraries
+    action_by_key:map[string]^Action_Enum,
+    actions_type:^Named_Type, // the @(names,actions) type
     records:[dynamic]^Record_Type,
     record_by_key:map[string]^Record_Type,
     steps:[dynamic]^Step,
@@ -206,6 +232,7 @@ world_generate :: proc(p:^project.Project,allocator:=context.allocator,shipped:=
     g.by_key=make(map[string]^Type)
     g.bundles=make(map[string]^Bundle)
     g.named_types=make(map[string]^Named_Type)
+    g.action_by_key=make(map[string]^Action_Enum)
     g.record_by_key=make(map[string]^Record_Type)
     g.engine_root,g.root=p.engine_root,p.root
     packages_find(&g,p)
@@ -249,6 +276,7 @@ world_generate_world :: proc(p:^project.Project) -> string {
     g.by_key=make(map[string]^Type)
     g.bundles=make(map[string]^Bundle)
     g.named_types=make(map[string]^Named_Type)
+    g.action_by_key=make(map[string]^Action_Enum)
     g.record_by_key=make(map[string]^Record_Type)
     g.engine_root,g.root=p.engine_root,p.root
     packages_find(&g,p)
@@ -266,6 +294,29 @@ world_generate_world :: proc(p:^project.Project) -> string {
 @(private="file")
 library_entry :: proc(world_package:string) -> string {
     return fmt.aprintf("// Generated by mirai. Do not edit.\npackage mirai_project\n\nimport \"mirai:core\"\nimport world \"generated:%s\"\n\n@(export,link_name=%q)\nproject_info :: proc() -> core.World_Info {{return world.info()}}\n",world_package,PROJECT_INFO_SYMBOL)
+}
+
+// The actions the game world of a project declares, each name with its
+// number: for a tool that writes actions in data without a world of the
+// project, to look a member up by its name and to give the schema it writes
+// with the names that data keeps (serial.Named, by_name).
+world_actions :: proc(p:^project.Project,allocator:=context.allocator) -> (actions:[]serial.Choice,errors:[]string) {
+    context.allocator=allocator
+    g:Generator
+    g.by_key=make(map[string]^Type)
+    g.bundles=make(map[string]^Bundle)
+    g.named_types=make(map[string]^Named_Type)
+    g.action_by_key=make(map[string]^Action_Enum)
+    g.record_by_key=make(map[string]^Record_Type)
+    g.engine_root,g.root=p.engine_root,p.root
+    packages_find(&g,p)
+    for pkg in g.packages {package_read(&g,pkg)}
+    names_settle(&g)
+    found:=make([dynamic]serial.Choice)
+    for value in g.named_values {
+        if value.action!=nil {append(&found,serial.Choice{value.name,i64(value.number)})}
+    }
+    return found[:],g.errors[:]
 }
 
 // The procedure a library of a project exports: it returns the core.World_Info of its world.
@@ -393,6 +444,10 @@ package_read :: proc(g:^Generator,pkg:^Package) {
             _,is_bits:=options["name_bits"]
             if is_names || is_bits {
                 named_type_read(g,file,pkg,decl,name,options)
+                continue
+            }
+            if _,is_actions:=options["actions"];is_actions {
+                action_enum_read(g,file,pkg,decl,name)
                 continue
             }
             if !decl.is_mutable {named_value_read(g,file,pkg,decl,name,options)}
@@ -567,6 +622,8 @@ named_type_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,decl:^ast.Value
     t:=new(Named_Type)
     t.key,t.name,t.pkg,t.where_=fmt.aprintf("%s.%s",pkg.path,name),name,pkg,where_
     t.prefix=options["names"] or_else ""
+    _,t.actions=options["actions"]
+    if d,is_distinct:=decl.values[0].derived.(^ast.Distinct_Type);is_distinct {t.bits=int_bits(d.type)}
     if of,bits:=options["name_bits"];bits {
         if of=="" {
             append(&g.errors,fmt.aprintf("%s: %s says name_bits without a type: write @(name_bits=\"T\") with the @(names) type whose values its bits are",where_,name))
@@ -607,10 +664,95 @@ named_value_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,decl:^ast.Valu
     })
 }
 
+// An enum @(actions) :: enum u8 {Move,Jump}: its members in order, without values of their own.
+@(private="file")
+action_enum_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,decl:^ast.Value_Decl,name:string) {
+    where_:=fmt.aprintf("%s(%d)",file.fullpath,decl.pos.line)
+    e,is_enum:=decl.values[0].derived.(^ast.Enum_Type)
+    switch {
+    case !is_enum:
+        append(&g.errors,fmt.aprintf("%s: @(actions) on %s, which is not an enum: declare the actions of a library as @(actions) %s :: enum u8 {{Move,Jump}}",where_,name,name))
+        return
+    case pkg.editor:
+        append(&g.errors,fmt.aprintf("%s: %s is @(actions) in an editor package: actions are of the game; declare them in a library or in game/",where_,name))
+        return
+    case e.base_type==nil || ident_name(e.base_type)!="u8":
+        append(&g.errors,fmt.aprintf("%s: %s is @(actions) and its members are not u8: write %s :: enum u8 {{...}}",where_,name,name))
+        return
+    }
+    a:=new(Action_Enum)
+    a.key,a.name,a.pkg,a.file,a.where_=fmt.aprintf("%s.%s",pkg.path,name),name,pkg,file.fullpath,where_
+    for field in e.fields {
+        ident,plain:=field.derived.(^ast.Ident)
+        if !plain {
+            append(&g.errors,fmt.aprintf("%s: a member of %s has a value of its own: the generator gives the values of actions; write only the names of the members",where_,name))
+            return
+        }
+        append(&a.members,Action_Member{ident.name,field.pos.line})
+    }
+    g.action_by_key[a.key]=a
+    append(&g.action_enums,a)
+}
+
+// The bits of an integer type written as its name (u8, i32...); 0 for another.
+@(private="file")
+int_bits :: proc(expr:^ast.Expr) -> int {
+    ident,is_ident:=expr.derived.(^ast.Ident)
+    if !is_ident || len(ident.name)<2 || (ident.name[0]!='u' && ident.name[0]!='i') {return 0}
+    bits,ok:=strconv.parse_int(ident.name[1:])
+    return ok?bits:0
+}
+
+// The members of the @(actions) enums become values of the @(names,actions)
+// type: each enum from the next free value on, in the order of the
+// libraries (engine, active plugins, game), named in lower case.
+@(private="file")
+actions_settle :: proc(g:^Generator) {
+    for t in g.named_type_list {
+        if !t.actions {continue}
+        if g.actions_type!=nil || t.bits_of!="" {
+            append(&g.errors,fmt.aprintf("%s: %s says actions, and %s is already the type of the actions: one @(names,actions) distinct integer takes the members of every @(actions) enum",t.where_,t.name,g.actions_type!=nil?g.actions_type.name:t.name))
+            continue
+        }
+        g.actions_type=t
+    }
+    if len(g.action_enums)==0 {return}
+    t:=g.actions_type
+    if t==nil {
+        append(&g.errors,fmt.aprintf("%s: %s is @(actions), and no @(names,actions) type takes the values of actions: the engine declares it in engine/input",g.action_enums[0].where_,g.action_enums[0].name))
+        return
+    }
+    limit:=t.bits>0 && t.bits<63?1<<uint(t.bits):max(int)
+    for mask in g.named_type_list {
+        if mask.bits_of==t.key && mask.bits>0 {limit=min(limit,mask.bits)}
+    }
+    total:=0
+    for a in g.action_enums {
+        a.base=total
+        root:=slashes(strings.has_prefix(a.pkg.path,"project:")?g.root:g.engine_root,context.temp_allocator)
+        path:=slashes(a.file,context.temp_allocator)
+        if strings.has_prefix(path,root) && len(path)>len(root) && path[len(root)]=='/' {path=path[len(root)+1:]}
+        for member,i in a.members {
+            append(&g.named_values,Named_Value{
+                type_key=t.key,ident=member.ident,pkg=a.pkg,file=strings.clone(path),line=member.line,
+                action=a,number=total+i,where_=fmt.aprintf("%s(%d)",a.file,member.line),
+            })
+        }
+        total+=len(a.members)
+        a.pkg.used=true
+    }
+    t.pkg.used=true
+    if total<=limit {return}
+    counts:=strings.builder_make(context.temp_allocator)
+    for a,i in g.action_enums {fmt.sbprintf(&counts,"%s%s.%s %d",i>0?", ":"",a.pkg.name,a.name,len(a.members))}
+    append(&g.errors,fmt.aprintf("%s: the @(actions) enums declare %d actions (%s), and %s holds %d: remove the actions no longer used",g.action_enums[len(g.action_enums)-1].where_,total,strings.to_string(counts),t.name,limit))
+}
+
 // Keeps the constants whose types have names, with the name each takes:
 // its @(name), or its identifier without the prefix of its type, in lower case.
 @(private="file")
 names_settle :: proc(g:^Generator) {
+    actions_settle(g)
     for t in g.named_type_list {
         if t.bits_of=="" {continue}
         of,found:=g.named_types[t.bits_of]
@@ -624,6 +766,10 @@ names_settle :: proc(g:^Generator) {
         t,found:=g.named_types[value.type_key]
         if !found || t.bits_of!="" {continue}
         value.type=t
+        if t.actions && value.action==nil {
+            append(&g.errors,fmt.aprintf("%s: %s is a constant of %s, whose values are the actions the @(actions) enums declare: make it a member of the @(actions) enum of its library (Action :: enum u8 {{...}}), which gives it its value",value.where_,value.ident,t.name))
+            continue
+        }
         if !value.explicit {
             ident:=value.ident
             if t.prefix!="" && strings.has_prefix(ident,t.prefix) {ident=ident[len(t.prefix):]}
@@ -634,7 +780,9 @@ names_settle :: proc(g:^Generator) {
             continue
         }
         for other in kept {
-            if other.type==t && other.name==value.name {
+            if other.type==t && other.name==value.name && value.action!=nil {
+                append(&g.errors,fmt.aprintf("%s: %s.%s and %s.%s (%s) are both the action %q; rename one of the members",value.where_,value.action.name,value.ident,other.action.name,other.ident,other.where_,value.name))
+            } else if other.type==t && other.name==value.name {
                 append(&g.errors,fmt.aprintf("%s: %s and %s (%s) are both named %q in %s; give one another name with @(name=\"...\")",value.where_,value.ident,other.ident,other.where_,value.name,t.name))
             }
         }
@@ -687,11 +835,12 @@ bundle_read :: proc(g:^Generator,file:^ast.File,pkg:^Package,decl:^ast.Value_Dec
     case also:
         append(&g.errors,fmt.aprintf("%s: %s is @(params) and a component, storage or message: a @(params) struct only groups parameters of steps; declare the data apart and put a field that receives it",where_,name))
         return
-    case !is_struct || record.poly_params!=nil:
-        append(&g.errors,fmt.aprintf("%s: @(params) on %s, which is not a struct without parameters: write @(params) %s :: struct {{...}} with a parameter of a step in each field",where_,name,name))
+    case !is_struct || record.poly_params!=nil && (len(record.poly_params.list)!=1 || len(record.poly_params.list[0].names)!=1):
+        append(&g.errors,fmt.aprintf("%s: @(params) on %s, which is not a struct without parameters or with one, $E:typeid, for an @(actions) enum: write @(params) %s :: struct {{...}} with a parameter of a step in each field",where_,name,name))
         return
     }
     b:=new(Bundle)
+    b.generic=record.poly_params!=nil
     b.key=fmt.aprintf("%s.%s",pkg.path,name)
     b.name,b.pkg,b.file,b.record,b.where_=name,pkg,file,record,where_
     g.bundles[b.key]=b
@@ -709,6 +858,10 @@ bundles_settle :: proc(g:^Generator) {
             continue
         }
         for field in b.record.fields.list {
+            if b.generic && g.actions_type!=nil && type_key(g,b.file,b.pkg,field.type)==g.actions_type.key && len(field.names)==1 && b.base_field=="" {
+                b.base_field=ident_name(field.names[0])
+                continue
+            }
             if inner:=bundle_of(g,b.file,b.pkg,field.type);inner!=nil {
                 append(&g.errors,fmt.aprintf("%s: %s has a field of %s, another @(params): they do not nest; put the fields of %s in %s, or have the step receive %s by itself",b.where_,b.name,inner.name,inner.name,b.name,inner.name))
                 b.valid=false
@@ -725,6 +878,10 @@ bundles_settle :: proc(g:^Generator) {
                 append(&b.fields,param)
             }
         }
+        if b.generic && b.base_field=="" {
+            append(&g.errors,fmt.aprintf("%s: %s is a @(params) with a type parameter, which is received for an @(actions) enum: give it one field of the type of the actions (base:Action), which takes the base of that enum",b.where_,b.name))
+            b.valid=false
+        }
     }
 }
 
@@ -733,6 +890,7 @@ bundles_settle :: proc(g:^Generator) {
 bundle_of :: proc(g:^Generator,file:^ast.File,pkg:^Package,expr:^ast.Expr) -> ^Bundle {
     e:=expr
     if p,is_pointer:=e.derived.(^ast.Pointer_Type);is_pointer {e=p.elem}
+    if call,is_call:=e.derived.(^ast.Call_Expr);is_call {e=call.expr}
     return g.bundles[type_key(g,file,pkg,e)] or_else nil
 }
 
@@ -870,11 +1028,22 @@ steps_read :: proc(g:^Generator,pkg:^Package) {
                             append(&g.errors,fmt.aprintf("%s: %s receives %s, a @(params) of an editor package: the game has no editor code; declare it in a library",where_,name,b.name))
                             continue
                         }
+                        actions:^Action_Enum
+                        if call,is_call:=field.type.derived.(^ast.Call_Expr);b.generic {
+                            if is_call && len(call.args)==1 {actions=g.action_by_key[type_key(g,file,pkg,call.args[0])] or_else nil}
+                            if actions==nil {
+                                append(&g.errors,fmt.aprintf("%s: %s receives %s: %s is received for the @(actions) enum whose actions it reads, %s(Action), and that is not one",where_,name,expr_text(file,field.type),b.name,b.name))
+                                continue
+                            }
+                        } else if is_call {
+                            append(&g.errors,fmt.aprintf("%s: %s receives %s: %s has no type parameter; receive it as %s",where_,name,expr_text(file,field.type),b.name,b.name))
+                            continue
+                        }
                         b.pkg.used=true
                         for _ in field.names {
                             for param in b.fields {
                                 bound:=param
-                                bound.arg=arg
+                                bound.arg,bound.actions=arg,actions
                                 append(&s.params,bound)
                             }
                             arg+=1
@@ -1569,14 +1738,22 @@ world_write :: proc(g:^Generator,editor:bool) -> string {
     // its time: the loops call these in order, and core.world_run a part of them.
     for step,si in kept {
         args:=strings.builder_make(context.temp_allocator)
+        // A generic @(params) ends with the base of its enum.
+        bundle_close :: proc(g:^Generator,args:^strings.Builder,param:Param) {
+            if param.bundle==nil {return}
+            if param.actions!=nil {fmt.sbprintf(args,",%s=%s.%s(%d)",param.bundle.base_field,g.actions_type.pkg.alias,g.actions_type.name,param.actions.base)}
+            strings.write_string(args,"}")
+        }
         for param,pi in step.params {
             first:=pi==0 || step.params[pi-1].arg!=param.arg
             if first && pi>0 {
-                if step.params[pi-1].bundle!=nil {strings.write_string(&args,"}")}
+                bundle_close(g,&args,step.params[pi-1])
                 strings.write_string(&args,",")
             }
             if param.bundle!=nil {
-                if first {fmt.sbprintf(&args,"%s.%s{{",param.bundle.pkg.alias,param.bundle.name)} else {strings.write_string(&args,",")}
+                if first && param.actions!=nil {
+                    fmt.sbprintf(&args,"%s.%s(%s.%s){{",param.bundle.pkg.alias,param.bundle.name,param.actions.pkg.alias,param.actions.name)
+                } else if first {fmt.sbprintf(&args,"%s.%s{{",param.bundle.pkg.alias,param.bundle.name)} else {strings.write_string(&args,",")}
                 fmt.sbprintf(&args,"%s=",param.name)
             }
             holder:="w"
@@ -1605,7 +1782,7 @@ world_write :: proc(g:^Generator,editor:bool) -> string {
                 fmt.sbprintf(&args,"%s.Records(%s.%s){{%s.app_record_set(app,%d)}}",core_alias,param.record.pkg.alias,param.record.name,host_alias,index)
             }
         }
-        if len(step.params)>0 && step.params[len(step.params)-1].bundle!=nil {strings.write_string(&args,"}")}
+        if len(step.params)>0 {bundle_close(g,&args,step.params[len(step.params)-1])}
         call:=fmt.tprintf("%s.%s(%s)",step.pkg.alias,step.name,strings.to_string(args))
         checks:=strings.builder_make(context.temp_allocator)
         for param in step.params {
@@ -1707,7 +1884,7 @@ world_write :: proc(g:^Generator,editor:bool) -> string {
 
     // Two constants of a type with names have two values: the compiler knows them.
     for value,vi in g.named_values {
-        if (value.pkg.editor || value.type.pkg.editor) && !editor {continue}
+        if (value.pkg.editor || value.type.pkg.editor) && !editor || value.action!=nil {continue}
         for other in g.named_values[vi+1:] {
             if other.type!=value.type || (other.pkg.editor || other.type.pkg.editor) && !editor {continue}
             fmt.sbprintf(w,"#assert(%s.%s!=%s.%s,%q)\n",value.pkg.alias,value.ident,other.pkg.alias,other.ident,fmt.tprintf("%s and %s have one value of %s: give one of them another",value.where_,other.where_,value.type.name))
@@ -1748,7 +1925,8 @@ world_write :: proc(g:^Generator,editor:bool) -> string {
     i=0
     for value in g.named_values {
         if (value.pkg.editor || value.type.pkg.editor) && !editor {continue}
-        fmt.sbprintf(w,"    names[%d]={{typeid_of(%s.%s),i64(%s.%s),%q,\"%s\",%q,%d,%v,%v,%s}}\n",i,value.type.pkg.alias,value.type.name,value.pkg.alias,value.ident,value.name,value.pkg.name,value.file,value.line,value.explicit,strings.has_prefix(value.pkg.path,"project:"),value.requires_type!=nil && (editor || value.requires_type.place!=.Editor)?fmt.tprintf("typeid_of(%s.%s)",value.requires_type.pkg.alias,value.requires_type.name):"nil")
+        number:=value.action!=nil?fmt.tprintf("%d",value.number):fmt.tprintf("%s.%s",value.pkg.alias,value.ident)
+        fmt.sbprintf(w,"    names[%d]={{typeid_of(%s.%s),i64(%s),%q,\"%s\",%q,%d,%v,%v,%s}}\n",i,value.type.pkg.alias,value.type.name,number,value.name,value.pkg.name,value.file,value.line,value.explicit,strings.has_prefix(value.pkg.path,"project:"),value.requires_type!=nil && (editor || value.requires_type.place!=.Editor)?fmt.tprintf("typeid_of(%s.%s)",value.requires_type.pkg.alias,value.requires_type.name):"nil")
         i+=1
     }
     types_count:=0
@@ -1763,7 +1941,7 @@ world_write :: proc(g:^Generator,editor:bool) -> string {
         for mask in g.named_type_list {
             if mask.bits_of==t.key {limit=fmt.tprintf("min(%s,i64(8*size_of(%s.%s)))",limit,mask.pkg.alias,mask.name)}
         }
-        fmt.sbprintf(w,"    named_types[%d]={{typeid_of(%s.%s),%q,%q,%q,%s}}\n",i,t.pkg.alias,t.name,t.name,t.pkg.path,t.prefix,limit)
+        fmt.sbprintf(w,"    named_types[%d]={{typeid_of(%s.%s),%q,%q,%q,%s,%v}}\n",i,t.pkg.alias,t.name,t.name,t.pkg.path,t.prefix,limit,t.actions)
         i+=1
     }
     fmt.sbprintf(w,"    name_bits:=make([]%s.Name_Bits_Info,%d)\n",core_alias,bits_count)
@@ -1773,6 +1951,10 @@ world_write :: proc(g:^Generator,editor:bool) -> string {
         of:=g.named_types[t.bits_of]
         fmt.sbprintf(w,"    name_bits[%d]={{typeid_of(%s.%s),typeid_of(%s.%s)}}\n",i,t.pkg.alias,t.name,of.pkg.alias,of.name)
         i+=1
+    }
+    fmt.sbprintf(w,"    actions:=make([]%s.Actions_Info,%d)\n",core_alias,len(g.action_enums))
+    for a,ai in g.action_enums {
+        fmt.sbprintf(w,"    actions[%d]={{typeid_of(%s.%s),type_info_of(%s.%s),%d,\"%s\"}}\n",ai,a.pkg.alias,a.name,a.pkg.alias,a.name,a.base,a.pkg.name)
     }
     fmt.sbprintf(w,"    records:=make([]%s.Record_Info,%d)\n",core_alias,len(g.records))
     for r,ri in g.records {
@@ -1797,7 +1979,7 @@ world_write :: proc(g:^Generator,editor:bool) -> string {
     fmt.sbprint(w,"    info.aligns={.World=align_of(World),.Shared=align_of(Shared),.Editor=align_of(Editor)}\n")
     fmt.sbprint(w,"    info.entities=offset_of(World,entities)\n")
     fmt.sbprint(w,"    info.tables,info.storages,info.messages,info.steps=tables,storages,messages,steps\n")
-    fmt.sbprint(w,"    info.named_types,info.names,info.name_bits=named_types,names,name_bits\n")
+    fmt.sbprint(w,"    info.named_types,info.names,info.name_bits,info.actions=named_types,names,name_bits,actions\n")
     fmt.sbprint(w,"    info.records=records\n")
     fmt.sbprint(w,"    info.init={.World=init_World,.Shared=init_Shared,.Editor=init_Editor}\n")
     fmt.sbprint(w,"    info.destroy={.World=destroy_World,.Shared=destroy_Shared,.Editor=destroy_Editor}\n")

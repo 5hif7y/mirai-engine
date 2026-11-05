@@ -123,7 +123,7 @@ locomotion_step :: proc(
     characters:^core.Table(Character),moves:^core.Table(Character_Move),inputs:^core.Table(input.Move_Input),
     walks:core.Read(Walk),flights:core.Read(Fly),swims:core.Read(Swim),found:core.Read(Character_State),motions:core.Read(core.Motion),
     worlds:core.Read(core.World_Transform),remotes:core.Read(core.Remote),physics:core.Ref(Physics_State),
-    paces:core.Read(core.Own_Pace),requests:^Locomotion_Requests,time:core.Time,clock:core.Clock,problems:^core.Problems,
+    paces:core.Read(core.Own_Pace),walk_actions:input.Input_Of(Walk_Action),requests:^Locomotion_Requests,time:core.Time,clock:core.Clock,problems:^core.Problems,
 ) {
     for asked in core.take(&requests.queue) {
         c:=core.get(characters,asked.entity)
@@ -191,7 +191,7 @@ locomotion_step :: proc(
             layers_apply(c,&next.value,c.traction_force,pace)
             move_paced(&next.value,c,pace,motion.linear,ground,frame)
         } else {
-            next.value=locomotion_move_paced(c,walk,fly,swim,ground,frame,given,motion.linear,gravity_of_entity(physics,e)*c.gravity_scale,time.dt,pace)
+            next.value=locomotion_move_paced(c,walk,fly,swim,ground,frame,given,input.action_of(walk_actions,.Jump),motion.linear,gravity_of_entity(physics,e)*c.gravity_scale,time.dt,pace)
         }
         if row:=core.row_of(moves,e);row<0 {
             core.add(moves,e,next)
@@ -209,20 +209,21 @@ move_wish :: proc "contextless" (move_input:input.Move_Input,frame:mm.Quat) -> [
     return mm.quat_rotate(frame,wish)
 }
 
-// The Character_Move of one tick of a mode of the locomotion: from the input,
-// the ground and the fluid the last step left, the frame of its vertical, the
-// velocity of the body and its gravity, all in its own time, which runs pace
-// times the time of the world (dt is that of its own time). walking and swim
-// are nil for a character that cannot walk or swim: one that only swims stays
-// in the mode out of the water.
-locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,velocity,gravity:[3]f32,dt:f32,pace:f32=1) -> (move:sim.Character_Move) {
+// The Character_Move of one tick of a mode of the locomotion: from the input
+// (jump is the action of Walk_Action.Jump among its buttons), the ground and
+// the fluid the last step left, the frame of its vertical, the velocity of
+// the body and its gravity, all in its own time, which runs pace times the
+// time of the world (dt is that of its own time). walking and swim are nil
+// for a character that cannot walk or swim: one that only swims stays in the
+// mode out of the water.
+locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump:input.Action,velocity,gravity:[3]f32,dt:f32,pace:f32=1) -> (move:sim.Character_Move) {
     up:=mm.quat_rotate(frame,{0,1,0})
     across :: proc "contextless" (v,up:[3]f32) -> [3]f32 {return v-up*linalg.dot(v,up)}
     look:=frame*mm.quat_axis_angle({0,1,0},move_input.look_yaw)*mm.quat_axis_angle({1,0,0},move_input.look_pitch)
     walk,walks:=walking.?
     move.yaw=move_input.look_yaw
     traction:=loco.traction_force
-    held:=move_input.buttons&input.action_bit(JUMP)!=0
+    held:=move_input.buttons&input.action_bit(jump)!=0
     pressed:=held && !loco.jump_held && walk.jump_height>0
     loco.jump_held=held
     v:=velocity-loco.added
@@ -380,11 +381,11 @@ move_paced :: proc "contextless" (move:^sim.Character_Move,loco:^Character,pace:
 // The Character_Move of one tick of the world for a character whose time runs
 // pace times it (core.pace_of): locomotion_move in its own time, from the
 // ground, the velocity and the dt of the world.
-locomotion_move_paced :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,velocity,gravity:[3]f32,dt,pace:f32) -> (move:sim.Character_Move) {
+locomotion_move_paced :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump:input.Action,velocity,gravity:[3]f32,dt,pace:f32) -> (move:sim.Character_Move) {
     own:=ground
     own.ground_velocity/=pace
     own.fluid_velocity/=pace
-    move=locomotion_move(loco,walking,fly,swim,own,frame,move_input,velocity/(loco.pace>0?loco.pace:1),gravity,dt*pace,pace)
+    move=locomotion_move(loco,walking,fly,swim,own,frame,move_input,jump,velocity/(loco.pace>0?loco.pace:1),gravity,dt*pace,pace)
     move_paced(&move,loco,pace,velocity,ground,frame)
     return
 }

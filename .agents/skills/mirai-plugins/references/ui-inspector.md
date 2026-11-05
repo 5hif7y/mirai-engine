@@ -141,8 +141,7 @@ sequence or together parts of earlier rows (`records_part_add`, `records_part_re
   asset's and the text's id (so it follows a moved `.ui`), an empty cell changes nothing and it
   returns the rejected rows with their reason.
 - A **Prompt** is just the prompts of its action. The action of a button or a prompt is chosen
-  among the `Action` constants that `input.mirai` binds; one that the game no longer has is
-  marked.
+  among the game's `Action` constants; one that the game no longer has is marked.
 
 ## Paths
 

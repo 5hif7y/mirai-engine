@@ -56,7 +56,7 @@ correction_fixed :: proc(world,shared,editor,application:rawptr) {
         sent,_:=remote_input(core.ref(&w.remote),sh.connection)
         push=net_test_axis(sent,NET_TEST_PUSH)
     } else {
-        push=inp.seat_value(core.read(&w.seats),inp.local_seat(core.read(&w.seats),0),NET_TEST_PUSH)
+        push=inp.seat_action(core.read(&w.seats),inp.local_seat(core.read(&w.seats),0),NET_TEST_PUSH).value
     }
     if push!=0 {phys.apply_force(&w.requests,sh.player,{push*CORRECTION_PUSH,0,0})}
     net_test_physics(w,sh,app)

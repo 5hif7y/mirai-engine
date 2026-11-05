@@ -7,8 +7,8 @@ attributes and writes the code that joins the libraries. `mirai generate <projec
 `-custom-attribute:` carries `build.CUSTOM_ATTRIBUTES`: `component`, `storage`, `step`, `loops`,
 `stage`, `after`, `before`, `server`, `shared`, `locks`, `host`, `by_world`, `copy`, `swap`, `free`,
 `replicated`, `setting`, `scene`, `description`, `queue`, `events`, `keep`, `reset`, `net_message`,
-`from`, `reliable`, `params`, `names`, `name_bits`, `name`, `name_requires`, `presentation` and
-`record`. The CLI and `cook/build` pass it on their own; a hand-compiled program needs it. The
+`from`, `reliable`, `params`, `names`, `name_bits`, `name`, `name_requires`, `presentation`,
+`record` and `actions`. The CLI and `cook/build` pass it on their own; a hand-compiled program needs it. The
 `mirai` tool is compiled with `-ignore-unknown-attributes`: it does not use them, and one compiled
 before a new attribute does not know it.
 
@@ -155,6 +155,8 @@ receives the place of its origin: a type or a function of an editor package neve
   A function that also does something at every end is split in two, or looks at `core.Network` in
   the body; the one that empties a `queue` is not `server`, because on a client the queue would
   grow with nobody taking it.
+- `actions`: an enum of `u8` whose members are the input actions of a library; with `names`, the
+  type whose values they take ([named ids](core.md#named-ids)).
 - `params`: a struct whose fields are function parameters ([groups](#parameter-groups)); it is not
   world data.
 - `record`: a struct that is the row of game data tables ([game data](core.md#game-data)); it
@@ -241,6 +243,9 @@ doors_open :: proc(doors:core.Read(Door),placer:core.Placer,time:core.Time) {...
   `@(params)` is an error; what it only reads, or a `queue` it pushes to, may arrive twice.
 - It is declared in any package that the generator reads and is used by the functions that import
   it, also those of a plugin compiled as a library.
+- One with a type parameter, `struct($E:typeid)`, is received for an enum `@(actions)`,
+  `B(E)` (`inp.Input_Of(Walk_Action)`): its field of the `@(names,actions)` type takes the base of
+  `E`, and the others are bound as in any group.
 
 ## Rules the generator checks
 
@@ -270,7 +275,8 @@ all. The ones most often stumbled on:
   `fixed` that receives something from the editor (`fixed` is repeated in the rollback); one of
   `fixed` that receives a `presentation` storage.
 - A type declared twice; a `locks` on something that is not a `shared` component.
-- A `@(params)` that is not a struct without type parameters, that has no fields, that is also a
+- A `@(params)` that is not a struct without type parameters or with one `$E:typeid` (then with a
+  field of the actions type, and received for an enum `@(actions)`), that has no fields, that is also a
   component, storage or message, with a field that is not a valid parameter or that is another
   `@(params)` (they do not nest); a function that receives it by pointer, or a library one that
   receives one from an editor package.

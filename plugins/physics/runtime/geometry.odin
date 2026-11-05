@@ -159,11 +159,12 @@ Geometry_Source :: struct {
     scale:[3]f32,
     round:f32,
     size,time:i64, // of the file of the mesh, as Collider_Mesh; zero for a generated one
+    piece:u32, // of a hull made of convex pieces, from 1; 0 for the whole collider
 }
 
 @(private)
 geometry_source_same :: proc "contextless" (a,b:Geometry_Source) -> bool {
-    return a.kind==b.kind && a.shape==b.shape && a.mesh==b.mesh && a.scale==b.scale && a.round==b.round && a.size==b.size && a.time==b.time
+    return a.kind==b.kind && a.shape==b.shape && a.mesh==b.mesh && a.scale==b.scale && a.round==b.round && a.size==b.size && a.time==b.time && a.piece==b.piece
 }
 
 // What the geometry of a collider is made from. False when the file of its mesh is unknown: then it is not
@@ -180,10 +181,10 @@ geometry_source_of :: proc(s:^Sync,kind:Collider_Kind,static:render.Mesh_Rendere
     return source,true
 }
 
-// A live slot made from the same source, given to the link: hulls, then meshes (a flat hull is one), then
-// heightfields, in the order of Physics_State.geometry.
+// A live slot made from the same source: hulls, then meshes (a flat hull is one), then heightfields, in the
+// order of Physics_State.geometry.
 @(private)
-geometry_shared :: proc(s:^Sync,l:^Link,source:Geometry_Source) -> (geometry:sim.Geometry,ok:bool) {
+geometry_shared :: proc(s:^Sync,source:Geometry_Source) -> (geometry:sim.Geometry,ok:bool) {
     w:=&s.state.world
     hulls,meshes:=len(w.hulls),len(w.meshes)
     for &known,at in s.state.sources {
@@ -191,36 +192,33 @@ geometry_shared :: proc(s:^Sync,l:^Link,source:Geometry_Source) -> (geometry:sim
         switch {
         case at<hulls:
             if w.hulls[at].generation!=known.generation {continue}
-            l.hull=sim.Hull_Handle(base.handle_make(u32(at),known.generation))
-            return l.hull,true
+            return sim.Hull_Handle(base.handle_make(u32(at),known.generation)),true
         case at<hulls+meshes:
             if w.meshes[at-hulls].generation!=known.generation {continue}
-            l.mesh=sim.Mesh_Handle(base.handle_make(u32(at-hulls),known.generation))
-            return l.mesh,true
+            return sim.Mesh_Handle(base.handle_make(u32(at-hulls),known.generation)),true
         case:
             if w.heightfields[at-hulls-meshes].generation!=known.generation {continue}
-            l.heightfield=sim.Heightfield_Handle(base.handle_make(u32(at-hulls-meshes),known.generation))
-            return l.heightfield,true
+            return sim.Heightfield_Handle(base.handle_make(u32(at-hulls-meshes),known.generation)),true
         }
     }
     return
 }
 
-// Writes down what a slot the link made was made from. Without memory the slot is only not shared.
+// Writes down what a slot was made from. Without memory the slot is only not shared.
 @(private)
-geometry_remember :: proc(s:^Sync,l:^Link,source:Geometry_Source) {
+geometry_remember :: proc(s:^Sync,geometry:sim.Geometry,source:Geometry_Source) {
     state:=s.state
     w:=&state.world
     total:=len(w.hulls)+len(w.meshes)+len(w.heightfields)
     if len(state.sources)!=total && resize(&state.sources,total)!=nil {return}
     at:=-1
     handle:base.Handle
-    switch {
-    case l.hull!={}:        handle=base.Handle(l.hull);at=int(base.handle_index(handle))
-    case l.mesh!={}:        handle=base.Handle(l.mesh);at=len(w.hulls)+int(base.handle_index(handle))
-    case l.heightfield!={}: handle=base.Handle(l.heightfield);at=len(w.hulls)+len(w.meshes)+int(base.handle_index(handle))
+    #partial switch g in geometry {
+    case sim.Hull_Handle:        handle=base.Handle(g);at=int(base.handle_index(handle))
+    case sim.Mesh_Handle:        handle=base.Handle(g);at=len(w.hulls)+int(base.handle_index(handle))
+    case sim.Heightfield_Handle: handle=base.Handle(g);at=len(w.hulls)+len(w.meshes)+int(base.handle_index(handle))
     }
-    if at<0 || at>=total {return}
+    if handle=={} || at<0 || at>=total {return}
     known:=source
     known.generation=base.handle_generation(handle)
     state.sources[at]=known
@@ -240,11 +238,82 @@ collider_geometry :: proc(s:^Sync,l:^Link,kind:Collider_Kind,e:core.Entity,scale
         for value in origin {if value-value!=0 {return {},{},.No_Heightfield}}
     }
     if shareable {
-        if shared,found:=geometry_shared(s,l,source);found {return shared,origin,.None}
+        if shared,found:=geometry_shared(s,source);found {
+            #partial switch g in shared {
+            case sim.Hull_Handle:        l.hull=g
+            case sim.Mesh_Handle:        l.mesh=g
+            case sim.Heightfield_Handle: l.heightfield=g
+            }
+            return shared,origin,.None
+        }
     }
     geometry,failure=collider_geometry_make(s,l,kind,static,scale,round)
-    if failure==.None && shareable {geometry_remember(s,l,source)}
+    if failure==.None && shareable {geometry_remember(s,geometry,source)}
     return geometry,origin,failure
+}
+
+// Makes the hulls of a Hull collider whose mesh has several convex pieces: the first in l.hull, the others in
+// a run of Physics_State.pieces, each shared as a whole collider is. pieces is false when the mesh has fewer
+// than two: the collider is then one hull of all its points. On a failure the caller releases what was made.
+@(private)
+collider_pieces_make :: proc(s:^Sync,l:^Link,e:core.Entity,scale:[3]f32,round:f32) -> (pieces:bool,failure:Shape_Failure) {
+    static,has_mesh:=core.get(s.statics,e)
+    if !has_mesh {return}
+    points:=make([dynamic]geom.Vec3,context.temp_allocator)
+    sizes:=make([dynamic]u32,context.temp_allocator)
+    if !host.assets_collision_hulls(s.app.assets,static.mesh,static.shape,&points,&sizes) || len(sizes)<2 {return}
+    run,taken:=pieces_take(s.state,len(sizes)-1)
+    if !taken {return true,.Geometry_Budget}
+    l.pieces=run
+    source,shareable:=geometry_source_of(s,.Hull,static,scale,round)
+    from:=0
+    for size,at in sizes {
+        if int(size)>len(points)-from {return true,.Hull}
+        piece:=points[from:][:size]
+        from+=int(size)
+        source.piece=u32(at+1)
+        hull:sim.Hull_Handle
+        if shareable {
+            if shared,found:=geometry_shared(s,source);found {hull,_=shared.(sim.Hull_Handle)}
+        }
+        if hull=={} {
+            for &point in piece {point*=scale}
+            made:sim.Geometry
+            if made,failure=hull_make(&s.state.world,piece,round);failure!=.None {return true,failure}
+            solid:bool
+            if hull,solid=made.(sim.Hull_Handle);!solid {
+                // A piece without volume is not a part of a body.
+                if mesh,is_mesh:=made.(sim.Mesh_Handle);is_mesh {sim.mesh_destroy(&s.state.world,mesh)}
+                return true,.Hull
+            }
+            if shareable {geometry_remember(s,hull,source)}
+        }
+        if at==0 {l.hull=hull} else {s.state.pieces[run.first+u32(at)-1].hull=hull}
+    }
+    return true,.None
+}
+
+// A free run of count entries of Physics_State.pieces, made at the end when none is.
+@(private)
+pieces_take :: proc(state:^Physics_State,count:int) -> (run:Piece_Run,ok:bool) {
+    if count<=0 {return {},true}
+    free:=0
+    for piece,at in state.pieces {
+        if piece!={} {free=0;continue}
+        free+=1
+        if free==count {return {u32(at+1-count),u32(count)},true}
+    }
+    first:=len(state.pieces)-free
+    if first+count>int(max(u32)) || resize(&state.pieces,first+count)!=nil {return}
+    return {u32(first),u32(count)},true
+}
+
+// The pieces after the first of a link; none when its run is not one of the state.
+@(private)
+pieces_of :: proc "contextless" (state:^Physics_State,l:^Link) -> []Piece {
+    first,count:=int(l.pieces.first),int(l.pieces.count)
+    if count==0 || first>len(state.pieces)-count {return nil}
+    return state.pieces[first:][:count]
 }
 
 // Makes the geometry of a collider in a slot of its own.
@@ -274,16 +343,29 @@ collider_geometry_make :: proc(s:^Sync,l:^Link,kind:Collider_Kind,static:render.
         if !made {return {},.Geometry_Budget}
         return l.mesh,.None
     }
-    built,error:=geom.hull_build(buffer.positions[:],{max_vertices=COLLIDER_HULL_VERTICES},context.temp_allocator)
+    geometry,failure=hull_make(w,buffer.positions[:],round)
+    #partial switch g in geometry {
+    case sim.Hull_Handle: l.hull=g
+    case sim.Mesh_Handle: l.mesh=g
+    }
+    return
+}
+
+// The hull of points in a slot of its own, rounded by round; a flat one is a mesh of its polygon.
+@(private)
+hull_make :: proc(w:^sim.World,points:[]geom.Vec3,round:f32) -> (geometry:sim.Geometry,failure:Shape_Failure) {
+    made:bool
+    built,error:=geom.hull_build(points,{max_vertices=COLLIDER_HULL_VERTICES},context.temp_allocator)
     if error!=.None {return {},.Hull}
     if geom.hull_is_flat(built) {
         // A polygon has no volume: it collides as a mesh of its triangles and adds no mass.
         triangles:[3*(COLLIDER_HULL_VERTICES-2)]u32
         corners:=len(built.vertices)
         for i in 1..<corners-1 {triangles[3*(i-1)+1],triangles[3*(i-1)+2]=u32(i),u32(i+1)}
-        l.mesh,made=sim.mesh_create(w,{vertices=built.vertices,indices=triangles[:3*(corners-2)]})
+        mesh:sim.Mesh_Handle
+        mesh,made=sim.mesh_create(w,{vertices=built.vertices,indices=triangles[:3*(corners-2)]})
         if !made {return {},.Geometry_Budget}
-        return l.mesh,.None
+        return mesh,.None
     }
     if len(built.vertices)>255 || len(built.faces)>255 || len(built.face_vertices)>255 {return {},.Hull}
     counts:[255]u8
@@ -297,7 +379,8 @@ collider_geometry_make :: proc(s:^Sync,l:^Link,kind:Collider_Kind,static:render.
         }
     }
     desc:=sim.Hull_Desc{built.vertices,counts[:len(built.faces)],indices[:used]}
-    l.hull,made=sim.hull_create(w,desc,round)
+    hull:sim.Hull_Handle
+    hull,made=sim.hull_create(w,desc,round)
     if !made && round>0 {
         // Without the rounding it builds: the radius leaves it no core.
         if sharp,built_sharp:=sim.hull_create(w,desc);built_sharp {
@@ -306,7 +389,7 @@ collider_geometry_make :: proc(s:^Sync,l:^Link,kind:Collider_Kind,static:render.
         }
     }
     if !made {return {},.Geometry_Budget}
-    return l.hull,.None
+    return hull,.None
 }
 
 // Releases geometry after its shape is gone: the slot goes with the last shape that uses it, and stays for
@@ -317,8 +400,13 @@ geometry_release :: proc(s:^Sync,l:^Link) {
     if l.hull!={} {sim.hull_destroy(w,l.hull)}
     if l.mesh!={} {sim.mesh_destroy(w,l.mesh)}
     if l.heightfield!={} {sim.heightfield_destroy(w,l.heightfield)}
+    for &piece in pieces_of(s.state,l) {
+        if piece.hull!={} {sim.hull_destroy(w,piece.hull)}
+        piece={}
+    }
     l.hull,l.mesh={},{}
     l.heightfield={}
+    l.pieces={}
 }
 
 

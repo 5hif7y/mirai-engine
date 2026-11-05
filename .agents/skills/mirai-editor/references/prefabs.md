@@ -19,8 +19,10 @@ phase, with every skinned mesh in its rest pose.
 
 - A step that changes prefab files keeps their bytes from before and after; undo and redo return
   them, unless another process changed them. Creating, applying and undoing write the `.prefab` to
-  disk immediately: unlike the other assets, they do not stay unsaved. What the prefab names is
-  loaded through the registry, so an unsaved material looks the same as in the scene.
+  disk immediately: unlike the other assets, they do not stay unsaved. A prefab, and a scene or
+  prefab opened as the document, are read through the registry, as is what the prefab names: an
+  unsaved one (an input action renamed by `names.rename`) or an unsaved material looks as in the
+  scene.
 - A step that changes the records keeps what it removed and what it put (`Prefab_Version`) while
   the history keeps the step: undo and redo in order cross each step they undo or redo and leave the
   records with the world. Those steps are not undone by ids.

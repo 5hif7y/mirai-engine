@@ -8,18 +8,19 @@ import render "mirai:engine/render"
 import mm "mirai:std/math"
 import sim "plugins:physics/runtime/sim"
 
-// The actions the seat that drives a Character moves it with, with input.LOOK.
-MOVE :: input.Action(0) // Axis2: x right, y forward
-JUMP :: input.Action(2) // Button
+// The actions the seat that drives a Character moves it with, with
+// input.Look_Action: move is an Axis2 (x right, y forward), jump a Button.
+@(actions)
+Walk_Action :: enum u8 {Move,Jump}
 
 // Their bindings when input.mirai of the project does not name them.
 @(storage,host)
-Walk_Actions :: struct {defaults:[2]input.Action_Default}
+Walk_Actions :: struct {defaults:[Walk_Action]input.Action_Default}
 
 walk_actions_default :: proc "contextless" () -> Walk_Actions {
     return {defaults={
-        input.action_default(MOVE,.Axis2,input.binding_keys(.A,.D,.S,.W),input.binding_gamepad_stick(.Left)),
-        input.action_default(JUMP,.Button,input.binding_key(.Space),input.binding_gamepad_button(.South)),
+        .Move=input.action_default(.Axis2,input.binding_keys(.A,.D,.S,.W),input.binding_gamepad_stick(.Left)),
+        .Jump=input.action_default(.Button,input.binding_key(.Space),input.binding_gamepad_button(.South)),
     }}
 }
 
@@ -34,12 +35,12 @@ walk_actions_default :: proc "contextless" () -> Walk_Actions {
 @(step="fixed",stage="input",after="input_drive")
 locomotion_seat :: proc(
     characters:core.Read(Character),moves:^core.Table(input.Move_Input),found:core.Read(Character_State),
-    drivables:core.Read(input.Drivable),seats:core.Read(input.Seat),bindings:core.Ref(input.Input_Map),
+    drivables:core.Read(input.Drivable),walk_actions:input.Input_Of(Walk_Action),look_actions:input.Input_Of(input.Look_Action),bindings:core.Ref(input.Input_Map),
     follows:core.Read(cam.Camera_Follow),shown:core.Ref(cam.Cameras),cameras:core.Read(render.Camera),
     worlds:core.Read(core.World_Transform),remotes:core.Read(core.Remote),physics:core.Ref(Physics_State),paces:core.Read(core.Own_Pace),
     time:core.Time,clock:core.Clock,problems:^core.Problems,
 ) {
-    walks:=input.input_map_has(bindings.ptr,MOVE,.Axis2) && input.input_map_has(bindings.ptr,input.LOOK,.Axis2)
+    walks:=input.input_map_has(bindings.ptr,input.action_of(walk_actions,.Move),.Axis2) && input.input_map_has(bindings.ptr,input.action_of(look_actions,.Look),.Axis2)
     for row in 0..<core.count(characters) {
         e:=core.entity_at(characters,row)
         c:=&characters.table.values[row]
@@ -52,9 +53,9 @@ locomotion_seat :: proc(
             continue
         }
         if state,on:=core.get(found,e);on {move.look_yaw+=state.ground_turn}
-        look:=input.seat_vector(seats,seat,input.LOOK)
-        wish:=input.seat_vector(seats,seat,MOVE)
-        move.buttons=input.seat_buttons(seats,seat,bindings.ptr)
+        look:=input.seat_vector(look_actions,seat,.Look)
+        wish:=input.seat_vector(walk_actions,seat,.Move)
+        move.buttons=input.seat_buttons(walk_actions.seats,seat,bindings.ptr)
         relative:=c.move_relative_to
         owner,_:=core.get(drivables,e)
         view:=owner.camera

@@ -7,10 +7,12 @@ import "mirai:core"
 import input "mirai:engine/input"
 import "mirai:project"
 
-// Renaming an input action that the project declared puts its new name on
-// the constant and in input.mirai, and leaves the rest of the file as it was.
+// An input action is renamed in code; once built, renaming it follows: the
+// input.mirai of the project takes the new name and the code stays as it is.
+// Following before the code declares the new name, or while it keeps the old
+// one, says to rename it in code first. A new action is declared in code.
 @(test)
-renaming_an_action_renames_it_in_input_mirai :: proc(t:^testing.T) {
+renaming_an_action_follows_the_code_in_input_mirai :: proc(t:^testing.T) {
     folder,error:=os.make_directory_temp("","mirai-names-*",context.temp_allocator)
     if !testing.expect(t,error==nil) {return}
     defer os.remove_all(folder)
@@ -18,30 +20,36 @@ renaming_an_action_renames_it_in_input_mirai :: proc(t:^testing.T) {
     testing.expect(t,os.make_directory_all(game)==nil)
     code:=project.path(game,"game.odin",allocator=context.temp_allocator)
     bindings:=project.path(folder,project.INPUT_FILE,allocator=context.temp_allocator)
-    testing.expect(t,os.write_entire_file(code,"package game\nimport inp \"mirai:engine/input\"\nHIT :: inp.Action(16)\n")==nil)
+    SOURCE :: "package game\n@(actions)\nAction :: enum u8 {Strike,Hitter}\n"
+    testing.expect(t,os.write_entire_file(code,SOURCE)==nil)
     testing.expect(t,os.write_entire_file(bindings,`{"actions": [
     {"name": "hit", "kind": "Button", "bindings": [{"mouse_button": "Left"}]},
     {"name":"hitter", "kind": "Button", "bindings": []}
 ]}`)==nil)
 
     names:=[]core.Name_Info{
-        {type=input.Action,value=16,name="hit",library="game",file="game/game.odin",line=3,project=true},
-        {type=input.Action,value=17,name="hitter",library="game",file="game/game.odin",line=4,project=true},
+        {type=input.Action,value=16,name="strike",library="game",file="game/game.odin",line=3,project=true},
+        {type=input.Action,value=17,name="hitter",library="game",file="game/game.odin",line=3,project=true},
     }
-    types:=[]core.Named_Type_Info{{type=input.Action,name="Action",path="mirai:engine/input"}}
+    types:=[]core.Named_Type_Info{{type=input.Action,name="Action",path="mirai:engine/input",actions=true}}
     info:=core.World_Info{names=names,named_types=types}
     build:Build_State
     s:=Session{build=&build,has_project=true,project_root=folder}
 
+    testing.expect_value(t,names_rename(&s,&info,input.Action,"hit","punch"),Names_Error.Action_Not_Declared)
+    testing.expect_value(t,names_rename(&s,&info,input.Action,"hitter","strike"),Names_Error.Action_Still_Declared)
     testing.expect_value(t,names_rename(&s,&info,input.Action,"hit","strike"),Names_Error.None)
     written,_:=os.read_entire_file(code,context.temp_allocator)
-    testing.expect(t,strings.contains(string(written),`@(name="strike") HIT :: inp.Action(16)`))
+    testing.expect_value(t,string(written),SOURCE)
     renamed,_:=os.read_entire_file(bindings,context.temp_allocator)
     testing.expect_value(t,string(renamed),`{"actions": [
     {"name": "strike", "kind": "Button", "bindings": [{"mouse_button": "Left"}]},
     {"name":"hitter", "kind": "Button", "bindings": []}
 ]}`)
     testing.expect_value(t,input_file_rename(string(renamed),"hit","x"),"")
+    _,created:=names_create(&s,&info,input.Action,"dash")
+    testing.expect_value(t,created,Names_Error.Action_In_Code)
+    testing.expect(t,strings.contains(names_error_text(created,"Action","dash"),"add Dash to it"))
 }
 
 // A new value follows the highest, skips those taken and leaves out the last

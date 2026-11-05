@@ -26,7 +26,7 @@ import game "project:game"
 // the scene assets/scenes/main.scene that uses them. Running it again gives
 // the same bytes. From the folder of the project:
 //
-//   odin run tools/content -collection:mirai=<engine> -collection:project=. -custom-attribute:component,storage,step,loops,stage,after,before,server,shared,locks,host,by_world,copy,swap,free,replicated,setting,scene,description,queue,events,keep,reset,net_message,from,reliable,params,names,name_bits,name,name_requires
+//   odin run tools/content -collection:mirai=<engine> -collection:project=. -custom-attribute:component,storage,step,loops,stage,after,before,server,shared,locks,host,by_world,copy,copy_kept,swap,free,replicated,setting,description,queue,events,keep,persist,single,far,reset,net_message,from,reliable,params,names,name_bits,name,name_requires,presentation,record
 
 @(private) id_of :: proc(kind,name:string) -> base.Asset_Id {return base.asset_id_named(fmt.tprintf("%s\x1fgame_content\x1f%s",kind,name))}
 

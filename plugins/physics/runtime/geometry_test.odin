@@ -685,3 +685,203 @@ colliders_of_the_same_mesh_and_scale_share_one_slot_of_geometry :: proc(t:^testi
     hulls,_=geometry_budget({&g.state},.Hull)
     testing.expect_value(t,hulls,0)
 }
+
+// A generated mesh whose Hull collider is made of boxes, each given by its lowest and highest corner.
+@(private="file")
+pieces_mesh :: proc(assets:^host.Assets,boxes:[][2][3]f32) -> (base.Asset_Id,bool) {
+    points:=make([dynamic]geom.Vec3,context.temp_allocator)
+    sizes:=make([dynamic]u32,context.temp_allocator)
+    for box in boxes {
+        for corner in 0..<8 {append(&points,geom.Vec3{box[corner&1].x,box[corner>>1&1].y,box[corner>>2&1].z})}
+        append(&sizes,8)
+    }
+    triangle:=[3]geom.Vec3{{0,0,0},{1,0,0},{0,0,1}}
+    order:=[3]u32{0,2,1}
+    return host.assets_mesh_generate(assets,{positions=triangle[:],indices=order[:]},options={no_lods=true,hull_points=points[:],hull_sizes=sizes[:]})
+}
+
+// An L of two boxes: its notch is the corner from x 1 to 2 above y 1.
+@(private="file")
+PIECES_L :: [2][2][3]f32{{{0,0,-1},{2,1,1}},{{0,1,-1},{1,2,1}}}
+
+@(private="file")
+pieces_test_init :: proc(f:^Physics_Test,assets:^host.Assets) -> bool {
+    physics_test_init(f)
+    f.app.assets=assets
+    return host.assets_init(assets,{root="assets",capacity=8})
+}
+
+@(private="file")
+pieces_entity :: proc(f:^Physics_Test,mesh:base.Asset_Id,position:[3]f32,rigid:Maybe(Rigid_Body)=nil) -> core.Entity {
+    e:=core.create(&f.entities)
+    core.add(&f.transforms,e,core.Transform{position,1,{1,1,1}})
+    core.add(&f.colliders,e,collider_hull())
+    core.add(&f.statics,e,render.Mesh_Renderer{mesh=mesh})
+    if body,has:=rigid.?;has {core.add(&f.rigids,e,body)}
+    return e
+}
+
+@(private="file")
+hulls_used :: proc(f:^Physics_Test) -> int {
+    used,_:=geometry_budget({&f.state},.Hull)
+    return used
+}
+
+// An L whose Hull collider is made of two convex pieces holds a sphere in its notch, where the hull of all
+// its points would be a slope, and its contacts and rays name it.
+@(test)
+a_hull_of_convex_pieces_holds_a_sphere_in_its_notch :: proc(t:^testing.T) {
+    f:Physics_Test
+    assets:host.Assets
+    defer physics_test_destroy(&f)
+    defer host.assets_destroy(&assets)
+    if !testing.expect(t,pieces_test_init(&f,&assets)) {return}
+    f.gravity={0,-9.81,0}
+    boxes:=PIECES_L
+    mesh,made:=pieces_mesh(&assets,boxes[:])
+    if !testing.expect(t,made) {return}
+    corner:=pieces_entity(&f,mesh,{})
+    ball:=core.create(&f.entities)
+    core.add(&f.transforms,ball,core.Transform{{1.5,2.5,0},1,{1,1,1}})
+    core.add(&f.colliders,ball,collider_sphere(0.25))
+    core.add(&f.rigids,ball,RIGID_BODY_DYNAMIC)
+    touched:=false
+    for _ in 0..<120 {
+        physics_test_step(&f)
+        for begin in f.events.contact_begin.items {
+            touched||=begin.a==corner && begin.collider_a==corner && begin.b==ball || begin.b==corner && begin.collider_b==corner && begin.a==ball
+        }
+    }
+    testing.expect_value(t,f.problems.count,0)
+    l:=link_find(&f.state,corner)
+    if !testing.expect(t,l!=nil && l.pieces.count==1 && collider_ready({&f.state},corner)) {return}
+    testing.expect_value(t,hulls_used(&f),2)
+    rest:=physics_test_pose(&f,ball).position
+    testing.expectf(t,abs(rest.y-1.25)<0.02 && rest.x>1.2 && rest.x<1.8,"the ball rests in the notch: %v",rest)
+    testing.expect(t,touched,"the contact names the L as body and collider")
+    for probe in ([2][3]f32{{1.5,1,0.7},{0.5,2,0.7}}) {
+        hit,hit_ok:=raycast({&f.state},probe+{0,4,0},{0,-1,0})
+        testing.expectf(t,hit_ok && hit.entity==corner && hit.collider==corner && abs(hit.point.y-probe.y)<1e-3,"a ray down at %v: %v",probe,hit)
+        alone,alone_ok:=collider_raycast({&f.state},corner,probe+{0,4,0},{0,-1,0},10)
+        testing.expectf(t,alone_ok && abs(alone.point.y-probe.y)<1e-3,"a ray at the L alone at %v: %v",probe,alone)
+    }
+    bounds,bounded:=collider_bounds({&f.state},corner)
+    testing.expectf(t,bounded && bounds.max.y>=2 && bounds.max.x>=2,"the bounds hold every piece: %v",bounds)
+}
+
+// The pieces of a Hull collider are shapes of the body of a static, kinematic, dynamic or compound entity:
+// the mass is that of the pieces, not of the hull of all their points.
+@(test)
+the_pieces_of_a_hull_are_shapes_of_every_kind_of_body :: proc(t:^testing.T) {
+    f:Physics_Test
+    assets:host.Assets
+    defer physics_test_destroy(&f)
+    defer host.assets_destroy(&assets)
+    if !testing.expect(t,pieces_test_init(&f,&assets)) {return}
+    boxes:=PIECES_L
+    mesh,made:=pieces_mesh(&assets,boxes[:])
+    if !testing.expect(t,made) {return}
+    rigids:=[3]Rigid_Body{RIGID_BODY_STATIC,RIGID_BODY_KINEMATIC,RIGID_BODY_DYNAMIC}
+    entities:[4]core.Entity
+    for rigid,at in rigids {entities[at]=pieces_entity(&f,mesh,{f32(at)*5,0,0},rigid)}
+    holder:=core.create(&f.entities)
+    core.add(&f.transforms,holder,core.Transform{{15,0,0},1,{1,1,1}})
+    core.add(&f.rigids,holder,RIGID_BODY_DYNAMIC)
+    entities[3]=pieces_entity(&f,mesh,{})
+    core.add(&f.parents,entities[3],core.Parent{holder,0})
+    physics_test_step(&f,0)
+    testing.expect_value(t,f.problems.count,0)
+    // Every L shares the two slots.
+    testing.expect_value(t,hulls_used(&f),2)
+    w:=&f.state.world
+    for e,at in entities {
+        l:=link_find(&f.state,e)
+        if !testing.expect(t,l!=nil && l.pieces.count==1) {continue}
+        shapes:[4]sim.Shape_Handle
+        testing.expect_value(t,sim.body_shapes(w,l.body,shapes[:]),2)
+        hit,hit_ok:=raycast({&f.state},{f32(at)*5+1.5,5,0},{0,-1,0})
+        testing.expectf(t,hit_ok && hit.entity==(at==3?holder:e) && hit.collider==e && abs(hit.point.y-1)<1e-3,"the notch of entity %v: %v",at,hit)
+    }
+    for e in ([2]core.Entity{entities[2],holder}) {
+        mass,_,_:=sim.body_mass_properties(w,body_of({&f.state},e))
+        testing.expectf(t,abs(mass-6000)<1,"the mass of two boxes of 4 and 2 m3: %v",mass)
+    }
+}
+
+// A change of the mesh makes the pieces again and the removal of the collider frees them all; a copy of the
+// world keeps them, a full budget leaves the link without a shape and a piece without volume is refused.
+@(test)
+the_pieces_of_a_hull_follow_their_mesh_copies_and_budgets :: proc(t:^testing.T) {
+    f:Physics_Test
+    assets:host.Assets
+    defer physics_test_destroy(&f)
+    defer host.assets_destroy(&assets)
+    if !testing.expect(t,pieces_test_init(&f,&assets)) {return}
+    f.settings.hulls=3
+    two:=PIECES_L
+    three:=[3][2][3]f32{two[0],two[1],{{1,1,-1},{1.5,1.5,1}}}
+    four:=[4][2][3]f32{two[0],two[1],three[2],{{3,0,-1},{4,1,1}}}
+    flat:=[2][2][3]f32{two[0],{{0,1,-1},{1,1,1}}}
+    l_mesh,_:=pieces_mesh(&assets,two[:])
+    step_mesh,_:=pieces_mesh(&assets,three[:])
+    big_mesh,_:=pieces_mesh(&assets,four[:])
+    flat_mesh,made:=pieces_mesh(&assets,flat[:])
+    if !testing.expect(t,made) {return}
+    e:=pieces_entity(&f,l_mesh,{},RIGID_BODY_DYNAMIC)
+    physics_test_step(&f,0)
+    w:=&f.state.world
+    shapes:[8]sim.Shape_Handle
+    testing.expect_value(t,sim.body_shapes(w,body_of({&f.state},e),shapes[:]),2)
+
+    copy:Physics_State
+    defer state_destroy(&copy)
+    testing.expect(t,state_copy(&copy,&f.state))
+
+    core.get(&f.statics,e).mesh=step_mesh
+    physics_test_step(&f,0)
+    l:=link_find(&f.state,e)
+    testing.expect(t,l!=nil && l.pieces.count==2)
+    testing.expect_value(t,sim.body_shapes(w,l.body,shapes[:]),3)
+    testing.expect_value(t,hulls_used(&f),3)
+    hit,hit_ok:=raycast({&f.state},{1.25,5,0},{0,-1,0})
+    testing.expect(t,hit_ok && hit.entity==e && abs(hit.point.y-1.5)<1e-3)
+
+    // Four pieces do not fit in three hulls: no shape, and nothing held.
+    core.get(&f.statics,e).mesh=big_mesh
+    physics_test_step(&f,0)
+    testing.expect(t,core.problem_find(&f.problems,e,"physics.geometry_budget")!=nil)
+    l=link_find(&f.state,e)
+    testing.expect(t,l!=nil && l.shape=={} && l.hull=={} && l.pieces==Piece_Run{})
+    testing.expect_value(t,sim.body_shapes(w,l.body,shapes[:]),0)
+    testing.expect_value(t,hulls_used(&f),0)
+    for piece in f.state.pieces {testing.expect_value(t,piece,Piece{})}
+
+    // A piece without volume is not a part of a body.
+    core.get(&f.statics,e).mesh=flat_mesh
+    physics_test_step(&f,0)
+    testing.expect(t,core.problem_find(&f.problems,e,"physics.collider_hull")!=nil)
+    testing.expect(t,l.shape=={} && hulls_used(&f)==0)
+    meshes,_:=geometry_budget({&f.state},.Mesh)
+    testing.expect_value(t,meshes,0)
+
+    // Removed, every slot is free; back from the copy, the L is there and collides.
+    core.get(&f.statics,e).mesh=l_mesh
+    physics_test_step(&f,0)
+    testing.expect_value(t,sim.body_shapes(w,link_find(&f.state,e).body,shapes[:]),2)
+    core.remove(&f.colliders,e)
+    physics_test_step(&f,0)
+    testing.expect_value(t,hulls_used(&f),0)
+    for piece in f.state.pieces {testing.expect_value(t,piece,Piece{})}
+    testing.expect_value(t,f.state.stats.shapes_created,f.state.stats.shapes_destroyed)
+    testing.expect(t,state_copy(&f.state,&copy))
+    testing.expect_value(t,hulls_used(&f),2)
+    hit,hit_ok=raycast({&f.state},{1.5,5,0},{0,-1,0})
+    testing.expect(t,hit_ok && hit.entity==e && abs(hit.point.y-1)<1e-3)
+    buffer:=make([]byte,sim.world_snapshot_capacity(w))
+    defer delete(buffer)
+    written,saved:=sim.world_snapshot(w,buffer)
+    testing.expect(t,saved && sim.world_restore(w,buffer[:written]))
+    // The rows lost the collider: the next step lets the copied pieces go.
+    physics_test_step(&f,0)
+    testing.expect_value(t,hulls_used(&f),0)
+}

@@ -243,12 +243,25 @@ hostile_polygons_through_the_ear_clipping :: proc(t:^testing.T) {
     h:=Hostile{5}
     points:[dynamic]Vec2
     loops:[dynamic]int
-    triangles:[dynamic]u32
-    defer {delete(points);delete(loops);delete(triangles)}
+    triangles,pieces,sizes:[dynamic]u32
+    defer {delete(points);delete(loops);delete(triangles);delete(pieces);delete(sizes)}
     for _ in 0..<HOSTILE_ROUNDS {
         hostile_polygon(&h,&points,&loops)
         _=polygon_triangulate(points[:],loops[:],&triangles,Polygon_Rule(hostile_int(&h,2)))
+        clear(&pieces);clear(&sizes)
+        count:=polygon_convex_partition(points[:],loops[:],&pieces,&sizes)
+        used:=0
+        for size in sizes {used+=int(size)}
+        testing.expect(t,count==len(sizes) && used==len(pieces))
+        for index in pieces {testing.expect(t,int(index)<len(points))}
     }
+    square:=[]Vec2{{0,0},{1,0},{1,1},{0,1}}
+    nan:=[]Vec2{{0,0},{1,0},{f32(0h7fc00000),1},{0,1}}
+    for loops in ([][]int{{max(int),max(int)},{5},{-1,4},{2},{}}) {
+        testing.expect_value(t,polygon_triangulate(square,loops,&triangles),0)
+        testing.expect_value(t,polygon_convex_partition(square,loops,&pieces,&sizes),0)
+    }
+    testing.expect_value(t,polygon_convex_partition(nan,{4},&pieces,&sizes),0)
 }
 
 @(test)

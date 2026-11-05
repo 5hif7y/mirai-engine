@@ -211,7 +211,7 @@ portal_fit :: proc(wall:mm.Transform,box:Surface_Box,point,normal,up:[3]f32,othe
 portal_gun :: proc(
     guns:^core.Table(Portal_Gun),mouths:^core.Table(Portal_Mouth),surfaces:core.Read(Portal_Surface),cubes:core.Read(Portal_Cube),
     rims:core.Read(portals.Portal_Rim),openings:core.Read(portals.Portal),
-    colliders:core.Read(phys.Collider),inputs:core.Read(inp.Move_Input),seats:inp.Players,worlds:core.Read(core.World_Transform),
+    colliders:core.Read(phys.Collider),inputs:core.Read(inp.Move_Input),actions:inp.Input_Of(Action),worlds:core.Read(core.World_Transform),
     transforms:^core.Table(core.Transform),physics:core.Ref(phys.Physics_State),bodies:^phys.Body_Requests,
     characters:core.Read(core.Motion),passes:^Grill_Passes,
 ) {
@@ -232,9 +232,9 @@ portal_gun :: proc(
         gun:=core.at(core.read(guns),row)
         eye,aim,ok:=eyes_of(worlds,inputs,player)
         if !ok {continue}
-        blue:=inp.pressed(seats,player,PORTAL_BLUE)
-        orange:=inp.pressed(seats,player,PORTAL_ORANGE)
-        grab:=inp.pressed(seats,player,GRAB)
+        blue:=inp.pressed(actions,player,.Portal_Blue)
+        orange:=inp.pressed(actions,player,.Portal_Orange)
+        grab:=inp.pressed(actions,player,.Grab)
         held:=gun.held
         if held!=core.NONE {
             cube,placed:=core.get(worlds,held)

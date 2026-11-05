@@ -97,6 +97,10 @@ own the `Transform` (`locks="core.Transform"`): the game moves through requests.
   shape to another plugin (`destruct`, for the pieces), which takes surface and collision from this
   collider. `Mesh` and `Heightfield` contribute no mass and are for static geometry: nothing rejects
   a dynamic with them, but that case has no coverage.
+- A `Hull` whose mesh has several convex pieces (`host.assets_collision_hulls`: those of a generated
+  mesh, or the shapes a `.mesh` stores without a collision mesh) is one shape per piece on the same
+  body, with the collider's surface, filter and density; otherwise it is the hull of all the points.
+  It fits in the hull budget whole or not at all.
 - `size` is multiplied by the absolute world scale: the sphere takes the largest; capsule and
   cylinder, the largest of XZ for the radius and Y for the height.
 - `convex_radius` rounds the edges of `Box`, `Cylinder` or `Hull` without changing their size
@@ -369,7 +373,7 @@ writes.
   supported.
   - Walking (with `Walk`): velocity over the ground plane relative to it, with acceleration or
     braking.
-  - Jumping: the edge of the `JUMP` action among the buttons of the `Move_Input`, supported or
+  - Jumping: the edge of the `jump` action among the buttons of the `Move_Input`, supported or
     during the coyote time after leaving an edge, gives the `launch` that reaches `Walk.jump_height`
     and makes `MODE_FALLING` the mode.
   - In the air: control bounded by `Walk.air_control`; it does not climb ground that is too steep.
@@ -385,7 +389,7 @@ writes.
     - Underwater it goes on the three axes according to yaw and pitch, with `move.y`; still, it
       brakes horizontally and what buoyancy has over weight lifts or sinks it slowly. The current is
       added to its target like a belt.
-    - `JUMP` on the surface climbs out: an `Override` layered movement takes the feet to the surface
+    - `jump` on the surface climbs out: an `Override` layered movement takes the feet to the surface
       at the jump speed of `Walk`, which then raises them `jump_height`, and the mode becomes
       falling. An `Override` removes `Float`.
   - A mode without the component that parameterizes it, requested or the one it starts with, is the
@@ -449,8 +453,8 @@ the world ([own pace](../../mirai-core/references/core.md#core-storages)).
     like `Camera` but looking where the camera looks if it has `facing` (aiming), and like `Camera`
     otherwise. For a body whose camera changes mode or that aims with another
     ([modes](../../mirai-gameplay/references/control.md#modes)).
-- A player's sensitivity is the scale of their `look` bindings. `MOVE` and `JUMP` belong to
-  `physics` and `LOOK` to `engine/input`
+- A player's sensitivity is the scale of their `look` bindings. `move` and `jump` belong to
+  `physics` (`Walk_Action`) and `look` to `engine/input` (`Look_Action`)
   ([actions](../../mirai-gameplay/references/control.md#actions)).
 - Without a seat, before `locomotion_step` takes its initial look or where another end decides
   (`core.Remote`), it does not touch it: what an AI or the network wrote stays. If `input.mirai`

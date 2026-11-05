@@ -479,8 +479,16 @@ dialogs_answer :: proc(s:^Session) {
 scene_load_file :: proc(s:^Session,file:string) -> (loaded:^asset.Scene,error:Document_Error) {
     a:=s.app.assets
     if a==nil {return nil,.No_Assets}
+    // A file of the assets as the registry holds it, unsaved, else the disk.
     source:asset.Asset
-    #partial switch asset.asset_load(&source,file) {
+    opened:asset.Error
+    if relative,inside:=asset.registry_relative(&a.registry,file);inside {
+        data,read_error:=asset.registry_read(&a.registry,relative)
+        opened=read_error==.None?asset.asset_take(&source,data):read_error
+    } else {
+        opened=asset.asset_load(&source,file)
+    }
+    #partial switch opened {
     case .None:
     case .Not_Found: return nil,.Not_Found
     case:            return nil,.Not_A_Scene
@@ -489,7 +497,7 @@ scene_load_file :: proc(s:^Session,file:string) -> (loaded:^asset.Scene,error:Do
     kind:=source.blob.header.kind
     if kind!=asset.KIND_SCENE && kind!=asset.KIND_PREFAB {return nil,.Not_A_Scene}
     loaded=new(asset.Scene)
-    if asset.scene_load(loaded,&a.types,file)!=.None {
+    if asset.scene_from_asset(loaded,&a.types,&source)!=.None {
         free(loaded)
         return nil,.Not_A_Scene
     }

@@ -17,6 +17,9 @@ import "mirai:std/serial"
 // moves is swapped into it, so the old struct keeps what the new library made
 // in its place and the old library's destroy frees both what went and those
 // leftovers. The caller then puts fresh where the old struct was.
+//
+// When the new library gives an input action another number, a value that
+// holds actions converts, so each keeps its action by name.
 
 Migration_Kind :: enum u8 {
     New,     // the old library has none: as the new one starts it
@@ -33,6 +36,7 @@ World_Migration :: struct {
     storages:[]Migration_Kind,     // by storage of to
     storage_sources:[]int,
     from_schema,to_schema:serial.Schema, // of the storages converted
+    from_names,to_names:[]serial.Choice, // the names of the @(names) types, which the schemas point into
     allocator:runtime.Allocator,
 }
 
@@ -46,8 +50,8 @@ world_migration_make :: proc(m:^World_Migration,from,to:^World_Info,allocator:=c
     serial.schema_init(&m.from_schema,allocator)
     serial.schema_init(&m.to_schema,allocator)
     ok:bool
-    if _,ok=schema_named(&m.from_schema,from,allocator);!ok {return false}
-    if _,ok=schema_named(&m.to_schema,to,allocator);!ok {return false}
+    if m.from_names,ok=schema_named(&m.from_schema,from,allocator);!ok {return false}
+    if m.to_names,ok=schema_named(&m.to_schema,to,allocator);!ok {return false}
     m.tables=make([]Migration_Kind,len(to.tables),allocator)
     m.table_sources=make([]int,len(to.tables),allocator)
     m.table_map=make([]int,len(from.tables),allocator)
@@ -55,13 +59,15 @@ world_migration_make :: proc(m:^World_Migration,from,to:^World_Info,allocator:=c
     m.storage_sources=make([]int,len(to.storages),allocator)
     if m.tables==nil && len(to.tables)>0 || m.table_map==nil && len(from.tables)>0 || m.storages==nil && len(to.storages)>0 {return false}
     for &source in m.table_map {source=-1}
+    renumbered:=names_renumbered(from,to)
     for &t,i in to.tables {
         m.table_sources[i]=-1
         for &old,j in from.tables {
             if old.name!=t.name || old.place!=t.place {continue}
             m.table_sources[i]=j
             m.table_map[j]=i
-            m.tables[i]=type_layout_hash(old.info)==type_layout_hash(t.info)?.Move:.Convert
+            m.tables[i]=layout_kept(m,old.info,t.info,renumbered)?.Move:.Convert
+            if m.tables[i]==.Convert {m.places+={t.place}}
             break
         }
     }
@@ -70,17 +76,47 @@ world_migration_make :: proc(m:^World_Migration,from,to:^World_Info,allocator:=c
         for &old,j in from.storages {
             if old.name!=s.name || old.place!=s.place || old.by_world!=s.by_world {continue}
             m.storage_sources[i]=j
-            m.storages[i]=type_layout_hash(old.info)==type_layout_hash(s.info)?.Move:.Convert
+            m.storages[i]=layout_kept(m,old.info,s.info,renumbered && !s.by_world)?.Move:.Convert
+            if m.storages[i]==.Convert {m.places+={s.place}}
             break
         }
     }
     return true
 }
 
+// Whether a name of a type @(names,actions) of from has another number in to.
+@(private="file")
+names_renumbered :: proc(from,to:^World_Info) -> bool {
+    for t in from.named_types {
+        if !t.actions {continue}
+        same:^Named_Type_Info
+        for &other in to.named_types {
+            if other.name==t.name && other.path==t.path {same=&other;break}
+        }
+        if same==nil {continue}
+        for entry in names_of(from,t.type) {
+            if value,found:=name_value(to,same.type,entry.name);found && value!=entry.value {return true}
+        }
+    }
+    return false
+}
+
+// Whether values laid out by from stay as they are in to: the same layout
+// and, with renumbered actions, no action inside.
+@(private="file")
+layout_kept :: proc(m:^World_Migration,from,to:^runtime.Type_Info,renumbered:bool) -> bool {
+    if type_layout_hash(from)!=type_layout_hash(to) {return false}
+    if !renumbered || !value_flat(from) || !value_flat(to) {return true}
+    src,src_ok:=serial.schema_add_type_info(&m.from_schema,from)
+    dst,dst_ok:=serial.schema_add_type_info(&m.to_schema,to)
+    return !src_ok || !dst_ok || serial.schema_layout_hash(&m.from_schema,src)==serial.schema_layout_hash(&m.to_schema,dst)
+}
+
 world_migration_destroy :: proc(m:^World_Migration) {
     context.allocator=m.allocator
     delete(m.tables);delete(m.table_sources);delete(m.table_map);delete(m.storages);delete(m.storage_sources)
     delete(m.from_schema.named);delete(m.to_schema.named)
+    delete(m.from_names);delete(m.to_names)
     serial.schema_destroy(&m.from_schema)
     serial.schema_destroy(&m.to_schema)
     m^={}

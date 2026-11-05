@@ -458,3 +458,75 @@ registry_gives_every_copy_an_id_and_forgets_one_whose_file_goes :: proc(t:^testi
     testing.expect_value(t,registry_scan(&r),Error.None)
     testing.expect(t,len(r.files)==1 && len(r.reassigned)==0 && len(r.memory)==0)
 }
+
+// A folder mounted while running is seen at once, over a scan and over a
+// packed index, and never takes an id the registry already has: the copy of a
+// shipped id is left out. Refreshing finds what is written in it, and
+// unmounting takes it out whole.
+@(test)
+registry_mounts_a_guest_folder_that_never_takes_an_id_the_registry_has :: proc(t:^testing.T) {
+    types:Types;types_init(&types);defer types_destroy(&types)
+    root,guest:=test_path("registry-guest"),test_path("registry-guest-user")
+    os.remove_all(root);os.remove_all(guest)
+    defer {os.remove_all(root);os.remove_all(guest)}
+    os.make_directory_all(fmt.tprintf("%s/textures",root))
+    os.make_directory_all(fmt.tprintf("%s/levels",guest))
+    wood,own,late:=base.Asset_Id{1,1},base.Asset_Id{2,2},base.Asset_Id{3,3}
+    write_texture(t,&types,fmt.tprintf("%s/textures/wood.tex",root),wood)
+    write_texture(t,&types,fmt.tprintf("%s/levels/own.tex",guest),own)
+    write_texture(t,&types,fmt.tprintf("%s/levels/fake.tex",guest),wood)
+    index:=fmt.tprintf("%s/%s",root,REGISTRY_INDEX)
+    packed:Registry;registry_init(&packed,root);defer registry_destroy(&packed)
+    testing.expect_value(t,registry_scan(&packed),Error.None)
+    testing.expect(t,registry_save(&packed,index))
+
+    Mode :: enum {Scanned,Indexed}
+    for mode in Mode {
+        r:Registry;registry_init(&r,root);defer registry_destroy(&r)
+        testing.expect_value(t,registry_scan(&r) if mode==.Scanned else registry_load(&r,index),Error.None)
+        for prefix in ([]string{"",".user","..","/user","user/","a//b","a/../b","a\\b","a:b","textures"}) {
+            _,error:=registry_mount_guest(&r,guest,prefix)
+            testing.expectf(t,error==.Invalid,"%v: prefix %q gives %v",mode,prefix,error)
+        }
+        _,missing:=registry_mount_guest(&r,fmt.tprintf("%s/absent",guest),"user")
+        testing.expect_value(t,missing,Error.Not_Found)
+        revision:=r.revision
+        refused,error:=registry_mount_guest(&r,guest,"user")
+        testing.expect(t,error==.None && refused==1 && r.revision>revision)
+        file,found:=registry_find(&r,own)
+        testing.expect(t,found && file.path=="user/levels/own.tex")
+        testing.expect_value(t,registry_file_path(&r,file.path,context.temp_allocator),fmt.tprintf("%s/levels/own.tex",guest))
+        shipped,_:=registry_find(&r,wood)
+        testing.expect_value(t,shipped.path,"textures/wood.tex")
+        _,copy:=registry_find_path(&r,"user/levels/fake.tex")
+        testing.expect(t,!copy && len(r.refused)==1 && r.refused[0]=="user/levels/fake.tex")
+        empty:=fmt.tprintf("%s/empty",guest)
+        os.make_directory_all(empty)
+        for taken in ([]string{"user","user/more"}) {
+            _,again:=registry_mount_guest(&r,empty,taken)
+            testing.expect_value(t,again,Error.Invalid)
+        }
+        _,spare:=registry_mount_guest(&r,empty,"spare")
+        _,twice:=registry_mount_guest(&r,empty,"spare")
+        testing.expect(t,spare==.None && twice==.Invalid && registry_unmount(&r,"spare")==.None)
+
+        write_texture(t,&types,fmt.tprintf("%s/levels/late.tex",guest),late)
+        testing.expect_value(t,registry_refresh(&r,{"user/levels/late.tex","user/levels/fake.tex"}),Error.None)
+        _,seen:=registry_find(&r,late)
+        testing.expect(t,seen && len(r.refused)==1)
+        if mode==.Scanned {
+            testing.expect_value(t,registry_scan(&r),Error.None)
+            _,kept:=registry_find(&r,own)
+            testing.expect(t,kept && len(r.refused)==1)
+        }
+
+        revision=r.revision
+        testing.expect_value(t,registry_unmount(&r,"user"),Error.None)
+        _,gone:=registry_find(&r,own)
+        _,gone_late:=registry_find(&r,late)
+        _,still:=registry_find(&r,wood)
+        testing.expect(t,!gone && !gone_late && still && len(r.refused)==0 && len(r.mounts)==0 && r.revision>revision)
+        testing.expect_value(t,registry_unmount(&r,"user"),Error.Not_Found)
+        os.remove(fmt.tprintf("%s/levels/late.tex",guest))
+    }
+}

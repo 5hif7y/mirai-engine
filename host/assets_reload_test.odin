@@ -54,3 +54,46 @@ a_reload_of_a_damaged_file_keeps_what_loaded_and_says_why_until_it_is_whole :: p
     testing.expect_value(t,assets_material_values(&a,row).roughness,f32(0.25))
     testing.expect_value(t,len(a.errors),0)
 }
+
+// A folder mounted in a shipped game (a packed index) loads its assets at once;
+// a refresh sees what is written in it and not in the shipped folder, and once
+// unmounted what loaded from it stays while it is in use.
+@(test)
+a_folder_mounted_in_a_shipped_game_is_refreshed_alone_and_keeps_what_loaded :: proc(t:^testing.T) {
+    directory,_:=os.temp_directory(context.temp_allocator)
+    root:=fmt.tprintf("%s/mirai-host-%d-mount",directory,os.get_pid())
+    guest:=fmt.tprintf("%s/mirai-host-%d-mount-user",directory,os.get_pid())
+    os.remove_all(root);os.remove_all(guest)
+    defer {os.remove_all(root);os.remove_all(guest)}
+    os.make_directory_all(root);os.make_directory_all(guest)
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    stone,moss,late,unseen:=base.Asset_Id{1,1},base.Asset_Id{2,2},base.Asset_Id{3,3},base.Asset_Id{4,4}
+    info:=asset.MATERIAL_DEFAULTS
+    testing.expect_value(t,asset.material_save(fmt.tprintf("%s/stone.mat",root),&types,{id=stone,info=info}),asset.Error.None)
+    shipped:asset.Registry;asset.registry_init(&shipped,root);defer asset.registry_destroy(&shipped)
+    testing.expect_value(t,asset.registry_scan(&shipped),asset.Error.None)
+    testing.expect(t,asset.registry_save(&shipped,fmt.tprintf("%s/%s",root,asset.REGISTRY_INDEX)))
+    info.roughness=0.25
+    testing.expect_value(t,asset.material_save(fmt.tprintf("%s/moss.mat",guest),&types,{id=moss,info=info}),asset.Error.None)
+
+    a:Assets
+    if !testing.expect(t,assets_init(&a,{root=root,capacity=8}) && a.indexed) {return}
+    defer assets_destroy(&a)
+    refused,error:=assets_mount(&a,guest,"user")
+    testing.expect(t,error==.None && refused==0)
+    row:=assets_material_row(&a,moss)
+    assets_commit(&a)
+    testing.expect(t,row!=0 && len(a.errors)==0 && assets_material_values(&a,row).roughness==0.25)
+
+    testing.expect_value(t,asset.material_save(fmt.tprintf("%s/late.mat",guest),&types,{id=late,info=info}),asset.Error.None)
+    testing.expect_value(t,asset.material_save(fmt.tprintf("%s/unseen.mat",root),&types,{id=unseen,info=info}),asset.Error.None)
+    testing.expect(t,assets_refresh(&a,{"user/late.mat","unseen.mat"}))
+    _,written:=asset.registry_find(&a.registry,late)
+    _,shipped_late:=asset.registry_find(&a.registry,unseen)
+    testing.expect(t,written && !shipped_late)
+
+    testing.expect_value(t,assets_unmount(&a,"user"),asset.Error.None)
+    _,listed:=asset.registry_find(&a.registry,moss)
+    testing.expect(t,!listed && assets_material_row(&a,moss)==row && assets_material_values(&a,row).roughness==0.25)
+    testing.expect_value(t,assets_unmount(&a,"user"),asset.Error.Not_Found)
+}

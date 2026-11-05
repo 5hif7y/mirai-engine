@@ -51,19 +51,19 @@ FLASHLIGHT_OFFSET :: [3]f32{0.25,-0.15,0}
 @(step="fixed")
 horror_switches :: proc(
     players:core.Read(Player),switches:^core.Table(Light_Switch),flashlights:^core.Table(Flashlight),
-    seats:inp.Players,worlds:core.Read(core.World_Transform),
+    actions:inp.Input_Of(Action),worlds:core.Read(core.World_Transform),
 ) {
     for row in 0..<core.count(players) {
         e:=core.entity_at(players,row)
         placed,has_world:=core.get(worlds,e)
         if !has_world {continue}
-        if inp.pressed(seats,e,USE) {
+        if inp.pressed(actions,e,.Use) {
             for at in 0..<core.count(switches) {
                 switch_entity:=core.entity_at(switches,at)
                 if in_reach(worlds,placed.position,switch_entity,core.at(switches,at).reach) {core.at(switches,at).on=!core.at(switches,at).on}
             }
         }
-        if inp.pressed(seats,e,FLASHLIGHT) {
+        if inp.pressed(actions,e,.Flashlight) {
             for at in 0..<core.count(flashlights) {core.at(flashlights,at).on=!core.at(flashlights,at).on}
         }
     }

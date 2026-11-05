@@ -363,7 +363,12 @@ cap, and a frame that does not load does not allocate.
   does not load (the previous one stays). A material only sends its row if its values changed.
 - `assets_scan`: looks at the folder again; `assets_refresh(a, paths)`, only those paths of the
   registry ([refresh](../../mirai-assets/references/formats.md#registry)). With a packaged index
-  neither looks at the folder.
+  neither looks at the folder; a refresh still sees the paths of the guest mounts.
+- `assets_mount(a, folder, prefix)`, `assets_unmount(a, prefix)`: a folder the game did not ship
+  (levels a player saved or downloaded, mods) found by id and path at once, also in a shipped game,
+  as a [guest mount](../../mirai-assets/references/formats.md#registry) that never takes an id the
+  game has. It is not watched: whoever writes in it refreshes those paths. Unmounting takes its
+  files out of the registry; what loaded from them stays until no world names it.
 
 **Derived rows.** The values of a material as an entity or a layer shows it
 (`assets_material_derive` and similar) are derived rows of the material table; equal values share a
@@ -396,6 +401,9 @@ row.
   another), `disabled_edges` and the heightfield, which are lent until retirement, with the
   convention of the
   [physics heightfield](../../mirai-physics/references/physics.md#geometry).
+- `hull_points` and `hull_sizes` give the convex pieces a `Hull` collider of the mesh is made of,
+  copied and lent like `collision`; `assets_collision_hulls` returns them
+  ([colliders](../../mirai-physics/references/engine.md#collider-fields)).
 - `assets_geometry` appends to the consumer's buffer; with `slots`, the material of each slot read
   from the file without loading it into the renderer (the editor thumbnails). It does not deliver
   UV1. It validates and reserves before appending: on an error it returns `false` and keeps values

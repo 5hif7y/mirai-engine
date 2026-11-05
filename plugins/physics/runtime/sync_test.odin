@@ -2,6 +2,10 @@ package physics
 
 import "core:testing"
 import "mirai:core"
+import "mirai:host"
+import render "mirai:engine/render"
+import "mirai:std/base"
+import "mirai:std/geom"
 import sim "plugins:physics/runtime/sim"
 import mm "mirai:std/math"
 
@@ -9,9 +13,11 @@ import mm "mirai:std/math"
 Sync_Scene :: struct {holder,free_entity,wall:core.Entity}
 
 // A floor, a stack, a character, and under an entity without a body a wall
-// of colliders, a static body, a kinematic one and a dynamic compound.
+// of colliders, a static body, a kinematic one and a dynamic compound, with an
+// L of two convex pieces of its own and as a part of the compound.
 @(private="file")
-sync_scene :: proc(f:^Physics_Test) -> (scene:Sync_Scene) {
+sync_scene :: proc(f:^Physics_Test,assets:^host.Assets,pieces:base.Asset_Id) -> (scene:Sync_Scene) {
+    f.app.assets=assets
     f.settings={bodies=64,shapes=64,contacts=256,characters=2}
     f.gravity={0,-9.81,0}
     physics_test_box(f,{0,-0.5,0},{20,0.5,20},RIGID_BODY_STATIC)
@@ -34,6 +40,13 @@ sync_scene :: proc(f:^Physics_Test) -> (scene:Sync_Scene) {
     under(f,scene.holder,{0,3,0},RIGID_BODY_KINEMATIC)
     compound:=under(f,scene.holder,{2,0.4,0},RIGID_BODY_DYNAMIC)
     under(f,compound,{0,0,1},nil)
+    for parent in ([2]core.Entity{scene.holder,compound}) {
+        corner:=core.create(&f.entities)
+        core.add(&f.transforms,corner,core.Transform{{0,1,-1.5},1,{1,1,1}})
+        core.add(&f.colliders,corner,collider_hull())
+        core.add(&f.statics,corner,render.Mesh_Renderer{mesh=pieces})
+        core.add(&f.parents,corner,core.Parent{parent,0})
+    }
     physics_test_settle(f)
     return
 }
@@ -52,8 +65,19 @@ a_sync_of_the_sealed_rows_gives_what_a_sync_of_every_body_gives :: proc(t:^testi
     physics_test_init(whole)
     defer physics_test_destroy(whole)
     whole.whole=true
-    scene:=sync_scene(sealed)
-    _=sync_scene(whole)
+    assets:host.Assets
+    if !testing.expect(t,host.assets_init(&assets,{root="assets",capacity=8})) {return}
+    defer host.assets_destroy(&assets)
+    // An L of two boxes.
+    corners:[16]geom.Vec3
+    for &p,i in corners {p={f32(i&1)*(i<8?0.4:0.2),f32(i>>1&1)*0.2+(i<8?0:0.2),f32(i>>2&1)*0.4}}
+    sizes:=[2]u32{8,8}
+    triangle:=[3]geom.Vec3{{0,0,0},{1,0,0},{0,0,1}}
+    order:=[3]u32{0,2,1}
+    pieces,made:=host.assets_mesh_generate(&assets,{positions=triangle[:],indices=order[:]},options={no_lods=true,hull_points=corners[:],hull_sizes=sizes[:]})
+    if !testing.expect(t,made) {return}
+    scene:=sync_scene(sealed,&assets,pieces)
+    _=sync_scene(whole,&assets,pieces)
     for tick in 0..<80 {
         for f in ([2]^Physics_Test{sealed,whole}) {
             if tick%2==0 {
@@ -79,10 +103,13 @@ a_sync_of_the_sealed_rows_gives_what_a_sync_of_every_body_gives :: proc(t:^testi
             if !testing.expectf(t,pose==whole.transforms.values[row],"entity %v differs at tick %v",e,tick) {return}
         }
         if tick>=20 {
-            through:=tick%2==0?5:(tick==51?1:0)
+            through:=tick%2==0?7:(tick==51?1:0)
             testing.expectf(t,len(sealed.state.sealed)==through,"tick %v went through %v bodies, not %v",tick,len(sealed.state.sealed),through)
         }
     }
     testing.expect(t,sealed.state.stats.teleports>0 && sealed.state.stats.shapes_created>sealed.state.stats.bodies_created)
     testing.expect_value(t,sealed.problems.count,whole.problems.count)
+    testing.expect_value(t,sealed.problems.count,0)
+    hulls,_:=geometry_budget({&sealed.state},.Hull)
+    testing.expect_value(t,hulls,2)
 }

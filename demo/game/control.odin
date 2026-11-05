@@ -67,7 +67,7 @@ dog_capsule :: proc "contextless" () -> phys.Collider {return phys.collider_char
 @(step="fixed")
 game_seats :: proc(
     es:^core.Entities,follows:^core.Table(Follow),drivables:core.Read(inp.Drivable),
-    seats:core.Read(inp.Seat),hierarchy:core.Ref(core.Hierarchy),names:core.Read(core.Name),demos:core.Read(Control_Demo),
+    seats:core.Read(inp.Seat),actions:inp.Input_Of(Action),hierarchy:core.Ref(core.Hierarchy),names:core.Read(core.Name),demos:core.Read(Control_Demo),
     requests:^inp.Seat_Requests,shown:core.Ref(cam.Cameras),camera_requests:^cam.Camera_Requests,
     camera_changes:^cam.Camera_Changes,camera_follows:core.Read(cam.Camera_Follow),cameras:core.Read(render.Camera),
 ) {
@@ -80,7 +80,7 @@ game_seats :: proc(
         seat:=core.entity_at(seats,row)
         body:=inp.body_of(drivables,seat)
         companion:=companion_of(core.read(follows),body)
-        if companion!=core.NONE && inp.seat_pressed(seats,seat,SWITCH_BODY) {
+        if companion!=core.NONE && inp.seat_pressed(actions,seat,.Switch_Body) {
             // The seat drives the dog, and the person follows it.
             inp.drive(requests,seat,companion)
             follow:=core.at(core.read(follows),core.row_of(follows,companion))
@@ -88,14 +88,14 @@ game_seats :: proc(
             core.remove(follows,companion)
             core.add(follows,body,follow)
         }
-        if inp.seat_pressed(seats,seat,OVERHEAD_VIEW) {
+        if inp.seat_pressed(actions,seat,.Overhead_View) {
             if cam.camera_overriding(shown.ptr,seat) {
                 cam.camera_override_remove(camera_requests,seat)
             } else if camera:=entity_named(names,CONTROL_SHARED_CAMERA);camera!=core.NONE {
                 cam.camera_override(camera_requests,seat,seat,camera,blend=OVERHEAD_BLEND)
             }
         }
-        if owner,driven:=core.get(drivables,body);driven && inp.seat_pressed(seats,seat,CAMERA_MODE) {
+        if owner,driven:=core.get(drivables,body);driven && inp.seat_pressed(actions,seat,.Camera_Mode) {
             next:=cam.Camera_Preset.Third_Person
             if mode,preset:=cam.camera_preset_of(camera_follows,cameras,owner.camera);preset {
                 cycle:=CAMERA_CYCLE
@@ -162,12 +162,12 @@ game_follow :: proc(
 // A bark counts when its seat presses bark or the intro asks for it, and flashes the nose for a moment.
 @(step="fixed",stage="react")
 game_barker :: proc(
-    barkers:^core.Table(Barker),seats:inp.Players,events:core.Ref(cine.Cinematic_Events),
+    barkers:^core.Table(Barker),actions:inp.Input_Of(Action),events:core.Ref(cine.Cinematic_Events),
 ) {
     intro_bark:=false
     for event in events.items {intro_bark ||= event.id==base.name_hash("intro.bark")}
     for row in 0..<core.count(barkers) {
-        if intro_bark || inp.pressed(seats,core.entity_at(barkers,row),BARK) {
+        if intro_bark || inp.pressed(actions,core.entity_at(barkers,row),.Bark) {
             barker:=core.at(barkers,row)
             barker.count+=1
             barker.flash_ticks=18

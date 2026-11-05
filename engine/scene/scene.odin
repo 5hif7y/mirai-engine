@@ -35,6 +35,10 @@ Error :: enum u8 {
     Duplicate_Id, // capture: two entities have the same Id
     Out_Of_Memory,
     Write_Failed,
+    Too_Large,         // load_untrusted: more bytes or entities than its rules let it have
+    Not_Allowed,       // load_untrusted: a component its rules do not list, or a reference to a scene the game did not ship
+    Out_Of_Range,      // load_untrusted: a value its field does not allow
+    Unknown_Reference, // load_untrusted: an entity or an asset it names that is not there
 }
 
 Instantiate_Desc :: struct {
@@ -71,6 +75,7 @@ Report :: struct {
     dangling:int,     // entity references that named nothing inside: set to none
     sections:int,     // instantiate: referenced scenes loaded under their references
     missing:int,      // instantiate: references whose scene is not in the assets
+    refused:Refusal,  // load_untrusted: what made it fail
 }
 
 // A prefab to place while the world runs. The scene library takes the queue.
@@ -127,6 +132,10 @@ error_text :: proc(error:Error) -> string {
     case .Duplicate_Id:  return "two entities have the same Id"
     case .Out_Of_Memory: return "out of memory"
     case .Write_Failed:  return "the file could not be written"
+    case .Too_Large:     return "it is larger than it may be"
+    case .Not_Allowed:   return "it holds what it may not"
+    case .Out_Of_Range:  return "a value is not one its field allows"
+    case .Unknown_Reference: return "it names an entity or an asset that is not there"
     }
     return ""
 }
@@ -372,16 +381,7 @@ instantiate :: proc(w:core.World_Ref,a:^asset.Asset,asset_types:^asset.Types,des
                 if stored_error!=.None {return report,.Corrupt}
                 copy(values[:],stored)
             } else {
-                // A field the scene does not keep starts as the component starts: its default.
-                identity:=core.TRANSFORM_IDENTITY
-                default:[]u8
-                if info.default!=nil {
-                    default=make([]u8,size,context.temp_allocator)
-                    info.default(raw_data(default))
-                } else if info.type==core.Transform {
-                    default=mem.ptr_to_bytes(&identity)
-                }
-                if asset.scene_component_read(a,&component,&types.schema,value_type.type,values[:],default)!=.None {return report,.Corrupt}
+                if !component_read(a,&component,types,info,value_type,values[:]) {return report,.Corrupt}
                 if !asset.asset_column_matches(a,component.table,1,value_type.hash) {report.migrated+=1}
             }
             for row in 0..<len(component.entities) {
@@ -504,6 +504,24 @@ sections_load :: proc(w:core.World_Ref,a:^asset.Asset,asset_types:^asset.Types,d
         if error!=.None {return error}
     }
     return .None
+}
+
+// Reads the values of a component of a document as the world has them, into
+// values: a field the document does not keep starts as the component starts,
+// at its default.
+@(private)
+component_read :: proc(a:^asset.Asset,component:^asset.Scene_Component,types:^core.World_Schema,info:^core.Table_Info,value_type:^core.Value_Schema,values:[]u8) -> bool {
+    identity:=core.TRANSFORM_IDENTITY
+    default:[]u8
+    if info.default!=nil {
+        allocated,allocation:=make([]u8,info.info.size,context.temp_allocator)
+        if allocation!=nil {return false}
+        default=allocated
+        info.default(raw_data(default))
+    } else if info.type==core.Transform {
+        default=mem.ptr_to_bytes(&identity)
+    }
+    return asset.scene_component_read(a,component,&types.schema,value_type.type,values,default)==.None
 }
 
 @(private)

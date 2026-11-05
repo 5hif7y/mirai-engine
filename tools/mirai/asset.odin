@@ -149,7 +149,7 @@ rule_text :: proc(rule:asset.Text_Rule) -> string {
     case .Unknown_Flag: return "unknown flag"
     case .Number_Out_Of_Range: return "number out of range"
     case .Schema_First: return "\"schema\" goes before \"tables\", only once"
-    case .Kind_First: return "in a type, \"kind\" goes before \"fields\" and \"choices\""
+    case .Kind_First: return "in a type, \"kind\" goes before \"fields\", \"named\" and \"choices\", and \"named\" before \"by_name\""
     case .Unknown_Type_Kind: return "unknown type kind"
     case .Too_Many_Types: return "too many types"
     case .Schema_Invalid: return "the types of the schema contradict each other"

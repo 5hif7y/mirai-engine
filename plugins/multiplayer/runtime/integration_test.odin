@@ -956,7 +956,7 @@ net_test_physical_convergence :: proc(t:^testing.T,udp:bool) {
     remote,status:=remote_input(core.ref(&worlds[0].remote),connected)
     testing.expect(t,status!=.None && remote.down&inp.action_bit(NET_TEST_FIRE)!=0)
     // The axis as the client's seat took it, past its dead zone.
-    steer:=inp.seat_value(core.read(&worlds[1].seats),inp.local_seat(core.read(&worlds[1].seats),0),NET_TEST_STEER)
+    steer:=inp.seat_action(core.read(&worlds[1].seats),inp.local_seat(core.read(&worlds[1].seats),0),NET_TEST_STEER).value
     testing.expectf(t,steer>0.5 && abs(net_test_axis(remote,NET_TEST_STEER)-steer)<0.001,"steer %v at the client, %v at the server",steer,net_test_axis(remote,NET_TEST_STEER))
     // The input says what tick of the server the client showed, near the one
     // simulated. This fixture moves the client's tick by hand, not with its

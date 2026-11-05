@@ -142,6 +142,13 @@ surfaces (an interior cavity has opposite orientation).
 - `polygon_triangulate` leaves each loop edge in exactly one triangle and always terminates;
   `delaunay_triangulate` omits repeated points and gives no triangles with collinear or non-finite
   points.
+- `polygon_convex_partition` merges the triangles of `polygon_triangulate` into convex pieces
+  (Hertel-Mehlhorn) without new points: their union is the polygon, and it is fast enough to rebuild
+  the colliders of an extruded outline while it is dragged, where `mesh_decompose` is not.
+- `polygon_boolean` unites, cuts or intersects two polygons with holes and gives every resulting
+  polygon apart (a cut that splits gives two). It snaps to a power-of-two grid exact in `f32`, so a
+  result fed back in snaps to the same points and repeated stamping does not degrade; its point
+  count is the true outline, which a caller with a capacity reduces itself.
 
 ## Simplification (`simplify.odin`)
 
@@ -249,5 +256,6 @@ decomposition.
   `mikktspace.c`.
 - Benchmarks, optional with `-define:GEOM_BENCH=true`, `-define:ODIN_TEST_THREADS=1` and without
   other builds or tests on the CPU: `bench_hull`, `bench_fracture`, `bench_simplify`,
-  `bench_decompose`, `bench_surface_edit`, `bench_boolean`, `bench_isosurface`, `bench_tangents`.
+  `bench_decompose`, `bench_surface_edit`, `bench_boolean`, `bench_isosurface`, `bench_tangents`,
+  `bench_polygon_convex_partition`.
   They are not equivalent to an editor measurement.

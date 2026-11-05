@@ -169,7 +169,8 @@ focused :: proc(state:^Seats,seats:core.Read(Seat)) -> core.Entity {
 }
 
 // The state of an action of a seat this tick: released while it is blocked
-// or waits for its release, and for what is not a seat.
+// or waits for its release, and for what is not a seat. Code reads its own
+// actions with seat_state and Input_Of.
 seat_action :: proc(seats:core.Read(Seat),seat:core.Entity,a:Action) -> Action_State {
     row:=core.row_of(seats,seat)
     if row<0 {return {}}
@@ -177,11 +178,6 @@ seat_action :: proc(seats:core.Read(Seat),seat:core.Entity,a:Action) -> Action_S
     if (source.blocked|source.rearm)&action_bit(a)!=0 {return {}}
     return action(&source.actions,a)
 }
-seat_down :: proc(seats:core.Read(Seat),seat:core.Entity,a:Action) -> bool {return seat_action(seats,seat,a).down}
-seat_pressed :: proc(seats:core.Read(Seat),seat:core.Entity,a:Action) -> bool {return seat_action(seats,seat,a).pressed}
-seat_released :: proc(seats:core.Read(Seat),seat:core.Entity,a:Action) -> bool {return seat_action(seats,seat,a).released}
-seat_value :: proc(seats:core.Read(Seat),seat:core.Entity,a:Action) -> f32 {return seat_action(seats,seat,a).value}
-seat_vector :: proc(seats:core.Read(Seat),seat:core.Entity,a:Action) -> [2]f32 {return seat_action(seats,seat,a).vector}
 
 // The button actions of a seat that are down this tick, as seat_down sees them.
 seat_buttons :: proc(seats:core.Read(Seat),seat:core.Entity,bindings:^Input_Map) -> (mask:Action_Mask) {
@@ -203,14 +199,9 @@ Players :: struct {
 
 // The state of an action of the seat that drives a body this tick; released
 // while nobody drives it.
-action_of :: proc(p:Players,body:core.Entity,a:Action) -> Action_State {
+body_action :: proc(p:Players,body:core.Entity,a:Action) -> Action_State {
     return seat_action(p.seats,seat_of(p.drivables,body),a)
 }
-down :: proc(p:Players,body:core.Entity,a:Action) -> bool {return action_of(p,body,a).down}
-pressed :: proc(p:Players,body:core.Entity,a:Action) -> bool {return action_of(p,body,a).pressed}
-released :: proc(p:Players,body:core.Entity,a:Action) -> bool {return action_of(p,body,a).released}
-value :: proc(p:Players,body:core.Entity,a:Action) -> f32 {return action_of(p,body,a).value}
-vector :: proc(p:Players,body:core.Entity,a:Action) -> [2]f32 {return action_of(p,body,a).vector}
 
 // The seats of this machine: how many there are, and the actions of each for
 // the tick. The keyboard and the mouse go to the focused one; with several,

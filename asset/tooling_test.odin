@@ -229,9 +229,9 @@ document_text_reads_back_the_same_bytes_for_every_kind :: proc(t:^testing.T) {
     defer document_destroy(&material)
     bytes_through_text(t,&material)
 
-    // A named integer keeps its names through the text.
+    // A named integer keeps its names, and that it moves by them, through the text.
     types.schema.named=make(map[typeid]serial.Named,context.temp_allocator)
-    types.schema.named[Test_Channel_Name]={choices={{"impacts",16}}}
+    types.schema.named[Test_Channel_Name]={choices={{"impacts",16}},by_name=true}
     scene:Scene;scene_init(&scene,&types,KIND_SCENE,{6,6});defer scene_destroy(&scene)
     for i in 1..=40 {
         id:=base.Entity_Id(i*3)

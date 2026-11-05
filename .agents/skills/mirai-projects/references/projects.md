@@ -8,7 +8,7 @@ Targets, jobs, fingerprint, project shaders, cooking and shipped game (`cook/bui
 ```text
 <project>/
   project.mirai     manifest: what makes the folder a project
-  input.mirai       bindings of the input actions (optional)
+  input.mirai       bindings Project Settings > Input changed from the code (optional, not by hand)
   settings.mirai    project settings: what differs from the engine (optional)
   cook.mirai        cooking roots that no scene names (optional)
   assets/           cooked assets

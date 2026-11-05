@@ -116,9 +116,10 @@ geometry_reservation_failure_preserves_existing_values_and_lengths :: proc(t:^te
     testing.expect_value(t,len(empty.positions),0);testing.expect_value(t,len(empty.indices),0)
 }
 
-// The boxes, spheres and capsules a mesh stores are hulls of a collider of the mesh, where they lie.
+// The boxes, spheres and capsules a mesh stores are each a convex piece of a Hull collider of the mesh,
+// where they lie, and hulls of triangles for a Mesh collider.
 @(test)
-stored_boxes_spheres_and_capsules_are_the_hulls_of_a_collider_of_their_mesh :: proc(t:^testing.T) {
+stored_boxes_spheres_and_capsules_are_the_convex_pieces_of_a_collider_of_their_mesh :: proc(t:^testing.T) {
     directory,_:=os.temp_directory(context.temp_allocator)
     root:=fmt.tprintf("%s/mirai-host-shapes-%d",directory,os.get_pid())
     path:=fmt.tprintf("%s/shapes.mesh",root)
@@ -139,14 +140,67 @@ stored_boxes_spheres_and_capsules_are_the_hulls_of_a_collider_of_their_mesh :: p
     assets:Assets
     if !testing.expect(t,assets_init(&assets,{root=root,capacity=4})) {return}
     defer assets_destroy(&assets)
-    hull:geom.Mesh_Buffer;geom.mesh_buffer_init(&hull);defer geom.mesh_buffer_destroy(&hull)
-    stored,ok:=assets_collision(&assets,id,.None,.Hull,&hull)
-    if !testing.expect(t,stored && ok,"the stored shapes are the geometry of a hull") {return}
-    low,high:=geom.Vec3{max(f32),max(f32),max(f32)},geom.Vec3{min(f32),min(f32),min(f32)}
-    for p in hull.positions {low,high=linalg.min(low,p),linalg.max(high,p)}
-    testing.expectf(t,linalg.length(low-{-0.5,-2,-3})<1e-4,"lowest point of the shapes: %v",low)
-    testing.expectf(t,linalg.length(high-{11,10.5,10.25})<1e-4,"highest point of the shapes: %v",high)
+    points:=make([dynamic]geom.Vec3,context.temp_allocator)
+    sizes:=make([dynamic]u32,context.temp_allocator)
+    if !testing.expect(t,assets_collision_hulls(&assets,id,.None,&points,&sizes),"the stored shapes are pieces of a hull") {return}
+    if !testing.expect_value(t,len(sizes),3) {return}
+    testing.expect_value(t,sizes[0],u32(8))
+    reach:=[3][2]geom.Vec3{{{9,-2,-3},{11,2,3}},{{-0.5,9.5,-0.5},{0.5,10.5,0.5}},{{-0.25,-1.25,9.75},{0.25,1.25,10.25}}}
+    from:=0
+    for size,piece in sizes {
+        low,high:=geom.Vec3{max(f32),max(f32),max(f32)},geom.Vec3{min(f32),min(f32),min(f32)}
+        for p in points[from:][:size] {low,high=linalg.min(low,p),linalg.max(high,p)}
+        from+=int(size)
+        testing.expectf(t,linalg.length(low-reach[piece][0])<1e-4 && linalg.length(high-reach[piece][1])<1e-4,"piece %v reaches %v to %v",piece,low,high)
+    }
+    testing.expect_value(t,from,len(points))
+    // A primitive or an unknown mesh has no pieces and leaves both as they were.
+    testing.expect(t,!assets_collision_hulls(&assets,{},.Cube,&points,&sizes) && !assets_collision_hulls(&assets,{1,2},.None,&points,&sizes))
+    testing.expect(t,len(sizes)==3 && len(points)==from)
     surface:geom.Mesh_Buffer;geom.mesh_buffer_init(&surface);defer geom.mesh_buffer_destroy(&surface)
-    stored,ok=assets_collision(&assets,id,.None,.Mesh,&surface)
+    stored,ok:=assets_collision(&assets,id,.None,.Mesh,&surface)
     testing.expect(t,stored && ok && len(surface.indices)>=3*3*4,"each shape is a hull of triangles")
+}
+
+// The convex pieces of a generated mesh are checked and copied when it is made, and go with it.
+@(test)
+generated_hull_pieces_are_checked_copied_and_released_with_their_mesh :: proc(t:^testing.T) {
+    assets:Assets
+    if !testing.expect(t,assets_init(&assets,{root="assets",capacity=8})) {return}
+    defer assets_destroy(&assets)
+    triangle:=[3]geom.Vec3{{0,0,0},{1,0,0},{0,0,1}}
+    order:=[3]u32{0,2,1}
+    source:=geom.Mesh{positions=triangle[:],indices=order[:]}
+    corners:[8]geom.Vec3
+    for &p,i in corners {p={f32(i&1),f32(i>>1&1),f32(i>>2&1)}}
+    nan:=corners
+    nan[3].y=transmute(f32)u32(0x7fc00000)
+    Case :: struct {points:[]geom.Vec3,sizes:[]u32}
+    refused:=[?]Case{
+        {corners[:],[]u32{4}},       // fewer points named than given
+        {corners[:],[]u32{4,8}},     // more named than given
+        {corners[:],[]u32{5,3}},     // a piece of three points has no volume
+        {corners[:],[]u32{8,0}},
+        {corners[:],[]u32{max(u32)}},
+        {corners[:],nil},            // points of no piece
+        {nil,[]u32{4}},
+        {nan[:],[]u32{4,4}},
+    }
+    for c,at in refused {
+        _,made:=assets_mesh_generate(&assets,source,options={hull_points=c.points,hull_sizes=c.sizes})
+        testing.expectf(t,!made,"case %v is refused",at)
+    }
+    plain,plain_made:=assets_mesh_generate(&assets,source)
+    points:=make([dynamic]geom.Vec3,context.temp_allocator)
+    sizes:=make([dynamic]u32,context.temp_allocator)
+    append(&points,geom.Vec3{7,7,7})
+    testing.expect(t,plain_made && !assets_collision_hulls(&assets,plain,.None,&points,&sizes))
+    halves:=[2]u32{4,4}
+    id,made:=assets_mesh_generate(&assets,source,options={hull_points=corners[:],hull_sizes=halves[:]})
+    if !testing.expect(t,made) {return}
+    corners[0]={9,9,9}
+    testing.expect(t,assets_collision_hulls(&assets,id,.None,&points,&sizes))
+    testing.expect(t,len(points)==9 && points[0]==geom.Vec3{7,7,7} && points[1]==geom.Vec3{0,0,0} && len(sizes)==2 && sizes[1]==4)
+    testing.expect(t,assets_mesh_release(&assets,id))
+    testing.expect(t,!assets_collision_hulls(&assets,id,.None,&points,&sizes) && len(points)==9 && len(sizes)==2)
 }

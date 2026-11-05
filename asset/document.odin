@@ -288,6 +288,18 @@ document_check :: proc(doc:^Document) -> Error {
     return .None
 }
 
+// Renames a choice of the types that move by name, as a renamed input action
+// (serial.schema_choice_rename): the values stay, and read by the new name.
+// How many types it renamed it in.
+document_choice_rename :: proc(doc:^Document,old,name:string) -> int {
+    renamed:=serial.schema_choice_rename(&doc.schema,old,name)
+    if renamed>0 {
+        clear(&doc.hashes)
+        serial.schema_hashes_update(&doc.schema,&doc.hashes)
+    }
+    return renamed
+}
+
 // Writes the document as a file into w, which has to be empty.
 document_write :: proc(doc:^Document,w:^serial.Writer) -> Error {
     document_check(doc) or_return

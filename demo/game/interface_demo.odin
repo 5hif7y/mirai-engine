@@ -28,11 +28,6 @@ INTERFACE_STYLES :: [3]string{"","minimal","neon"}
 // of the dropdown of the menu.
 INTERFACE_LANGUAGES :: [2]gui.Language{.English,.Spanish}
 
-HUD_STYLE :: inp.Action(32)
-MENU :: inp.Action(33)
-INVENTORY :: inp.Action(34)
-TALK :: inp.Action(35)
-
 INTERFACE_CHOICES :: 4
 INTERFACE_FLAGS :: 16
 
@@ -113,7 +108,7 @@ Interface_Demo :: struct {
 @(step="fixed",stage="react")
 interface_demo :: proc(
     demos:^core.Table(Interface_Demo),screens:^core.Table(gui.UI_Screen),
-    names:core.Read(core.Name),ui_events:core.Ref(gui.UI_Events),actions:core.Ref(inp.Actions),time:core.Time,
+    names:core.Read(core.Name),ui_events:core.Ref(gui.UI_Events),actions:inp.Input_Of(Action),time:core.Time,
     ui_settings:core.Ref(gui.UI_Settings),preferences:^gui.UI_Preferences,volumes:^eaudio.Audio_Volumes,saves:^save.Save_Requests,
     items:core.Records(Item),lines:core.Records(Dialogue_Line),answers:core.Records(Dialogue_Choice),problems:^core.Problems,
 ) {
@@ -137,12 +132,12 @@ interface_demo :: proc(
     }
     shown :: proc(screens:^core.Table(gui.UI_Screen),e:core.Entity) -> bool {return core.get(screens,e)!=nil}
     styles:=INTERFACE_STYLES
-    if inp.action_pressed(actions.ptr,HUD_STYLE) {demo.style=(demo.style+1)%%i32(len(styles))}
+    if inp.pressed(actions,.Hud_Style) {demo.style=(demo.style+1)%%i32(len(styles))}
     // Whether the menu stays open after this tick: showing and hiding apply when the function ends.
     menu_was:=shown(screens,menu)
     menu_open:=menu_was
-    if inp.action_pressed(actions.ptr,MENU) {menu_open=!menu_open;show(screens,menu,menu_open)}
-    if inp.action_pressed(actions.ptr,INVENTORY) {show(screens,inventory,!shown(screens,inventory))}
+    if inp.pressed(actions,.Menu) {menu_open=!menu_open;show(screens,menu,menu_open)}
+    if inp.pressed(actions,.Inventory) {show(screens,inventory,!shown(screens,inventory))}
 
     // The menu: what its controls wrote, and the buttons that close it.
     if value,ok:=gui.changed_value(events,menu,"volume");ok {
@@ -193,7 +188,7 @@ interface_demo :: proc(
 
     // The conversation: T starts it, an answer clicked goes where it leads,
     // and Continue goes on from a line without answers.
-    if inp.action_pressed(actions.ptr,TALK) && demo.talk!={} && demo.line=={} {
+    if inp.pressed(actions,.Talk) && demo.talk!={} && demo.line=={} {
         demo.line,demo.flags=demo.talk,{}
         demo.shown={}
         show(screens,dialogue,true)

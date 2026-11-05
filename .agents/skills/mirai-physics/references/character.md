@@ -67,6 +67,11 @@ The same `world_step` serves the server, the predicting client and resimulation.
 - The three angular axes are locked (it stays upright inside the solver), its rotation is
   `up_frame` times the turn of the move's `yaw` around its +Y, it does not sleep and it carries the
   `Character` flag.
+- `character_set_locks` adds linear locks in world axes, with the meaning of those of a body
+  (`Character.locks`, as `Rigid_Body.locks`; its angular ones do nothing): no part of the step moves
+  the feet along a locked axis, and its constraint and drive act only along the free ones, so the
+  ground drive follows the line the locks leave on the ground. Only a teleport (`core.place`, a pose
+  target) changes the locked coordinate, which is how a game moves it to another depth layer.
 - In islands it acts as a kinematic: it does not join its island with that of what it touches.
   - Only while it moves (own velocity or drive velocity above `sleep_threshold`, or a launch) does
     it wake what it touches and what it stands on.

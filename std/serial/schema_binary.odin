@@ -10,8 +10,9 @@ import "mirai:std/base"
 //   - fields follow one another without overlapping and end inside the struct;
 //   - an array fits its type, and choices and scalar sizes are those of real types.
 // The byte of the kind carries in its high nibble how a named integer names
-// its values. A list of no fields or choices is written at 0, wherever it
-// pointed, so that a schema read back writes the same bytes.
+// its values (two bits) and whether it moves by name (BY_NAME). A list of no
+// fields or choices is written at 0, wherever it pointed, so that a schema
+// read back writes the same bytes.
 
 SCHEMA_FORMAT :: 1
 SCHEMA_MAX_DEPTH :: 32
@@ -31,6 +32,7 @@ Schema_Error :: enum u8 {
     Out_Of_Memory,
 }
 
+@(private="file") BY_NAME :: 0x40
 @(private="file") HAS_MIN :: 1
 @(private="file") HAS_MAX :: 2
 @(private="file") HAS_STEP :: 4
@@ -46,7 +48,7 @@ schema_write :: proc(w:^Writer,s:^Schema) {
     write_varint(w,u64(len(s.fields)))
     write_varint(w,u64(len(s.choices)))
     for type in s.types {
-        write_u8(w,u8(type.kind)|u8(type.named)<<4)
+        write_u8(w,u8(type.kind)|u8(type.named)<<4|u8(type.by_name?BY_NAME:0))
         write_varint(w,u64(type.size))
         write_varint(w,u64(type.align))
         write_string(w,type.name)
@@ -106,13 +108,13 @@ schema_read_tables :: proc(r:^Reader,s:^Schema) -> Schema_Error {
     if resize(&s.types,type_count)!=nil || resize(&s.fields,field_count)!=nil || resize(&s.choices,choice_count)!=nil {return .Out_Of_Memory}
     for &type in s.types {
         kind_byte:=read_u8(r)
-        kind,named:=kind_byte&0x0F,kind_byte>>4
+        kind,named:=kind_byte&0x0F,kind_byte>>4&0x03
         size,align:=read_varint(r),read_varint(r)
         name:=read_string(r)
         first,count,elem:=read_varint(r),read_varint(r),read_varint(r)
         if r.failed {return .Truncated}
-        if kind>u8(max(Type_Kind)) || named>u8(max(Named_Kind)) || size>u64(max(u32)) || align>SCHEMA_MAX_ALIGN || first>u64(max(u32)) || count>u64(max(u32)) || elem>u64(TYPE_NONE) {return .Invalid_Type}
-        type.kind,type.named=Type_Kind(kind),Named_Kind(named)
+        if kind>u8(max(Type_Kind)) || named>u8(max(Named_Kind)) || kind_byte&0x80!=0 || size>u64(max(u32)) || align>SCHEMA_MAX_ALIGN || first>u64(max(u32)) || count>u64(max(u32)) || elem>u64(TYPE_NONE) {return .Invalid_Type}
+        type.kind,type.named,type.by_name=Type_Kind(kind),Named_Kind(named),kind_byte&BY_NAME!=0
         type.size,type.align=u32(size),u32(align)
         type.first,type.count=u32(first),u32(count)
         type.elem=elem==0?TYPE_NONE:Type_Index(elem-1)
@@ -168,6 +170,7 @@ schema_validate :: proc(s:^Schema) -> Schema_Error {
         if type.align==0 || type.align&(type.align-1)!=0 || type.align>SCHEMA_MAX_ALIGN || type.size>SCHEMA_MAX_SIZE {return .Invalid_Type}
         if type.kind!=.Array {type.elem=TYPE_NONE}
         if type.kind!=.Int && type.kind!=.Uint {type.named=.None}
+        if type.named==.None {type.by_name=false}
         depth:=u8(0)
         switch type.kind {
         case .Bool:
@@ -246,14 +249,10 @@ schema_hashes_update :: proc(s:^Schema,hashes:^[dynamic]u64) -> bool {
                 hash=base.hash_combine(hash,u64(field.offset))
                 hash=base.hash_combine(hash,hashes[field.type])
             }
-        case .Enum,.Bit_Set:
-            for choice in s.choices[type.first:][:type.count] {
-                hash=base.hash_combine(hash,base.name_hash(choice.name))
-                hash=base.hash_combine(hash,u64(choice.value))
-            }
         case .Array:
             hash=base.hash_combine(hash,hashes[type.elem])
         }
+        if layout_named(type) {hash=layout_choices(s,type,hash)}
         append(hashes,hash)
     }
     return true

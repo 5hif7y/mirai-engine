@@ -5,8 +5,8 @@
 `mirai new <folder> [--template T]` copies `templates/<T>`; `mirai new --list` describes them with
 the first line of their README.
 
-- **`empty`**: `game/` with one component and one function, a `sample` plugin with its `runtime/`,
-  `input.mirai` and a Surface program in `shaders/`.
+- **`empty`**: `game/` with one component, one function and one action, a `sample` plugin with its
+  `runtime/` and a Surface program in `shaders/`.
 - **`game`**: playable game with the public API (character with physics, destructible wall,
   animated interface, sound, save and networking). Its
   [README](../../../../templates/game/README.md) explains the files and how to play it with
@@ -38,7 +38,7 @@ odin run tools/content -collection:mirai=<engine> -collection:plugins=<engine>/p
 - `cook.mirai`: the prefabs and materials that only code picks by id or name.
 - `render_check.mirai`: the fixed views that `mirai render check` measures
   ([render check](../../mirai-rendering/references/verification.md#render-check)).
-- `input.mirai`, `game/`, `assets/` and the art sources in `source/`.
+- `game/`, `assets/` and the art sources in `source/`.
 
 Scenes:
 
@@ -97,8 +97,8 @@ Scenes:
 
 ### Code (`demo/game`)
 
-- **`game.odin`**: the demo's actions from `inp.ACTION_GAME`, bound in `input.mirai` next to those
-  of locomotion, and the components of the scenes.
+- **`game.odin`**: the demo's actions (`Action`, `@(actions)`) with their default bindings
+  (`Demo_Actions`), and the components of the scenes.
   - `game_use` reads the actions of the body's seat: opens doors, changes the material sample and
     throws a cube with `scene.Spawns`.
   - `game_projectiles` (`stage="react"`, `before="destruct_step"`) damages with `destruct.damage`

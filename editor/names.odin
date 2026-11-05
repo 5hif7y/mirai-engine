@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "mirai:asset"
 import "mirai:core"
 import "mirai:editor/api"
 import input "mirai:engine/input"
@@ -15,14 +16,18 @@ import "mirai:std/serial"
 // in code. The editor declares a new one, or renames one the project
 // declared, by writing that code: a new one goes to the file NAMES_FILE of
 // the game, a rename puts @(name="...") on the constant and keeps its
-// identifier. Saved data keeps the numbers, so nothing saved changes; the
-// names are seen once the game is built again, which both start. A renamed
-// input action is renamed in input.mirai of the project too, which names it.
+// identifier. Saved data keeps the numbers of constants, so nothing saved
+// changes; the names are seen once the game is built again, which both start.
+// An input action is a member of an enum @(actions), named by its identifier,
+// and saved data keeps its name. The code renames it, with the types in view
+// (the rename of an editor of code, or an agent), and once that code is built
+// a rename follows it: input.mirai of the project and the documents that keep
+// it take the new name. A new one is written by hand, with its default.
 
 NAMES_FILE :: "names.odin"
 NAME_CAPACITY :: 32
 
-Names_Error :: enum u8 {None,Not_A_Type,Invalid_Name,Taken,Full,Unknown,Not_Of_Project,No_Game,Write_Failed}
+Names_Error :: enum u8 {None,Not_A_Type,Invalid_Name,Taken,Full,Unknown,Not_Of_Project,No_Game,Write_Failed,Action_In_Code,Action_Not_Declared,Action_Still_Declared}
 
 names_error_text :: proc(e:Names_Error,type,name:string) -> string {
     switch e {
@@ -35,6 +40,9 @@ names_error_text :: proc(e:Names_Error,type,name:string) -> string {
     case .Not_Of_Project: return fmt.tprintf("%q of %s is declared by the engine or a plugin: rename only the values the project declares",name,type)
     case .No_Game:        return "the project has no game folder to declare the name in"
     case .Write_Failed:   return "the code of the name could not be written"
+    case .Action_In_Code: return fmt.tprintf("an input action is a member of the enum @(actions) of the game: add %s to it, with its default in the field [Action]input.Action_Default of its storage",action_member(name))
+    case .Action_Not_Declared: return fmt.tprintf("the code built does not declare the action %q: rename the member of the enum @(actions) to %s in code (the rename of your editor of code renames its uses), build, and rename again to follow it",name,action_member(name))
+    case .Action_Still_Declared: return "the code built still declares the old name of the action: rename the member in code and build first; this rename follows it in input.mirai and the documents"
     }
     return ""
 }
@@ -78,6 +86,7 @@ names_create :: proc(s:^Session,info:^core.World_Info,type:typeid,text:string) -
     for entry in values {
         if entry.name==name {return 0,.Taken}
     }
+    if type==input.Action {return 0,.Action_In_Code}
     value=names_free(values,t.limit)
     if value>=t.limit {return 0,.Full}
     if !s.has_project {return 0,.No_Game}
@@ -119,12 +128,27 @@ names_free :: proc(values:[]core.Name_Info,limit:i64) -> (value:i64) {
     return
 }
 
+// The identifier of the member of an enum @(actions) an action name is: "layer_back" is Layer_Back.
+action_member :: proc(name:string) -> string {
+    b:=strings.builder_make(context.temp_allocator)
+    for c,i in transmute([]u8)name {
+        strings.write_byte(&b,(i==0 || name[i-1]=='_') && c>='a' && c<='z'?c-32:c)
+    }
+    return strings.to_string(b)
+}
+
 // Renames a value of a type @(names) the project declared, with @(name="...")
-// on its constant, and an input action also in input.mirai. The game is built again.
+// on its constant, and the game is built again; an input action renamed in
+// code is followed (action_follow).
 names_rename :: proc(s:^Session,info:^core.World_Info,type:typeid,old,text:string) -> Names_Error {
     if core.named_type_of(info,type)==nil {return .Not_A_Type}
     name,valid:=name_normal(text)
     if !valid {return .Invalid_Name}
+    if type==input.Action {
+        from,named:=name_normal(old)
+        if !named {return .Invalid_Name}
+        return action_follow(s,info,from,name)
+    }
     found:^core.Name_Info
     for &entry in core.names_of(info,type) {
         if entry.name==name && entry.name!=old {return .Taken}
@@ -148,14 +172,64 @@ names_rename :: proc(s:^Session,info:^core.World_Info,type:typeid,old,text:strin
         line=strings.concatenate({line[:indent],attribute," ",line[indent:]},context.temp_allocator)
     }
     lines[found.line-1]=line
-    bindings,renamed:=project.path(s.project_root,project.INPUT_FILE,allocator=context.temp_allocator),""
-    if type==input.Action {
-        if text,read_error:=os.read_entire_file(bindings,context.temp_allocator);read_error==nil {renamed=input_file_rename(string(text),old,name)}
-    }
     if os.write_entire_file(file,transmute([]u8)strings.join(lines,"\n",context.temp_allocator))!=nil {return .Write_Failed}
-    if renamed!="" && os.write_entire_file(bindings,transmute([]u8)renamed)!=nil {return .Write_Failed}
     build_start(s)
     return .None
+}
+
+// An input action renamed in code (its member in the enum @(actions), with
+// the rename of an editor of code or by an agent): the input.mirai of the
+// project and its documents take the new name. The code built and loaded has
+// to declare it already, and no longer the old one.
+@(private)
+action_follow :: proc(s:^Session,info:^core.World_Info,old,name:string) -> Names_Error {
+    if _,declared:=core.name_value(info,input.Action,name);!declared {return .Action_Not_Declared}
+    if _,still:=core.name_value(info,input.Action,old);still {return .Action_Still_Declared}
+    if s.has_project {
+        bindings:=project.path(s.project_root,project.INPUT_FILE,allocator=context.temp_allocator)
+        if text,read_error:=os.read_entire_file(bindings,context.temp_allocator);read_error==nil {
+            if renamed:=input_file_rename(string(text),old,name);renamed!="" {
+                if serial.file_write_atomic(bindings,transmute([]u8)renamed)!=.None {return .Write_Failed}
+                input_maps_rebuild(s)
+            }
+        }
+    }
+    action_documents_rename(s,old,name)
+    return .None
+}
+
+// The documents of the project that keep the action old take the name: the
+// values stay and read by it. Each one changes as an edit, unsaved; those of
+// plugins and the engine stay.
+@(private)
+action_documents_rename :: proc(s:^Session,old,name:string) {
+    r:=files_registry(s)
+    if r==nil {return}
+    // Gathered first: a write tells the assets, which may look at the files again.
+    paths:=make([dynamic]string,context.temp_allocator)
+    for file in r.files {
+        if file.id=={} || content_mounted(r,file.path) {continue}
+        path:=asset.registry_file_path(r,file.path,context.temp_allocator)
+        if _,held:=asset.registry_memory_find(r,file.path);!held {
+            // The schema is at the front of the file: most name no action.
+            front:asset.Asset
+            if asset.asset_load_front(&front,path,context.temp_allocator)!=.None {continue}
+            named:=serial.schema_choice_rename(&front.schema,old,name)>0
+            asset.asset_close(&front)
+            if !named {continue}
+        }
+        append(&paths,path)
+    }
+    for path in paths {
+        data,present,readable:=file_contents(r,path,context.temp_allocator)
+        if !present || !readable {continue}
+        doc:asset.Document
+        if asset.document_read(&doc,data,context.temp_allocator)!=.None {continue}
+        if asset.document_choice_rename(&doc,old,name)>0 {
+            if bytes,error:=asset.document_bytes(&doc,context.temp_allocator);error==.None {_=file_write(s,path,bytes,"Rename action")}
+        }
+        asset.document_destroy(&doc)
+    }
 }
 
 // The text of input.mirai with the action old named name; "" when it does not name old.
@@ -235,8 +309,8 @@ Api_Name_Rename_Result :: struct {building:bool}
 @(private)
 api_names_register :: proc(s:^Session,st:^Api_State) {
     api_register(s,st,{name="names.list",summary="The types @(names) of the project (locomotion modes, input actions, collision categories...) with the named values the code declares for each.",params=Api_Names_Params,result=Api_Names_Result,writes_result=true,flags={.Read_Only},run=api_names_list})
-    api_register(s,st,{name="names.create",summary="Declares a new value of a type @(names) in game/names.odin, the first free one after its highest, and starts the build of the game.",params=Api_Name_Create_Params,result=Api_Name_Create_Result,run=api_name_create})
-    api_register(s,st,{name="names.rename",summary="Renames a value of a type @(names) that the project declared, with @(name) on its constant, and starts the build of the game; saved data keeps its number.",params=Api_Name_Rename_Params,result=Api_Name_Rename_Result,run=api_name_rename})
+    api_register(s,st,{name="names.create",summary="Declares a new value of a type @(names) in game/names.odin, the first free one after its highest, and starts the build of the game; an input action is declared in code, as a member of the enum @(actions) of the game.",params=Api_Name_Create_Params,result=Api_Name_Create_Result,run=api_name_create})
+    api_register(s,st,{name="names.rename",summary="Renames a value of a type @(names) that the project declared, with @(name) on its constant, and starts the build of the game; saved data keeps its number. An input action is renamed in code first (its member of the enum @(actions)); once built, this follows it: input.mirai of the project and the documents that keep it take the new name, as edits, unsaved.",params=Api_Name_Rename_Params,result=Api_Name_Rename_Result,run=api_name_rename})
 }
 
 @(private)
@@ -299,7 +373,7 @@ api_name_rename :: proc(s:^Session,call:^api.Call) {
         return
     }
     if error:=names_rename(s,info,t.type,name,to);error!=.None {
-        api.call_failf(call,api.INVALID_PARAMS,"%s",names_error_text(error,type,error==.Invalid_Name || error==.Taken?to:name))
+        api.call_failf(call,api.INVALID_PARAMS,"%s",names_error_text(error,type,error==.Invalid_Name || error==.Taken || error==.Action_Not_Declared?to:name))
         return
     }
     api.call_result(call,Api_Name_Rename_Result).building=s.build.phase==.Running

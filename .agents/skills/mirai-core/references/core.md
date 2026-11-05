@@ -394,11 +394,23 @@ source of its names, and the data only configure through them.
   of a lower package that does not know `T`.
 - Two constants with one name are a generator error; two with one value, a `#assert` of the
   generated world.
-- What is saved stores the number: renaming changes neither data nor layout. The text and the API
-  write and read them by name, or by number when they have none.
+- What is saved stores the number of a constant: renaming changes neither data nor layout. The
+  text and the API write and read them by name, or by number when they have none.
 - The editor creates a value by writing the constant in `game/names.odin` and renames by putting
   `@(name)` on it without touching its identifier; both compile the game. The values of the engine
   and of the plugins are not renamed from the editor.
+- `@(names,actions)` marks the type whose values are the members of the enums `@(actions)`
+  (`inp.Action`), not constants: the generator gives each enum, in the order of the libraries
+  (engine, active plugins, game), the next values, names them by their members in lowercase and
+  records each enum with its base in `World_Info.actions` (`core.actions_of`). A constant of that
+  type, an enum that is not `u8` or gives its members values, one name in two enums and more
+  members than the type and its masks hold are generator errors
+  ([actions](../../mirai-gameplay/references/control.md#actions)). Those numbers move when a
+  library adds an action, so what is saved stores the name of an action and of each bit of its
+  masks, as it stores the member of an enum (`Named_Type_Info.actions`, `serial` `by_name`); the
+  network sends the number. A new library that gives an action another number converts the tables
+  and storages that hold actions (`world_migration_make`); one that only renames it moves them as
+  they are.
 
 ## Game data
 

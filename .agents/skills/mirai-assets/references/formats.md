@@ -177,6 +177,13 @@ run. The editor has the cache in the project's `.mirai/cache/registry`; the play
   in `.editor`): they are found by id and by path, but a project's lists omit them
   (`registry_listed`). Whoever opens a file by its registry path resolves it with
   `registry_file_path`.
+- **Guest mounts.** `registry_mount_guest` mounts while running a folder the program did not ship
+  (what a player saved or downloaded, mods) and reads its files at once, also over a packed index;
+  `registry_unmount` takes it out with its files. What the program has wins: a guest file whose id
+  a file outside the guests has, or a guest file before it in path order, is not in the registry,
+  neither by id nor by path, and stays in `Registry.refused` until a scan, a refresh of its path or
+  the unmount. `host` opens a guest file with a byte limit far below the default one
+  (`ASSETS_GUEST_LIMIT`, read and decompressed).
 - **In-memory files** (`registry_memory.odin`): what an editor changed and did not write. While a
   path is in memory, its registry entry is what that content says and `registry_read` gives its
   bytes; a scan or a refresh keep it, the cache and the index do not store it, and
@@ -187,8 +194,9 @@ run. The editor has the cache in the project's `.mirai/cache/registry`; the play
   without looking at the folder.
   [Cooking](../../mirai-projects/references/build.md#asset-cooking) leaves it as `.index`
   (`REGISTRY_INDEX`) and `host.assets_init` uses it instead of scanning: the folder is then what
-  its index says (`Assets.indexed`) and `assets_scan` does not look at it again; an unreadable one
-  is ignored and scanned. Whoever opens a file still checks its hash, id and type.
+  its index says (`Assets.indexed`) and `assets_scan` does not look at it again, nor
+  `assets_refresh` outside the guest mounts; an unreadable one is ignored and scanned. Whoever opens
+  a file still checks its hash, id and type.
 - **Repeated ids.** Several files with one id are copies made outside the editor of one of them.
   With `Registry.resolve_duplicates` (the registry of `host.assets_init`), the oldest is the
   original (`file_newer`) and each copy receives, in the registry's memory, an id of its own derived

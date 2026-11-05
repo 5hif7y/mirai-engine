@@ -31,6 +31,14 @@ the name of their type) and a world (handles and tables).
   [classes](../../mirai-core/references/generator.md#attributes)), and only if everything went in
   does it swap its content with the world. It leaves settle and transform propagation done.
   `replace` is also used by loading a save and by the scene a collaboration guest receives.
+- `load_untrusted(world, app, path, Untrusted{components, max_entities, max_bytes})` loads, as
+  `load`, a level a player saved or downloaded (a path under `host.assets_mount`, or absolute) only
+  if it holds what its rules allow: file within `max_bytes`, entities within `max_entities`,
+  only the listed components (`Transform` always), values that pass `serial.value_check`, `Entity`
+  fields naming entities of the document, `Asset` fields and prefab instances naming assets of the
+  registry. Prefab instances are not resolved against their prefabs. A `Scene_Reference` may name
+  only a scene the game ships: what hangs from it loads unchecked. `report.refused` says what
+  failed and `untrusted_text` how to fix it.
 - `spawn(commands, app, Spawn{...})` places a prefab while playing; its rows wait for the end of
   the function that requested it. The root receives `Prefab_Source`, which a server sends with what
   it replicates so that the client instantiates that prefab
@@ -88,7 +96,8 @@ the name of their type) and a world (handles and tables).
   settles what was instantiated
   ([identity](../../mirai-core/references/core.md#persistent-identity)).
 - `Error`: `No_Assets`, `Not_Found`, `Invalid`, `Cycle`, `Not_A_Prefab`, `Corrupt`,
-  `Duplicate_Id`, `Out_Of_Memory`, `Write_Failed`; `error_text`.
+  `Duplicate_Id`, `Out_Of_Memory`, `Write_Failed` and, of `load_untrusted`, `Too_Large`,
+  `Not_Allowed`, `Out_Of_Range`, `Unknown_Reference`; `error_text`.
 
 ### Scene references
 
@@ -379,14 +388,16 @@ their defaults, `input.mirai` and the seats: [actions](control.md#actions).
     unit length.
 - `Action_State`: `down`, `pressed`, `released`, `tapped`, `holding`, `held_ticks`, `value`,
   `vector`. `tap_ticks` (12) and `hold_ticks` (30) come from the map.
-- Changing the map at runtime: `input_map_action(&m, JUMP, .Button)`,
-  `input_map_bind(&m, JUMP, inp.binding_key(.Space))`, `input_map_unbind`; `input_map_has` says
-  whether it has an action of a type.
+- Changing the map at runtime: `input_map_action(&m, jump, .Button)`,
+  `input_map_bind(&m, jump, inp.binding_key(.Space))`, `input_map_unbind`, with the action of the
+  world (`jump:=inp.action_of(walk, .Jump)`); `input_map_has` says whether it has an action of a
+  type.
 - Binding constructors: `binding_key`, `binding_key_axis`, `binding_keys`,
   `binding_mouse_button`, `binding_mouse_axis`, `binding_mouse_delta`, `binding_gamepad_button`,
   `binding_gamepad_axis`, `binding_gamepad_stick`.
-- Reading: `action_down|pressed|released|tapped|holding|value|vector(actions, JUMP)` over
-  `Ref(Actions)`; `action` gives the full state.
+- Reading: `down|pressed|released|tapped|holding|value|vector(input, .Jump)` over
+  `Input_Of(E)` ([actions](control.md#actions)); `action(actions, a)` gives the full state of an
+  action of the world.
 - `input_actions_update` (`fixed`, stage `input`) recomputes `Actions` every tick from `core.Input`
   and its previous state, without allocating: a repeated tick gives the same.
 - `Frame_Actions.actions` uses the same bindings and evaluator over `core.Frame_Input`.

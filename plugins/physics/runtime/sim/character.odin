@@ -139,6 +139,8 @@ Ground :: struct {
 @(private) FLATTEN_MAX :: 0.95     // and above which the contact is under the capsule and holds it
 @(private) FLATTEN_MIN_SCALE :: 0.25 // a nearly vertical contact made horizontal pushes at most four times its depth
 @(private) CHARACTER_PUSHES :: 4 // directions of dynamic bodies a character leans on; more share the closest one
+@(private) LINEAR_LOCKS :: Body_Flags{.Lock_Linear_X,.Lock_Linear_Y,.Lock_Linear_Z}
+@(private) ANGULAR_LOCKS :: Body_Flags{.Lock_Angular_X,.Lock_Angular_Y,.Lock_Angular_Z}
 
 @(private) character_half_segment :: #force_inline proc "contextless" (d:^Character_Desc) -> f32 {
     return 0.5*(d.height-d.step_height)-d.radius
@@ -193,7 +195,7 @@ character_create :: proc(w:^World,desc:Character_Desc,position:Vec3,rotation:=QU
     body_desc.position=position
     body_desc.rotation=up_frame*q_axis_angle(UP,yaw)
     body_desc.gravity_scale=d.gravity_scale
-    body_desc.locks={.Lock_Angular_X,.Lock_Angular_Y,.Lock_Angular_Z}
+    body_desc.locks=ANGULAR_LOCKS
     body_desc.sleep_disabled=true
     body_desc.user_data=d.user_data
     body:=body_create(w,body_desc)
@@ -298,6 +300,15 @@ character_set_height :: proc(w:^World,h:Character_Handle,height:f32) -> bool {
     return true
 }
 
+// Keeps the feet from moving along the world axes of its linear locks, as those of a body: nothing the step
+// does moves them along one, and only a teleport puts them elsewhere on it. Its rotation stays locked, since
+// its move turns it.
+character_set_locks :: proc(w:^World,h:Character_Handle,locks:Body_Flags) {
+    ch,_:=character_get(w,h)
+    if ch==nil {return}
+    body_set_locks(w,ch.body,ANGULAR_LOCKS+locks&LINEAR_LOCKS)
+}
+
 character_body :: proc(w:^World,h:Character_Handle) -> Body_Handle {
     ch,_:=character_get(w,h)
     return ch!=nil?ch.body:{}
@@ -380,6 +391,7 @@ Character_Solver :: struct {
     standing:bool,             // on found
     velocity:Vec3,             // of the body once instant effects and the launch of the move are in
     up:Vec3,                   // of the character in the step
+    free:Vec3,                 // 1 along the world axes its linear locks leave free, 0 along the locked ones
     c,g:i32,                   // solver bodies; g is -1 for ground that does not move
     normal,tangent1,tangent2:Vec3,
     anchor:Vec3,               // ground point relative to the center of mass of the ground body
@@ -470,6 +482,9 @@ characters_move_task :: proc(data:rawptr,first,last,worker:int) {
         case .Add: velocity+=state.effect_velocity
         case .Set: velocity=state.effect_velocity
         }
+        cs.free=lock_free(body.flags)
+        velocity*=cs.free
+        move.launch*=cs.free
         // The up turns toward the opposite of the gravity the character feels, at most up_speed.
         if ch.desc.up_speed>0 {state.up_frame=up_frame_turn(state.up_frame,-ch.desc.gravity_scale*body_gravity_of(w,body),ch.desc.up_speed*move_pace(move)*dt)}
         up:=up_frame_up(state.up_frame)
@@ -504,6 +519,12 @@ characters_move_task :: proc(data:rawptr,first,last,worker:int) {
         cs.move=move
         cs.velocity=velocity+move.launch
     }
+}
+
+// 1 along the world axes the linear locks of a body leave free, 0 along the locked ones.
+@(private)
+lock_free :: #force_inline proc "contextless" (flags:Body_Flags) -> Vec3 {
+    return {.Lock_Linear_X in flags?0:1,.Lock_Linear_Y in flags?0:1,.Lock_Linear_Z in flags?0:1}
 }
 
 // The ground a character found, kept in its state.
@@ -754,8 +775,9 @@ characters_prepare :: proc(w:^World) #no_bounds_check {
         character_flatten_contacts(w,body,cs.up,dot(ground.point,cs.up),ch.desc.step_height)
         if pushes {character_pushes(w,&cs,body,ground.normal)}
         n:=ground.normal
+        locked:=cs.free!={1,1,1}
         cs.normal=n
-        cs.tangent1=perp(n)
+        cs.tangent1=locked?character_free_tangent(n,cs.free):perp(n)
         cs.tangent2=cross(cs.tangent1,n)
         cs.separation=ground.distance*dot(n,cs.up)
         cs.adhesion_limit=ch.desc.adhesion_force*felt*st.h
@@ -776,14 +798,36 @@ characters_prepare :: proc(w:^World) #no_bounds_check {
         cs.target-=n*dot(cs.target,n)
         ma,mg,ig:=cs.inv_mass_c,cs.inv_mass_g,cs.inv_inertia_g
         rn:=cross(cs.anchor,n)
-        cs.normal_mass=1/(ma+mg+dot(rn,ig*rn))
         r1,r2:=cross(cs.anchor,cs.tangent1),cross(cs.anchor,cs.tangent2)
+        if locked {
+            // The locks take away the mobility of the feet along the locked axes. Along the ground they leave
+            // at most the line of tangent1: it alone is driven.
+            k:=ma*dot(n,cs.free*n)+mg+dot(rn,ig*rn)
+            cs.normal_mass=k>0?1/k:0
+            kxx:=ma*dot(cs.tangent1,cs.free*cs.tangent1)+mg+dot(r1,ig*r1)
+            cs.tangent_mass={kxx>0?1/kxx:0,0,0}
+            continue
+        }
+        cs.normal_mass=1/(ma+mg+dot(rn,ig*rn))
         kxx:=ma+mg+dot(r1,ig*r1)
         kyy:=ma+mg+dot(r2,ig*r2)
         kxy:=dot(r1,ig*r2)
         det:=kxx*kyy-kxy*kxy
         cs.tangent_mass=det!=0?[3]f32{kyy/det,-kxy/det,kxx/det}:{}
     }
+}
+
+// The direction along the ground of normal n that the linear locks of `free` leave the feet, or the one
+// nearest to it when none is free.
+@(private)
+character_free_tangent :: proc "contextless" (n,free:Vec3) -> Vec3 {
+    locked:=Vec3{1,1,1}-free
+    t:Vec3
+    switch locked.x+locked.y+locked.z {
+    case 1: t=cross(n,locked)
+    case 2: t=free-n*dot(n,free)
+    }
+    return length2(t)>1e-6?normalize(t):perp(n)
 }
 
 // One pass over the characters, before joints and contacts so that those have the last word. A character
@@ -810,16 +854,16 @@ characters_solve :: proc(w:^World) #no_bounds_check {
                 s:=cs.float_separation+body.dp.y
                 bias:=clamp(float_soft.mass_scale*float_soft.bias_rate*s,-push_speed,push_speed)
                 impulse:=clamp(-(float_soft.mass_scale*v.y+bias)/cs.inv_mass_c,-cs.float_limit,cs.float_limit)
-                v.y+=cs.inv_mass_c*impulse
+                v.y+=cs.inv_mass_c*cs.free.y*impulse
                 body.v=v
             }
             if cs.drive_limit<=0 {continue}
             delta:=cs.target-v
             if .Drive_Vertical not_in cs.move.flags {delta-=cs.up*dot(delta,cs.up)}
-            impulse:=cs.drive_impulse+delta/cs.inv_mass_c
+            impulse:=cs.drive_impulse+cs.free*delta/cs.inv_mass_c
             if l:=length(impulse);l>cs.drive_limit {impulse*=cs.drive_limit/l}
-            if cs.push_count>0 {impulse=character_push_cap(&cs,impulse)}
-            body.v=v+cs.inv_mass_c*(impulse-cs.drive_impulse)
+            if cs.push_count>0 {impulse=character_push_cap(&cs,impulse)*cs.free}
+            body.v=v+cs.inv_mass_c*cs.free*(impulse-cs.drive_impulse)
             cs.drive_impulse=impulse
             continue
         }
@@ -842,7 +886,7 @@ characters_solve :: proc(w:^World) #no_bounds_check {
             total:=max(cs.normal_impulse-cs.normal_mass*(mass_scale*vn+bias)-impulse_scale*cs.normal_impulse,-cs.adhesion_limit)
             p:=(total-cs.normal_impulse)*n
             cs.normal_impulse=total
-            v+=ma*p
+            v+=ma*cs.free*p
             vg-=mg*p
             og-=ig*cross(r,p)
         }
@@ -860,7 +904,7 @@ characters_solve :: proc(w:^World) #no_bounds_check {
             }
             p:=(impulse[0]-cs.drive_impulse[0])*cs.tangent1+(impulse[1]-cs.drive_impulse[1])*cs.tangent2
             cs.drive_impulse={impulse[0],impulse[1],0}
-            v+=ma*p
+            v+=ma*cs.free*p
             vg-=mg*p
             og-=ig*cross(r,p)
         }

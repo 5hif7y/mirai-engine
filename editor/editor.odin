@@ -398,7 +398,7 @@ open :: proc(info:^core.World_Info,args:[]string) -> (s:^Session,code:int) {
         append(&mounts,..host.project_asset_mounts(&p,context.temp_allocator))
         if title:=project.window_title(&p.manifest);title!="" {window.title=strings.clone(title,context.temp_allocator)}
     }
-    append(&mounts,asset.Registry_Mount{project.path(engine,EDITOR_ASSETS,allocator=context.temp_allocator),EDITOR_ASSETS_PREFIX})
+    append(&mounts,asset.Registry_Mount{folder=project.path(engine,EDITOR_ASSETS,allocator=context.temp_allocator),prefix=EDITOR_ASSETS_PREFIX})
     windowed:=!options.headless
     app,app_error:=host.app_create({
         info=info,root=root,engine_root=engine,threads=jobs.THREADS_AUTO,

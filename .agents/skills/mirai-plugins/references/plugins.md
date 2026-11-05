@@ -131,6 +131,9 @@ demo enables. How an `editor/` adds steps, panels and tools:
   ([physics](../../mirai-physics/SKILL.md)).
 - **`destruct`**: destructibles, fracture and pieces
   ([destruction](../../mirai-physics/references/engine-destruct.md)).
+- **`shapes`** (`Runtime` and `Editor`; depends on `physics`): editable outlines and solids of
+  brush entities whose source is saved and whose mesh and collider are derived on a child
+  ([shapes](shapes.md)).
 - **`multiplayer`**: the game network, without physics, and the editor's networked Play
   ([multiplayer](../../mirai-networking/references/multiplayer.md)).
 - **Automatic bridges**: `destruct_multiplayer` (replicated fractures), `foliage_terrain` (the

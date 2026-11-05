@@ -147,7 +147,9 @@ assets_geometry_append :: proc(source:geom.Mesh,buffer:^geom.Mesh_Buffer,attribu
 //   nothing                 the vertices of level 0  the triangles of level 0
 //
 // Shapes are hulls, boxes, spheres and capsules; a sphere or a capsule is
-// the hull of COLLIDER_SHAPE_SEGMENTS around its axis.
+// the hull of COLLIDER_SHAPE_SEGMENTS around its axis. A Hull collider takes
+// them one by one from assets_collision_hulls; the points of all are what it
+// takes where it cannot.
 //
 // stored: the geometry is that of the colliders of the asset. ok is false,
 // with the buffer as it was, when there is no geometry to give.
@@ -195,6 +197,53 @@ assets_collision :: proc(a:^Assets,mesh:base.Asset_Id,shape:Shape,kind:Collision
 }
 
 COLLIDER_SHAPE_SEGMENTS :: 12
+
+// Appends the convex pieces a Hull collider of what a Mesh_Renderer shows is
+// made of, each a hull of its own: those a generated mesh was given
+// (Mesh_Generate_Options.hull_points), or the shapes a mesh asset stores
+// without a collision mesh. points receives the points of every piece one
+// after another, in mesh space, and sizes how many each has. False, with both
+// as they were, when the mesh has no pieces: the collider is then one hull of
+// what assets_collision gives.
+assets_collision_hulls :: proc(a:^Assets,mesh:base.Asset_Id,shape:Shape,points:^[dynamic]geom.Vec3,sizes:^[dynamic]u32) -> bool {
+    if a==nil || mesh=={} || points==nil || sizes==nil {return false}
+    held_points,held_sizes:=len(points),len(sizes)
+    defer if len(sizes)==held_sizes {
+        resize(points,held_points)
+    }
+    if assets_mesh_generated(a,mesh) {
+        entry:=&a.meshes[a.index[mesh].index]
+        if len(entry.hull_sizes)==0 {return false}
+        if append(points,..entry.hull_points)!=len(entry.hull_points) || append(sizes,..entry.hull_sizes)!=len(entry.hull_sizes) {
+            resize(sizes,held_sizes)
+            return false
+        }
+        return true
+    }
+    file:asset.Asset
+    if _,_,opened:=assets_open(a,mesh,.Mesh,&file);!opened {return false}
+    defer asset.asset_close(&file)
+    view,error:=asset.mesh_view(&file,&a.types)
+    if error!=.None || !asset.mesh_check_indices(view) {return false}
+    for collider in view.colliders {
+        if collider.kind==.Mesh && collider.index_count>0 {return false}
+    }
+    for collider in view.colliders {
+        if collider.kind==.Mesh || collider.kind==.Hull && collider.point_count<3 {continue}
+        from:=len(points)
+        collider_points(view,collider,points)
+        made:=len(points)-from
+        valid:=made>=3
+        for point in points[from:] {
+            for value in point {valid=valid && value-value==0}
+        }
+        if !valid || append(sizes,u32(made))!=1 {
+            resize(sizes,held_sizes)
+            return false
+        }
+    }
+    return len(sizes)>held_sizes
+}
 
 // The points a stored collider other than a collision mesh is the hull of.
 @(private="file")

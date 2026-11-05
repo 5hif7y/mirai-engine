@@ -1,6 +1,7 @@
 package serial
 
 import "base:intrinsics"
+import "core:math"
 import "core:mem"
 
 // The saved form of a value is its image: the bytes it has in memory under
@@ -132,6 +133,7 @@ Op :: struct {
     first,count:u32, // pairs
     body:u32,
     src_stride,dst_stride:u32,
+    full:bool, // Flags between masks of integers: every bit set stays every bit set
 }
 
 @(private="file")
@@ -139,7 +141,9 @@ Pair :: struct {from,to:i64}
 
 // How values of a stored type become values of another. Fields are matched by
 // name. Numbers convert by value and saturate at the range of the
-// destination; enum values and bit set members move by member name; arrays
+// destination; enum values and bit set members move by member name, and so do
+// the values and bits of an integer whose numbers are generated (by_name),
+// where a mask with every bit set stays so; arrays
 // keep the elements both lengths have. A destination field without a source,
 // or whose source is of another shape, keeps what the destination had: the
 // default the caller gives. Transient fields end as zero.
@@ -312,7 +316,7 @@ migration_build :: proc(b:^Build,src_index,dst_index:Type_Index,src_offset,dst_o
         else {m.ops[loop].body=u32(body);b.barrier=len(m.ops)}
     case src_type.kind==.Asset || dst_type.kind==.Asset || src_type.kind==.Struct || dst_type.kind==.Struct || src_type.kind==.Array || dst_type.kind==.Array:
         m.incompatible+=1
-    case src_type.kind==.Enum && dst_type.kind==.Enum:
+    case moves_values(dst_type) && names_values(src_type):
         first:=len(m.pairs)
         for from in b.src.choices[src_type.first:][:src_type.count] {
             for to in b.dst.choices[dst_type.first:][:dst_type.count] {
@@ -321,21 +325,22 @@ migration_build :: proc(b:^Build,src_index,dst_index:Type_Index,src_offset,dst_o
         }
         class,_:=number_class(b.src,src_index)
         append(&m.ops,Op{kind=.Enum,src_class=class,src_size=u8(src_type.size),dst_size=u8(dst_type.size),src_offset=src_offset,dst_offset=dst_offset,first=u32(first),count=u32(len(m.pairs)-first)})
-    case dst_type.kind==.Enum:
+    case moves_values(dst_type):
         // A number becomes the member with its value, when there is one.
         class,_:=number_class(b.src,src_index)
         if class==.Float || class==.Bool {m.incompatible+=1;return}
         first:=len(m.pairs)
         for to in b.dst.choices[dst_type.first:][:dst_type.count] {append(&m.pairs,Pair{to.value,to.value})}
         append(&m.ops,Op{kind=.Enum,src_class=class,src_size=u8(src_type.size),dst_size=u8(dst_type.size),src_offset=src_offset,dst_offset=dst_offset,first=u32(first),count=u32(len(m.pairs)-first)})
-    case src_type.kind==.Bit_Set && dst_type.kind==.Bit_Set:
+    case moves_bits(dst_type) && names_bits(src_type):
         first:=len(m.pairs)
         for from in b.src.choices[src_type.first:][:src_type.count] {
             for to in b.dst.choices[dst_type.first:][:dst_type.count] {
                 if to.name==from.name {append(&m.pairs,Pair{from.value,to.value});break}
             }
         }
-        append(&m.ops,Op{kind=.Flags,src_size=u8(src_type.size),dst_size=u8(dst_type.size),src_offset=src_offset,dst_offset=dst_offset,first=u32(first),count=u32(len(m.pairs)-first)})
+        full:=src_type.named==.Bits && dst_type.named==.Bits
+        append(&m.ops,Op{kind=.Flags,src_size=u8(src_type.size),dst_size=u8(dst_type.size),src_offset=src_offset,dst_offset=dst_offset,first=u32(first),count=u32(len(m.pairs)-first),full=full})
     case:
         src_class,_:=number_class(b.src,src_index)
         dst_class,_:=number_class(b.dst,dst_index)
@@ -345,6 +350,29 @@ migration_build :: proc(b:^Build,src_index,dst_index:Type_Index,src_offset,dst_o
         }
         append(&m.ops,Op{kind=.Number,src_class=src_class,dst_class=dst_class,src_size=u8(src_type.size),dst_size=u8(dst_type.size),src_offset=src_offset,dst_offset=dst_offset})
     }
+}
+
+// A type whose values have names, and one whose values move by them: an
+// enum, or an integer @(names) whose numbers are generated.
+@(private="file")
+names_values :: proc "contextless" (type:Type) -> bool {return type.kind==.Enum || type.named==.Values}
+@(private="file")
+moves_values :: proc "contextless" (type:Type) -> bool {return type.kind==.Enum || type.named==.Values && type.by_name}
+
+// The same of the bits: a bit set, or a mask of such an integer.
+@(private="file")
+names_bits :: proc "contextless" (type:Type) -> bool {return type.kind==.Bit_Set || type.named==.Bits}
+@(private="file")
+moves_bits :: proc "contextless" (type:Type) -> bool {return type.kind==.Bit_Set || type.named==.Bits && type.by_name}
+
+// Whether the low size bytes of a mask have every bit set.
+@(private="file")
+mask_full :: #force_inline proc "contextless" (mask:[2]u64,size:u8) -> bool {
+    switch size {
+    case 16: return mask=={max(u64),max(u64)}
+    case 8:  return mask[0]==max(u64)
+    }
+    return mask[0]==u64(1)<<(u64(size)*8)-1
 }
 
 @(private="file")
@@ -473,10 +501,15 @@ migration_run :: proc(m:^Migration,ops:[]Op,src:[^]u8,dst:[^]u8) #no_bounds_chec
             target:[2]u64
             intrinsics.mem_copy_non_overlapping(&source,from,int(op.src_size))
             intrinsics.mem_copy_non_overlapping(&target,to,int(op.dst_size))
-            for pair in m.pairs[op.first:][:op.count] {
-                bit:=u64(1)<<(u64(pair.to)&63)
-                if source[pair.from>>6]&(1<<(u64(pair.from)&63))!=0 {target[pair.to>>6]|=bit}
-                else {target[pair.to>>6]&~=bit}
+            if op.full && mask_full(source,op.src_size) {
+                // Every bit: also those of names the source did not have.
+                target={max(u64),max(u64)}
+            } else {
+                for pair in m.pairs[op.first:][:op.count] {
+                    bit:=u64(1)<<(u64(pair.to)&63)
+                    if source[pair.from>>6]&(1<<(u64(pair.from)&63))!=0 {target[pair.to>>6]|=bit}
+                    else {target[pair.to>>6]&~=bit}
+                }
             }
             intrinsics.mem_copy_non_overlapping(to,&target,int(op.dst_size))
         case .Loop:
@@ -492,4 +525,134 @@ migration_run :: proc(m:^Migration,ops:[]Op,src:[^]u8,dst:[^]u8) #no_bounds_chec
 value_read :: proc(m:^Migration,dst:rawptr,src:[]u8,count:int,default:rawptr=nil) {
     if dst==nil || count<=0 || m.dst_size==0 || count>max(int)/m.dst_size {return}
     migration_apply(m,([^]u8)(dst)[:count*m.dst_size],src,count,default==nil?nil:([^]u8)(default)[:m.dst_size])
+}
+
+// What value_check found wrong in a value.
+Value_Fault :: enum u8 {
+    None,
+    Not_Finite,   // a float that is NaN or infinite
+    Below_Min,    // a number under the min of its field
+    Above_Max,    // a number over the max of its field
+    Not_A_Choice, // a bool that is not 0 or 1, an enum that is none of its values, a bit set with a bit of no member
+    Refused,      // a reference the visitor of value_check refused
+}
+
+Value_Problem :: struct {
+    fault:Value_Fault,
+    path:string,    // of the part, as value_get takes it, in the buffer value_check was given
+    offset:u32,     // of the part in the value
+    kind:Type_Kind, // of the part
+    number:f64,     // the number, or the value of the choice
+    limit:f64,      // Below_Min and Above_Max: the bound it broke
+}
+
+// Whether a reference of a value is acceptable: an Entity, Entity_Id or Asset
+// of kind, its bytes in ref.
+Value_Ref_Proc :: #type proc(user:rawptr,kind:Type_Kind,ref:[]u8) -> bool
+
+// The first part of a value of a type of the schema that its schema does not
+// allow: a float that is not finite, a number outside the min and max of its
+// field (each element of an array field), a bool, enum or bit set that holds
+// no value of its type, or a reference visit refuses. What the schema does not
+// constrain (integers without a range, texts) passes. data holds one value;
+// the path of the part is written in path, cut to its length.
+value_check :: proc(s:^Schema,type:Type_Index,data:[]u8,path:[]u8,visit:Value_Ref_Proc=nil,user:rawptr=nil) -> Value_Problem {
+    if !type_valid(s,type) || int(s.types[type].size)>len(data) {return {}}
+    c:=Value_Check{s=s,data=data,path=path,visit=visit,user=user}
+    value_check_part(&c,type,0,nil)
+    return c.problem
+}
+
+@(private="file")
+Value_Check :: struct {
+    s:^Schema,
+    data:[]u8,
+    path:[]u8,
+    length:int,
+    visit:Value_Ref_Proc,
+    user:rawptr,
+    problem:Value_Problem,
+}
+
+@(private="file")
+value_path_add :: proc(c:^Value_Check,parts:..string) {
+    for part in parts {c.length+=copy(c.path[c.length:],part)}
+}
+
+@(private="file")
+value_fail :: proc(c:^Value_Check,fault:Value_Fault,offset:u32,kind:Type_Kind,number:f64=0,limit:f64=0) -> bool {
+    c.problem={fault,string(c.path[:c.length]),offset,kind,number,limit}
+    return false
+}
+
+// field: the field the part is, or is an element of: its min and max hold.
+@(private="file")
+value_check_part :: proc(c:^Value_Check,index:Type_Index,offset:u32,field:^Field) -> bool {
+    type:=c.s.types[index]
+    bytes:=c.data[offset:][:type.size]
+    #partial switch type.kind {
+    case .Struct:
+        mark:=c.length
+        for &inner in c.s.fields[type.first:][:type.count] {
+            if mark>0 {value_path_add(c,".")}
+            value_path_add(c,inner.name)
+            value_check_part(c,inner.type,offset+inner.offset,&inner) or_return
+            c.length=mark
+        }
+    case .Array:
+        size:=c.s.types[type.elem].size
+        mark:=c.length
+        digits:[20]u8
+        for i in 0..<type.count {
+            value_path_add(c,"[",index_text(int(i),digits[:]),"]")
+            value_check_part(c,type.elem,offset+i*size,field) or_return
+            c.length=mark
+        }
+    case .Float:
+        number:=scalar_float(bytes)
+        if math.is_nan(number) || math.is_inf(number) {return value_fail(c,.Not_Finite,offset,type.kind,number)}
+        return value_range(c,field,offset,type.kind,number)
+    case .Int:
+        return value_range(c,field,offset,type.kind,f64(scalar_signed(bytes)))
+    case .Uint:
+        return value_range(c,field,offset,type.kind,f64(scalar_unsigned(bytes)))
+    case .Bool:
+        if value:=scalar_unsigned(bytes);value>1 {return value_fail(c,.Not_A_Choice,offset,type.kind,f64(value))}
+    case .Enum:
+        value:=enum_value(c.s,type,bytes)
+        for choice in c.s.choices[type.first:][:type.count] {
+            if choice.value==value {return true}
+        }
+        return value_fail(c,.Not_A_Choice,offset,type.kind,f64(value))
+    case .Bit_Set:
+        if type.size>8 {return true}
+        members:u64
+        for choice in c.s.choices[type.first:][:type.count] {
+            if choice.value>=0 && choice.value<64 {members|=1<<u64(choice.value)}
+        }
+        if value:=scalar_unsigned(bytes);value&~members!=0 {return value_fail(c,.Not_A_Choice,offset,type.kind,f64(value))}
+    case .Entity,.Entity_Id,.Asset:
+        if c.visit!=nil && !c.visit(c.user,type.kind,bytes) {return value_fail(c,.Refused,offset,type.kind)}
+    }
+    return true
+}
+
+@(private="file")
+value_range :: proc(c:^Value_Check,field:^Field,offset:u32,kind:Type_Kind,number:f64) -> bool {
+    if field==nil {return true}
+    if field.has_min && number<field.min {return value_fail(c,.Below_Min,offset,kind,number,field.min)}
+    if field.has_max && number>field.max {return value_fail(c,.Above_Max,offset,kind,number,field.max)}
+    return true
+}
+
+@(private="file")
+index_text :: proc(i:int,buffer:[]u8) -> string {
+    n,at:=i,len(buffer)
+    for {
+        at-=1
+        buffer[at]=u8('0'+n%10)
+        n/=10
+        if n==0 || at==0 {break}
+    }
+    return string(buffer[at:])
 }

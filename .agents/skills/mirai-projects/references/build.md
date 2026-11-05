@@ -206,8 +206,8 @@ The copy replaces files and merges folders without deleting anything from the de
 ([player](../../mirai-core/references/host.md#arguments)). It leaves out what is only seen or
 heard: neither the icon nor `shaders/` (it does not generate the project's), and its cooking leaves
 behind the `presentation` asset kinds of `asset.KINDS` (textures, sounds, interfaces, fonts and
-prompts) without counting them as missing. It carries `input.mirai`, where the game declares its
-actions, and SDL3, which the executable links.
+prompts) without counting them as missing. It carries `input.mirai`, with the bindings Project
+Settings > Input changed, and SDL3, which the executable links.
 
 ## Asset cooking
 

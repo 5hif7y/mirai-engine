@@ -23,10 +23,9 @@ Polygon_Rule :: enum {
 polygon_triangulate :: proc(points:[]Vec2,loop_sizes:[]int,out:^[dynamic]u32,rule:=Polygon_Rule.First_Outline) -> int {
     total:=0
     for size in loop_sizes {
-        if size<0 {return 0}
+        if size<0 || size>len(points)-total {return 0}
         total+=size
     }
-    if total>len(points) {return 0}
     for p in points[:total] {
         if !finite2(p) {return 0}
     }

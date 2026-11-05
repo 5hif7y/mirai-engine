@@ -40,6 +40,7 @@ Physics_State :: struct {
     world_body:sim.Body_Handle, // the static body joints to the world hold on to
     geometry:[dynamic]Geometry_Mark, // by slot of the hulls, then the meshes, then the heightfields of the world
     sources:[dynamic]Geometry_Source, // by slot as geometry: what it was made from, to share it
+    pieces:[dynamic]Piece, // runs of Link.pieces; a zero entry is free
     forwarded:[6]int, // events of the simulation already sent
     pass:u32,
     epoch:u32, // invalidates host caches when simulation storage is replaced
@@ -74,6 +75,14 @@ Sealed_Body :: struct {order:u64,entity:core.Entity}
 @(private)
 Geometry_Mark :: struct {generation,revision:u32,hash:u64} // revision: of a hull rebuilt under its handle
 
+// A convex piece of a Hull collider whose mesh has several, after the first: its own hull and shape on the
+// body of the link.
+@(private)
+Piece :: struct {shape:sim.Shape_Handle,hull:sim.Hull_Handle}
+
+@(private)
+Piece_Run :: struct {first,count:u32}
+
 // What the simulation made for one entity and the copy of what it was made
 // from: a change shows by comparing.
 @(private)
@@ -83,6 +92,7 @@ Link :: struct {
     body:sim.Body_Handle,
     shape:sim.Shape_Handle,
     hull:sim.Hull_Handle,
+    pieces:Piece_Run, // the pieces after the first, in Physics_State.pieces
     mesh:sim.Mesh_Handle,
     heightfield:sim.Heightfield_Handle,
     character:sim.Character_Handle,
@@ -322,7 +332,14 @@ collider_debug_draw :: proc(physics:core.Ref(Physics_State),e:core.Entity,out:^s
     out.line_count,out.point_count,out.lines_dropped,out.points_dropped=0,0,0,0
     if !physics.ready {return false}
     link:=link_find(physics.ptr,e)
-    return link!=nil && sim.shape_debug_draw(&physics.world,link.shape,out)
+    if link==nil || !sim.shape_debug_draw(&physics.world,link.shape,out) {return false}
+    for piece in pieces_of(physics.ptr,link) {
+        rest:=sim.Debug_Draw{lines=out.lines[min(out.line_count,len(out.lines)):],points=out.points[min(out.point_count,len(out.points)):]}
+        if !sim.shape_debug_draw(&physics.world,piece.shape,&rest) {continue}
+        out.line_count+=rest.line_count;out.point_count+=rest.point_count
+        out.lines_dropped+=rest.lines_dropped;out.points_dropped+=rest.points_dropped
+    }
+    return true
 }
 
 collider_ready :: proc(physics:core.Ref(Physics_State),e:core.Entity) -> bool {
@@ -335,7 +352,13 @@ collider_bounds :: proc(physics:core.Ref(Physics_State),e:core.Entity) -> (bound
     if !physics.ready {return}
     link:=link_find(physics.ptr,e)
     if link==nil || !sim.shape_valid(&physics.world,link.shape) {return}
-    return sim.shape_bounds(&physics.world,link.shape),true
+    bounds=sim.shape_bounds(&physics.world,link.shape)
+    for piece in pieces_of(physics.ptr,link) {
+        if !sim.shape_valid(&physics.world,piece.shape) {continue}
+        more:=sim.shape_bounds(&physics.world,piece.shape)
+        bounds.min,bounds.max=linalg.min(bounds.min,more.min),linalg.max(bounds.max,more.max)
+    }
+    return bounds,true
 }
 
 geometry_budget :: proc(physics:core.Ref(Physics_State),kind:Collider_Kind) -> (used,capacity:int) {
@@ -531,6 +554,7 @@ state_copy_as :: proc(dst,src:^Physics_State,kept:bool) -> bool {
     if !core.value_copy(&dst.links,&src.links,type_info_of(core.Entity_Map(Link))) || !core.value_copy(&dst.joints,&src.joints,type_info_of(core.Entity_Map(Joint_Link))) {return false}
     if !core.value_copy(&dst.fluids,&src.fluids,type_info_of(core.Entity_Map(Fluid_Link))) {return false}
     if !core.value_copy(&dst.sources,&src.sources,type_info_of([dynamic]Geometry_Source)) {return false}
+    if !core.value_copy(&dst.pieces,&src.pieces,type_info_of([dynamic]Piece)) {return false}
     dst.world_body,dst.pass,dst.stats,dst.collision,dst.targets_seen=src.world_body,src.pass,src.stats,src.collision,src.targets_seen
     dst.forwarded={}
     if !src.ready {
@@ -579,7 +603,7 @@ state_swap :: proc(a,b:^Physics_State) {
 // Frees the simulation of a world.
 state_destroy :: proc(state:^Physics_State) {
     if state.ready {sim.world_destroy(&state.world)}
-    core.entity_map_destroy(&state.links);core.entity_map_destroy(&state.joints);core.entity_map_destroy(&state.fluids);delete(state.geometry);delete(state.sources)
+    core.entity_map_destroy(&state.links);core.entity_map_destroy(&state.joints);core.entity_map_destroy(&state.fluids);delete(state.geometry);delete(state.sources);delete(state.pieces)
     delete(state.sealed)
     volume.index_destroy(&state.gravity.index)
     state^={}
@@ -591,6 +615,7 @@ state_reset :: proc(state:^Physics_State) {
     state.ready=false
     clear(&state.geometry)
     clear(&state.sources)
+    clear(&state.pieces)
     core.entity_map_clear(&state.links);core.entity_map_clear(&state.joints);core.entity_map_clear(&state.fluids)
     state.world_body={}
     state.forwarded={}

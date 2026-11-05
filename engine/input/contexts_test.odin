@@ -37,19 +37,19 @@ a_context_on_top_takes_the_inputs_its_actions_read :: proc(t:^testing.T) {
 
     actions:Actions
     actions_update(&actions,&m,&device)
-    testing.expect(t,action_pressed(&actions,JUMP) && !action_down(&actions,CONFIRM),"outside the menu, its actions read nothing")
+    testing.expect(t,action(&actions,JUMP).pressed && !action(&actions,CONFIRM).down,"outside the menu, its actions read nothing")
 
     menu:=Context_Stack{layers={0=MENU},count=1}
     actions={}
     actions_update(&actions,&m,&device,&menu)
-    testing.expect(t,action_pressed(&actions,CONFIRM),"the menu confirms on Space")
-    testing.expect(t,!action_down(&actions,JUMP),"Space and South of every gamepad are the menu's, also South of the first one")
-    testing.expect(t,action_vector(&actions,MOVE)==[2]f32{0,1},"what the menu does not read stays with the game")
+    testing.expect(t,action(&actions,CONFIRM).pressed,"the menu confirms on Space")
+    testing.expect(t,!action(&actions,JUMP).down,"Space and South of every gamepad are the menu's, also South of the first one")
+    testing.expect(t,action(&actions,MOVE).vector==[2]f32{0,1},"what the menu does not read stays with the game")
 
     menu.modal=1
     actions={}
     actions_update(&actions,&m,&device,&menu)
-    testing.expect(t,action_pressed(&actions,CONFIRM) && !action_down(&actions,MOVE),"a modal menu leaves the game nothing")
+    testing.expect(t,action(&actions,CONFIRM).pressed && !action(&actions,MOVE).down,"a modal menu leaves the game nothing")
 }
 
 // Owners put seats in contexts and take them out; the one entered last is on
@@ -113,7 +113,7 @@ a_button_held_across_a_change_of_context_waits_for_its_release :: proc(t:^testin
     seat.contexts=Context_Stack{layers={0=MENU},count=1}
     device:=core.Input{keys_down={.Space},keys_pressed={.Space}}
     seat_feed(&seat,&device,&m,false)
-    testing.expect(t,action_pressed(&seat.actions,CONFIRM))
+    testing.expect(t,action(&seat.actions,CONFIRM).pressed)
     seat.contexts={}
     device={keys_down={.Space}}
     seat_feed(&seat,&device,&m,false)
@@ -122,7 +122,7 @@ a_button_held_across_a_change_of_context_waits_for_its_release :: proc(t:^testin
     seat_feed(&seat,&device,&m,false)
     device={keys_down={.Space},keys_pressed={.Space}}
     seat_feed(&seat,&device,&m,false)
-    testing.expect(t,seat.rearm==0 && action_pressed(&seat.actions,JUMP),"pressed again, it jumps")
+    testing.expect(t,seat.rearm==0 && action(&seat.actions,JUMP).pressed,"pressed again, it jumps")
 }
 
 // input.mirai puts an action in a context and gives a binding a chord; the
@@ -147,7 +147,7 @@ input_mirai_names_contexts_and_chords :: proc(t:^testing.T) {
     actions:Actions
     device:=core.Input{keys_down={.Left_Control,.S},keys_pressed={.Left_Control,.S}}
     actions_update(&actions,&m,&device,&menu)
-    testing.expect(t,action_pressed(&actions,SAVE) && !action_down(&actions,JUMP),"the menu takes S, and Ctrl+S saves")
+    testing.expect(t,action(&actions,SAVE).pressed && !action(&actions,JUMP).down,"the menu takes S, and Ctrl+S saves")
 
     below:Input_Map
     input_map_make(&below,&info,"",``,&problems)

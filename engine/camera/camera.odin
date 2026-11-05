@@ -118,7 +118,7 @@ Camera_Activation :: struct {
     blend:Camera_Blend,
 }
 
-CAMERA_ACTIVATION_DEFAULT :: Camera_Activation{action=input.Action(255),blend={seconds=0.25,ease=.Cubic_Out}}
+CAMERA_ACTIVATION_DEFAULT :: Camera_Activation{action=max(input.Action),blend={seconds=0.25,ease=.Cubic_Out}}
 
 // What this library derives and is asked while the world runs. Loading a
 // scene or a save starts it again: the libraries that asked for overrides ask again.
@@ -232,7 +232,7 @@ camera_select :: proc(
         target:=input.body_of(drivables,player)
         if follow,ok:=core.get(follows,camera);ok {target=follow_target(camera,follow.target,drivables,player)}
         seat:=input.seat_of(drivables,target)
-        if seat!=core.NONE && camera_valid(cameras,camera) && input.seat_down(seats,seat,activation.action) {
+        if seat!=core.NONE && camera_valid(cameras,camera) && input.seat_action(seats,seat,activation.action).down {
             if !override_set(cameras_state,{owner=camera,seat=seat,camera=camera,blend=activation.blend}) {
                 core.report(problems,camera,"camera.overrides_full","the Camera_Activation of entity 0x%016x was not seen: %d camera overrides are active, as many as fit",u64(camera),OVERRIDE_CAPACITY)
             }
@@ -273,7 +273,7 @@ camera_follow :: proc(
     world:core.World_Ref,follows:^core.Table(Camera_Follow),cameras:^core.Table(render.Camera),transforms:^core.Table(core.Transform),
     worlds:core.Read(core.World_Transform),parents:core.Read(core.Parent),drivables:core.Read(input.Drivable),
     seats:core.Read(input.Seat),moves:core.Read(input.Move_Input),shown:core.Ref(Cameras),
-    seat_state:core.Ref(input.Seats),actions:core.Ref(input.Frame_Actions),queries:core.Ref(core.World_Queries),look_input:^Camera_Input,changes:^Camera_Changes,
+    seat_state:core.Ref(input.Seats),look_actions:input.Frame_Input_Of(input.Look_Action),queries:core.Ref(core.World_Queries),look_input:^Camera_Input,changes:^Camera_Changes,
     views:core.Ref(Camera_Views),verticals:core.Read(core.Vertical),frame:core.Frame_Time,time:core.Time,problems:^core.Problems,
 ) {
     for change in core.take(&changes.queue) {mode_take(follows,cameras,worlds,change,problems)}
@@ -303,8 +303,8 @@ camera_follow :: proc(
             other.looking={seen.looking.x,clamp(seen.looking.y,low,high)}
         }
     }
-    turn:=input.action_vector(&actions.actions,input.LOOK)*input.LOOK_SPEED
-    if seat,ok:=core.get(seats,player);!ok || seat.blocked&input.action_bit(input.LOOK)!=0 {turn={}}
+    turn:=input.vector(look_actions,.Look)*input.LOOK_SPEED
+    if seat,ok:=core.get(seats,player);!ok || seat.blocked&input.action_bit(input.action_of(look_actions,.Look))!=0 {turn={}}
     for row in 0..<core.count(follows) {
         e:=core.entity_at(follows,row)
         follow:=core.at(follows,row)

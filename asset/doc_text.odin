@@ -98,6 +98,7 @@ schema_text_write :: proc(w:^serial.Writer,s:^serial.Schema,depth:int) {
             if type.kind==.Int || type.kind==.Uint {
                 if type.named==.None {break}
                 write_key(w,-1,"named");serial.text_write_string(w,reflect.enum_string(type.named))
+                if type.by_name {write_key(w,-1,"by_name");serial.text_write_raw(w,"true")}
             }
             write_key(w,-1,"choices");serial.write_u8(w,'[')
             for choice,at in s.choices[type.first:][:type.count] {
@@ -245,7 +246,7 @@ Text_Rule :: enum u8 {
     Unknown_Flag,
     Number_Out_Of_Range,
     Schema_First,        // "schema" comes before "tables", once
-    Kind_First,          // in a type, "kind" comes before "fields", "named" and "choices"
+    Kind_First,          // in a type, "kind" comes before "fields", "named" and "choices", and "named" before "by_name"
     Unknown_Type_Kind,
     Too_Many_Types,
     Schema_Invalid,      // the types contradict each other
@@ -369,6 +370,13 @@ schema_text_read :: proc(state:^Text_State) -> bool {
                     if !known {return fail(state,.Unknown_Type_Kind,start)}
                     type.named=named
                     type.first=u32(len(s.choices))
+                case "by_name":
+                    if type.named==.None {return fail(state,.Kind_First,start)}
+                    switch {
+                    case serial.text_keyword(r,"true"):  type.by_name=true
+                    case serial.text_keyword(r,"false"): type.by_name=false
+                    case: return serial.text_fail(r,.Syntax)
+                    }
                 case "choices":
                     if type.kind!=.Enum && type.kind!=.Bit_Set && type.named==.None {return fail(state,.Kind_First,start)}
                     serial.text_expect(r,'[') or_return

@@ -166,3 +166,25 @@ bench_tangents :: proc(t:^testing.T) {
         bench_report("tangents 10000 triangles",runs,time.tick_since(start),fmt.tprintf("%d corners",len(corners)))
     }
 }
+
+@(test)
+bench_polygon_convex_partition :: proc(t:^testing.T) {
+    when !GEOM_BENCH {return} else {
+        points:[100]Vec2
+        for &p,i in points[:96] {
+            s,c:=turn_sincos(f64(i)/96)
+            radius:f64=2 if i%2==0 else 1.6
+            p={f32(radius*c),f32(radius*s)}
+        }
+        copy(points[96:],[]Vec2{{-0.5,-0.5},{-0.5,0.5},{0.5,0.5},{0.5,-0.5}})
+        indices,sizes:[dynamic]u32
+        defer {delete(indices);delete(sizes)}
+        runs:=2000
+        count:=0
+        start:=time.tick_now()
+        for _ in 0..<runs {
+            clear(&indices);clear(&sizes)
+            count=polygon_convex_partition(points[:],{96,4},&indices,&sizes)
+        }
+        bench_report("convex partition of 100 points with a hole",runs,time.tick_since(start),fmt.tprintf("%d pieces",count))    }
+}

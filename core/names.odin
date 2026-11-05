@@ -1,5 +1,7 @@
 package core
 
+import "base:runtime"
+
 // Ids with names. A distinct integer type declared @(names) has as its values
 // the constants of that type the generator finds in any package of the
 // project; the code is where they are declared, and data (a scene, a setting,
@@ -7,6 +9,14 @@ package core
 // name can change without touching what was saved. @(names="PREFIX_") takes
 // the prefix off the identifiers; @(name="...") on a constant gives its name.
 // A type @(name_bits="T") is a mask whose bit i is the value i of T.
+//
+// The values of a type @(names,actions) are not constants: each library
+// declares its actions as an enum @(actions), and the generator gives the
+// members of each enum the next free values, the libraries in order (the
+// engine, the active plugins, the game). Their names are those of the
+// members, in lower case. Those numbers move when a library adds an action,
+// so saved data keeps the name of an action, and of each bit of its masks, as
+// it keeps the member of an enum.
 
 // A type @(names): where the editor declares a new value of it.
 Named_Type_Info :: struct {
@@ -15,6 +25,7 @@ Named_Type_Info :: struct {
     path:string,   // import path of its package: plugins:physics/runtime
     prefix:string, // its constants start with it
     limit:i64,     // its values are below it: what the integer holds, or the smallest mask @(name_bits) of them
+    actions:bool,  // @(names,actions): the generator numbers its values, and saved data keeps their names
 }
 
 // A constant of a type @(names).
@@ -28,6 +39,14 @@ Name_Info :: struct {
     named:bool,     // its name is a @(name="...") of the constant, not its identifier
     project:bool,   // declared by the project, which the editor may change; else by the engine or a plugin
     requires:typeid, // @(name_requires): the component an entity needs to take this value; nil: none
+}
+
+// An enum @(actions): its member i is the value base+i of the type @(names,actions).
+Actions_Info :: struct {
+    type:typeid,
+    info:^runtime.Type_Info,
+    base:i64,
+    library:string, // the package that declares it
 }
 
 // A mask of a type @(name_bits): bit i is the value i of of.
@@ -53,6 +72,15 @@ names_of :: proc(info:^World_Info,type:typeid) -> []Name_Info {
 named_type_of :: proc(info:^World_Info,type:typeid) -> ^Named_Type_Info {
     if info==nil {return nil}
     for &entry in info.named_types {
+        if entry.type==type {return &entry}
+    }
+    return nil
+}
+
+// What the World knows of an enum @(actions); nil when it is not one.
+actions_of :: proc(info:^World_Info,type:typeid) -> ^Actions_Info {
+    if info==nil {return nil}
+    for &entry in info.actions {
         if entry.type==type {return &entry}
     }
     return nil

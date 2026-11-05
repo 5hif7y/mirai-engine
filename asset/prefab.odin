@@ -781,8 +781,10 @@ registry_prefab_files :: proc(files:^Registry_Prefabs) -> Prefab_Files {
         if opened,known:=files.opened[id];known {return opened}
         a:^Asset
         if file,found:=registry_find(files.registry,id);found && file.kind==KIND_PREFAB {
+            // What the registry holds of it unsaved, else the disk.
             a=new(Asset,files.allocator)
-            if asset_load(a,registry_file_path(files.registry,file.path,context.temp_allocator),files.allocator)!=.None {
+            data,read_error:=registry_read(files.registry,file.path,files.allocator)
+            if read_error!=.None || asset_take(a,data,files.allocator)!=.None {
                 free(a,files.allocator)
                 a=nil
             }

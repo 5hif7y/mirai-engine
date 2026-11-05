@@ -431,6 +431,59 @@ migration_leaves_fields_of_another_shape_at_their_default :: proc(t:^testing.T) 
     testing.expect_value(t,out,default)
 }
 
+@(private="file") Action :: distinct u8
+@(private="file") Action_Mask :: distinct u64
+@(private="file") Team :: distinct u8
+@(private="file") Aim :: struct {action:Action,held:Action_Mask,team:Team}
+
+// The values and the bits of an integer whose numbers are generated move by
+// name, through the schema a file carries, and a full mask stays full; one
+// with fixed numbers keeps them.
+@(test)
+generated_numbers_move_by_name_and_fixed_ones_stay :: proc(t:^testing.T) {
+    saved:Schema;schema_init(&saved);defer schema_destroy(&saved)
+    saved.named=make(map[typeid]Named,context.temp_allocator)
+    saved.named[Action]={choices={{"jump",1},{"aim",2}},by_name=true}
+    saved.named[Action_Mask]={choices={{"jump",1},{"aim",2}},bits=true,by_name=true}
+    saved.named[Team]={choices={{"red",1},{"blue",2}}}
+    saved_type,_:=schema_add(&saved,Aim)
+    w:Writer;writer_init(&w);defer writer_destroy(&w)
+    schema_write(&w,&saved)
+    r:=reader_init(writer_bytes(&w))
+    stored:Schema
+    if !testing.expect_value(t,schema_read(&r,&stored),Schema_Error.None) {return}
+    defer schema_destroy(&stored)
+    action:=schema_field(&stored,saved_type,base.name_hash("action"))
+    testing.expect(t,action!=nil && stored.types[action.type].by_name)
+
+    now:Schema;schema_init(&now);defer schema_destroy(&now)
+    now.named=make(map[typeid]Named,context.temp_allocator)
+    now.named[Action]={choices={{"crouch",1},{"jump",2},{"aim",3}},by_name=true}
+    now.named[Action_Mask]={choices={{"crouch",1},{"jump",2},{"aim",3}},bits=true,by_name=true}
+    now.named[Team]={choices={{"green",1},{"red",2},{"blue",3}}}
+    now_type,_:=schema_add(&now,Aim)
+    testing.expect(t,schema_layout_hash(&stored,saved_type)!=schema_layout_hash(&now,now_type))
+    m:Migration;migration_init(&m,&stored,saved_type,&now,now_type);defer migration_destroy(&m)
+    source:=[2]Aim{{action=2,held=Action_Mask(1<<1|1<<2),team=2},{held=max(Action_Mask)}}
+    out:[2]Aim
+    value_read(&m,&out,bytes_of(&source),2)
+    testing.expect_value(t,out[0],Aim{action=3,held=Action_Mask(1<<2|1<<3),team=2})
+    testing.expect_value(t,out[1].held,max(Action_Mask))
+
+    // An action renamed in code: what was saved takes the new name and keeps
+    // its values; the names of fixed numbers and a name taken stay.
+    testing.expect_value(t,schema_choice_rename(&stored,"aim","point"),2)
+    testing.expect_value(t,schema_choice_rename(&stored,"red","green"),0)
+    testing.expect_value(t,schema_choice_rename(&stored,"jump","point"),0)
+    later:Schema;schema_init(&later);defer schema_destroy(&later)
+    later.named=make(map[typeid]Named,context.temp_allocator)
+    later.named[Action]={choices={{"jump",1},{"point",2}},by_name=true}
+    later.named[Action_Mask]={choices={{"jump",1},{"point",2}},bits=true,by_name=true}
+    later.named[Team]={choices={{"red",1},{"blue",2}}}
+    later_type,_:=schema_add(&later,Aim)
+    testing.expect_value(t,schema_layout_hash(&stored,saved_type),schema_layout_hash(&later,later_type))
+}
+
 @(test)
 paths_read_and_write_every_kind_of_field :: proc(t:^testing.T) {
     s:Schema;schema_init(&s);defer schema_destroy(&s)
@@ -598,4 +651,41 @@ references_are_found_wherever_a_type_holds_them :: proc(t:^testing.T) {
     testing.expect(t,!refs_collect(&s,many,&none,limit=63))
     clear(&none)
     testing.expect(t,refs_collect(&s,many,&none,limit=64) && len(none)==64)
+}
+
+// A value passes only with what its schema allows, and the first part that
+// does not is named by its path.
+@(test)
+value_check_names_the_first_part_its_schema_does_not_allow :: proc(t:^testing.T) {
+    Part :: struct {offset:[3]f32 `mirai:"min=-1,max=1"`,kind:Kind_V1}
+    Checked :: struct {
+        count:i32 `mirai:"min=0,max=10"`,
+        on:bool,
+        flags:bit_set[Flag_V1;u8],
+        parts:[2]Part,
+        mesh:base.Asset_Id,
+    }
+    s:Schema;schema_init(&s);defer schema_destroy(&s)
+    type,_:=schema_add(&s,Checked)
+    refuse_mesh :: proc(user:rawptr,kind:Type_Kind,ref:[]u8) -> bool {return kind!=.Asset || ref[0]==0}
+    nan:=transmute(f32)u32(0x7fc00000)
+    Case :: struct {name:string,value:Checked,fault:Value_Fault,path:string}
+    good:=Checked{count=3,on=true,flags={.Dynamic},parts={{{0,1,-1},.Sphere},{{0.5,0,0},.Box}}}
+    cases:=[]Case{
+        {"allowed",good,.None,""},
+        {"not finite",{parts={{},{{0,nan,0},.Box}}},.Not_Finite,"parts[1].offset[1]"},
+        {"over the max of an array field",{parts={{{0,0,2},.Box},{}}},.Above_Max,"parts[0].offset[2]"},
+        {"under the min of an integer",{count=-1},.Below_Min,"count"},
+        {"an enum of no value",{parts={{},{{},Kind_V1(7)}}},.Not_A_Choice,"parts[1].kind"},
+        {"a bit of no member",{flags=transmute(bit_set[Flag_V1;u8])u8(0x80)},.Not_A_Choice,"flags"},
+        {"a bool that is not 0 or 1",{on=transmute(bool)u8(2)},.Not_A_Choice,"on"},
+        {"a reference refused",{mesh={1,1}},.Refused,"mesh"},
+    }
+    path:[64]u8
+    for c in cases {
+        value:=c.value
+        problem:=value_check(&s,type,bytes_of(&value),path[:],refuse_mesh)
+        testing.expectf(t,problem.fault==c.fault && problem.path==c.path,"%s: %v at %q",c.name,problem.fault,problem.path)
+    }
+    testing.expect_value(t,value_check(&s,type,bytes_of(&good)[:4],path[:]).fault,Value_Fault.None)
 }

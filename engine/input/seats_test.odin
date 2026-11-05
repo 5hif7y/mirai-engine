@@ -8,6 +8,9 @@ import "mirai:core"
 @(private="file") TEST_MOVE :: Action(0)
 @(private="file") TEST_JUMP :: Action(2)
 
+// The values 0 to 2, as a world whose first enum @(actions) it is.
+@(private="file") Seat_Test_Action :: enum u8 {Move,Look,Jump}
+
 @(private="file")
 test_bindings :: proc() -> (bindings:Input_Map) {
     input_map_action(&bindings,TEST_JUMP,.Button)
@@ -34,8 +37,8 @@ devices_reach_each_local_player :: proc(t:^testing.T) {
     seat_feed(&first,&own,&bindings,false)
     own=slot_input(device,1,2,0)
     seat_feed(&second,&own,&bindings,false)
-    testing.expect(t,action_pressed(&first.actions,TEST_JUMP))
-    testing.expect(t,action_pressed(&second.actions,TEST_JUMP))
+    testing.expect(t,action(&first.actions,TEST_JUMP).pressed)
+    testing.expect(t,action(&second.actions,TEST_JUMP).pressed)
 }
 
 @(test)
@@ -59,7 +62,7 @@ focus_and_driving_wait_for_held_buttons :: proc(t:^testing.T) {
     state:Seats
     problems:core.Problems
     a:=Apply{es=&es,state=&state,drivables=&drivables,seats=&seats,problems=&problems}
-    read:=core.read(&seats)
+    read:=Input_Of(Seat_Test_Action){seats=core.read(&seats),drivables=core.read(&drivables)}
 
     // Space and W held while the keyboard is with the first player.
     device:=core.Input{keys_down={.Space,.W},keys_pressed={.Space,.W}}
@@ -70,48 +73,48 @@ focus_and_driving_wait_for_held_buttons :: proc(t:^testing.T) {
         }
     }
     tick(&seats,first,second,device,0,&bindings)
-    testing.expect(t,seat_pressed(read,first,TEST_JUMP))
-    testing.expect(t,!seat_down(read,second,TEST_JUMP))
+    testing.expect(t,seat_pressed(read,first,.Jump))
+    testing.expect(t,!seat_down(read,second,.Jump))
 
     // The keyboard moves to the second player: the first sees the release,
     // the second waits for it; the axis moves on at once.
     device.keys_pressed={}
     tick(&seats,first,second,device,1,&bindings,true)
-    testing.expect(t,seat_released(read,first,TEST_JUMP))
-    testing.expect(t,!seat_down(read,second,TEST_JUMP))
-    testing.expect(t,seat_vector(read,second,TEST_MOVE)==[2]f32{0,1})
+    testing.expect(t,seat_released(read,first,.Jump))
+    testing.expect(t,!seat_down(read,second,.Jump))
+    testing.expect(t,seat_vector(read,second,.Move)==[2]f32{0,1})
 
     device={keys_released={.Space,.W}}
     tick(&seats,first,second,device,1,&bindings)
     device={keys_down={.Space},keys_pressed={.Space}}
     tick(&seats,first,second,device,1,&bindings)
-    testing.expect(t,seat_pressed(read,second,TEST_JUMP))
+    testing.expect(t,seat_pressed(read,second,.Jump))
 
     // Driving a body while jump is held: it waits for its release.
     device.keys_pressed={}
     tick(&seats,first,second,device,1,&bindings)
     request_apply(&a,{kind=.Drive,seat=second,entity=body})
     testing.expect(t,seat_of(core.read(&drivables),body)==second)
-    testing.expect(t,!seat_down(read,second,TEST_JUMP))
+    testing.expect(t,!seat_down(read,second,.Jump))
     device={keys_released={.Space}}
     tick(&seats,first,second,device,1,&bindings)
     device={keys_down={.Space},keys_pressed={.Space}}
     tick(&seats,first,second,device,1,&bindings)
-    testing.expect(t,seat_pressed(read,second,TEST_JUMP))
+    testing.expect(t,seat_pressed(read,second,.Jump))
 
     // A block takes the action; once given back, the held button waits for its release.
     request_apply(&a,{kind=.Block_Add,owner=body,seat=second,mask=ALL_ACTIONS})
     blocks_apply(&seats,&state)
-    testing.expect(t,!seat_down(read,second,TEST_JUMP))
-    testing.expect(t,!pressed(Players{read,core.read(&drivables)},body,TEST_JUMP))
+    testing.expect(t,!seat_down(read,second,.Jump))
+    testing.expect(t,!pressed(read,body,.Jump))
     request_apply(&a,{kind=.Block_Remove,owner=body})
     blocks_apply(&seats,&state)
-    testing.expect(t,!seat_down(read,second,TEST_JUMP))
+    testing.expect(t,!seat_down(read,second,.Jump))
     device={keys_released={.Space}}
     tick(&seats,first,second,device,1,&bindings)
     device={keys_down={.Space},keys_pressed={.Space}}
     tick(&seats,first,second,device,1,&bindings)
-    testing.expect(t,pressed(Players{read,core.read(&drivables)},body,TEST_JUMP))
+    testing.expect(t,pressed(read,body,.Jump))
     testing.expect_value(t,problems.count,0)
 }
 
@@ -135,7 +138,7 @@ a_block_of_no_seat_takes_every_local_seat :: proc(t:^testing.T) {
     state:Seats
     problems:core.Problems
     a:=Apply{es=&es,state=&state,drivables=&drivables,seats=&seats,problems=&problems}
-    read:=core.read(&seats)
+    read:=Input_Of(Seat_Test_Action){seats=core.read(&seats),drivables=core.read(&drivables)}
     blocked :: proc(seats:^core.Table(Seat),e:core.Entity) -> Action_Mask {return seats.values[core.row_of(seats,e)].blocked}
     device:=core.Input{keys_down={.Space},keys_pressed={.Space}}
     seat_feed(core.get(&seats,first),&device,&bindings,false)
@@ -144,11 +147,11 @@ a_block_of_no_seat_takes_every_local_seat :: proc(t:^testing.T) {
     testing.expect(t,blocking(&state,menu))
     testing.expect(t,blocked(&seats,first)==ALL_ACTIONS && blocked(&seats,second)==ALL_ACTIONS)
     testing.expect_value(t,blocked(&seats,remote),Action_Mask(0))
-    testing.expect(t,!seat_down(read,first,TEST_JUMP))
+    testing.expect(t,!seat_down(read,first,.Jump))
     // Given back, the button held through the block waits for its release.
     request_apply(&a,{kind=.Block_Remove,owner=menu})
     blocks_apply(&seats,&state)
-    testing.expect(t,blocked(&seats,first)==0 && !seat_down(read,first,TEST_JUMP))
+    testing.expect(t,blocked(&seats,first)==0 && !seat_down(read,first,.Jump))
     // The owner goes: so does its block.
     request_apply(&a,{kind=.Block_Add,owner=menu,mask=ALL_ACTIONS})
     core.destroy(&es,menu)

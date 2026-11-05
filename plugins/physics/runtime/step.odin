@@ -337,6 +337,7 @@ characters_seen :: proc(characters:core.Read(Character)) -> (seen:u64) {
         for field in ([9]f32{c.mass,c.max_slope,c.step_height,c.traction_force,c.adhesion_force,c.gravity_scale,c.push_force,c.density,c.up_speed}) {
             seen=(seen~u64(transmute(u32)field))*0x100000001b3
         }
+        seen=(seen~u64(transmute(u8)c.locks))*0x100000001b3
     }
     return
 }
@@ -501,7 +502,7 @@ body_sync :: proc(s:^Sync,e:core.Entity,l:^Link,rigid:Rigid_Body,has_rigid:bool,
         if l.shape!={} {
             sim.shape_destroy(w,l.shape)
             l.shape={}
-            state.stats.shapes_destroyed+=1
+            state.stats.shapes_destroyed+=1+pieces_shapes_destroy(s,l)
             mass_changed=true
         }
         geometry_release(s,l)
@@ -515,30 +516,16 @@ body_sync :: proc(s:^Sync,e:core.Entity,l:^Link,rigid:Rigid_Body,has_rigid:bool,
             l.shown=shown
             changed=false
         }
-        if changed || l.shape!={} && !sim.shape_valid(w,l.shape) {
+        if changed || link_shapes_lost(s,l) {
             if l.shape!={} {
                 sim.shape_destroy(w,l.shape)
-                state.stats.shapes_destroyed+=1
+                state.stats.shapes_destroyed+=1+pieces_shapes_destroy(s,l)
             }
             geometry_release(s,l)
-            desc:=collider_desc(collider,scale,filter,e)
-            failure:=collider_round_fits(collider,scale)?Shape_Failure.None:.Convex_Radius
-            if failure==.None && (collider.kind==.Hull || collider.kind==.Mesh || collider.kind==.Heightfield) {
-                origin:[3]f32
-                desc.geometry,origin,failure=collider_geometry(s,l,collider.kind,e,scale,desc.convex_radius)
-                desc.transform.p+=origin
-            }
-            l.shape=failure==.None?sim.shape_create(w,l.body,desc):{}
-            if l.shape=={} {
-                geometry_release(s,l)
-                shape_problem(s,e,collider,failure==.None?.Shapes:failure)
-            } else {state.stats.shapes_created+=1}
+            if failure:=collider_shapes_make(s,l,e,l.body,collider,scale,filter);failure!=.None {shape_problem(s,e,collider,failure)}
             l.has_collider,l.scale,l.shown=true,scale,shown
             mass_changed=true
-        } else {
-            if l.filter!=filter {sim.shape_set_filter(w,l.shape,filter)}
-            if !collider_surface_same(l.collider,collider) {surface_set(w,l.shape,collider)}
-        }
+        } else {shapes_restyle(s,l,collider,filter)}
         l.collider,l.filter=collider,filter
     }
     if mass_changed {body_mass_update(w,l.body,rigid,has_rigid)}
@@ -610,9 +597,8 @@ compound_sync :: proc(s:^Sync,e:core.Entity,l:^Link,collider:Collider,owner:core
         l.shown=shown
         changed=false
     }
-    if !changed && (l.shape=={} || sim.shape_valid(w,l.shape)) {
-        if l.filter!=filter {sim.shape_set_filter(w,l.shape,filter)}
-        if !collider_surface_same(l.collider,collider) {surface_set(w,l.shape,collider)}
+    if !changed && !link_shapes_lost(s,l) {
+        shapes_restyle(s,l,collider,filter)
         l.collider,l.filter=collider,filter
         return
     }
@@ -620,20 +606,9 @@ compound_sync :: proc(s:^Sync,e:core.Entity,l:^Link,collider:Collider,owner:core
         sim.shape_destroy(w,l.shape)
         state.stats.shapes_destroyed+=1
     }
+    state.stats.shapes_destroyed+=pieces_shapes_destroy(s,l)
     geometry_release(s,l)
-    desc:=collider_desc(collider,scale,filter,e)
-    failure:=collider_round_fits(collider,scale)?Shape_Failure.None:.Convex_Radius
-    if failure==.None && (collider.kind==.Hull || collider.kind==.Mesh || collider.kind==.Heightfield) {
-        origin:[3]f32
-        desc.geometry,origin,failure=collider_geometry(s,l,collider.kind,e,scale,desc.convex_radius)
-        desc.transform.p+=origin
-    }
-    desc.transform={relative.position+mm.quat_rotate(relative.rotation,desc.transform.p),relative.rotation}
-    l.shape=failure==.None?sim.shape_create(w,holder.body,desc):{}
-    if l.shape=={} {
-        geometry_release(s,l)
-        shape_problem(s,e,collider,failure==.None?.Shapes:failure)
-    } else {state.stats.shapes_created+=1}
+    if failure:=collider_shapes_make(s,l,e,holder.body,collider,scale,filter,&relative);failure!=.None {shape_problem(s,e,collider,failure)}
     l.kind,l.owner,l.body=.Compound,owner,holder.body
     l.has_collider,l.collider,l.filter,l.scale,l.relative,l.shown=true,collider,filter,scale,relative,shown
     body_mass_update(w,holder.body,holder.rigid,holder.has_rigid)
@@ -671,9 +646,13 @@ link_release :: proc(s:^Sync,l:^Link) {
     switch l.kind {
     case .None,.Proxy:
     case .Compound:
+        destroyed:=pieces_shapes_destroy(s,l)
         if sim.shape_valid(w,l.shape) {
             sim.shape_destroy(w,l.shape)
-            state.stats.shapes_destroyed+=1
+            destroyed+=1
+        }
+        state.stats.shapes_destroyed+=destroyed
+        if destroyed>0 {
             if holder:=link_find(state,l.owner);holder!=nil && holder.kind==.Body {body_mass_update(w,holder.body,holder.rigid,holder.has_rigid)}
         }
         geometry_release(s,l)
@@ -682,7 +661,7 @@ link_release :: proc(s:^Sync,l:^Link) {
         if sim.body_valid(w,l.body) {
             sim.body_destroy(w,l.body)
             state.stats.bodies_destroyed+=1
-            if l.shape!={} {state.stats.shapes_destroyed+=1}
+            if l.shape!={} {state.stats.shapes_destroyed+=1+u64(l.pieces.count)}
         }
         geometry_release(s,l)
     case .Character:
@@ -754,6 +733,7 @@ character_sync :: proc(s:^Sync,e:core.Entity,l:^Link,config:Character,capsule:Co
     local,has_local:=core.get(s.locals,e)
     if l.kind==.Character && sim.character_valid(w,l.character) && character_shape_same(l,config,capsule,scale) {
         if !character_body_same(l.config,config) || l.collider.drag!=capsule.drag {sim.character_set_desc(w,l.character,desc)}
+        if l.config.locks!=config.locks {sim.character_set_locks(w,l.character,body_locks(config.locks))}
         if l.filter!=filter {sim.character_set_filter(w,l.character,filter)}
         if !collider_surface_same(l.collider,capsule) {surface_set(w,sim.character_shape(w,l.character),capsule)}
         l.config,l.collider,l.filter=config,capsule,filter
@@ -801,6 +781,7 @@ character_sync :: proc(s:^Sync,e:core.Entity,l:^Link,config:Character,capsule:Co
         return
     }
     state.stats.characters_created+=1
+    if config.locks!={} {sim.character_set_locks(w,l.character,body_locks(config.locks))}
     if !collider_surface_same({},capsule) {surface_set(w,sim.character_shape(w,l.character),capsule)}
     if linear,_:=made_velocity(s,e);linear!={} {
         sim.body_set_linear_velocity(w,sim.character_body(w,l.character),linear)
@@ -869,6 +850,82 @@ collider_desc :: proc "contextless" (collider:Collider,scale:[3]f32,filter:sim.F
     desc.surface_speed,desc.one_way,desc.dominance=collider.surface_speed,collider.one_way,collider.dominance
     desc.drag=collider.drag
     return desc
+}
+
+// Makes the shapes of a collider on body: one, or one per convex piece of a Hull whose mesh has several, all
+// alike but for their hull. Those of a compound go where relative puts the entity. Nothing stays made when
+// one fails.
+@(private)
+collider_shapes_make :: proc(s:^Sync,l:^Link,e:core.Entity,body:sim.Body_Handle,collider:Collider,scale:[3]f32,filter:sim.Filter,relative:^mm.Transform=nil) -> Shape_Failure {
+    state:=s.state
+    w:=&state.world
+    desc:=collider_desc(collider,scale,filter,e)
+    failure:=collider_round_fits(collider,scale)?Shape_Failure.None:.Convex_Radius
+    pieces:bool
+    if failure==.None && collider.kind==.Hull {
+        pieces,failure=collider_pieces_make(s,l,e,scale,desc.convex_radius)
+        if pieces {desc.geometry=l.hull}
+    }
+    if failure==.None && !pieces && (collider.kind==.Hull || collider.kind==.Mesh || collider.kind==.Heightfield) {
+        origin:[3]f32
+        desc.geometry,origin,failure=collider_geometry(s,l,collider.kind,e,scale,desc.convex_radius)
+        desc.transform.p+=origin
+    }
+    if relative!=nil {desc.transform={relative.position+mm.quat_rotate(relative.rotation,desc.transform.p),relative.rotation}}
+    l.shape=failure==.None?sim.shape_create(w,body,desc):{}
+    if failure==.None && l.shape=={} {failure=.Shapes}
+    for &piece in pieces_of(state,l) {
+        if failure!=.None {break}
+        desc.geometry=piece.hull
+        piece.shape=sim.shape_create(w,body,desc)
+        if piece.shape=={} {failure=.Shapes}
+    }
+    if failure!=.None {
+        if l.shape!={} {sim.shape_destroy(w,l.shape)}
+        l.shape={}
+        pieces_shapes_destroy(s,l)
+        geometry_release(s,l)
+        return failure
+    }
+    state.stats.shapes_created+=1+u64(l.pieces.count)
+    return .None
+}
+
+// Destroys the shapes of the pieces after the first of a link: how many there were.
+@(private)
+pieces_shapes_destroy :: proc(s:^Sync,l:^Link) -> (count:u64) {
+    w:=&s.state.world
+    for &piece in pieces_of(s.state,l) {
+        if sim.shape_valid(w,piece.shape) {
+            sim.shape_destroy(w,piece.shape)
+            count+=1
+        }
+        piece.shape={}
+    }
+    return
+}
+
+// A shape of the link is gone from the simulation without the link letting it go.
+@(private)
+link_shapes_lost :: proc(s:^Sync,l:^Link) -> bool {
+    w:=&s.state.world
+    if l.shape!={} && !sim.shape_valid(w,l.shape) {return true}
+    for piece in pieces_of(s.state,l) {
+        if !sim.shape_valid(w,piece.shape) {return true}
+    }
+    return false
+}
+
+// Gives the shapes of a link the filter and the surface of its collider.
+@(private)
+shapes_restyle :: proc(s:^Sync,l:^Link,collider:Collider,filter:sim.Filter) {
+    w:=&s.state.world
+    restyle :: proc(w:^sim.World,l:^Link,shape:sim.Shape_Handle,collider:Collider,filter:sim.Filter) {
+        if l.filter!=filter {sim.shape_set_filter(w,shape,filter)}
+        if !collider_surface_same(l.collider,collider) {surface_set(w,shape,collider)}
+    }
+    restyle(w,l,l.shape,collider,filter)
+    for piece in pieces_of(s.state,l) {restyle(w,l,piece.shape,collider,filter)}
 }
 
 // Whether two colliders give their contacts the same rules; a change is applied to the shape as it is.

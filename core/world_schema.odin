@@ -137,11 +137,12 @@ schema_named :: proc(s:^serial.Schema,info:^World_Info,allocator:=context.alloca
         type:=info.names[i].type
         end:=i
         for end<len(info.names) && info.names[end].type==type {end+=1}
-        s.named[type]={choices=choices[i:end]}
+        t:=named_type_of(info,type)
+        s.named[type]={choices=choices[i:end],by_name=t!=nil && t.actions}
         i=end
     }
     for mask in info.name_bits {
-        if values,found:=s.named[mask.of];found {s.named[mask.type]={choices=values.choices,bits=true}}
+        if values,found:=s.named[mask.of];found {s.named[mask.type]={choices=values.choices,bits=true,by_name=values.by_name}}
     }
     return choices,true
 }

@@ -18,8 +18,9 @@ to `SCHEMA_MAX_DEPTH`), that fields follow one another without overlapping insid
 sizes and choices are those of real types (up to `SCHEMA_MAX_SIZE`) and that a 0-byte struct or
 element has no fields: an accepted schema can be walked with values of the declared size without
 leaving them. A schema read and written again gives the same bytes: the high nibble of the type
-byte keeps how an integer names its values or its bits (`Named_Kind`), with its choices, and an
-empty list of fields or choices is written as 0, wherever it points.
+byte keeps how an integer names its values or its bits (`Named_Kind`) and whether it moves by
+them (`by_name`), with its choices, and an empty list of fields or choices is written as 0,
+wherever it points.
 
 **Out of memory.** It is distinguished from an invalid file, so a load can be retried.
 `schema_read`, `schema_validate` and `migration_init` return `Out_Of_Memory` and free what is
@@ -52,6 +53,9 @@ copied as a block or used in place.
 - Enums and bit sets go by member name: a member the destination does not have leaves the default
   (enum) or is discarded (bit set). An integer is converted to the enum with that value, if it
   exists.
+- An integer with names keeps its number, and its names are not its layout, unless its numbers are
+  generated (`by_name`, the input actions and their masks): then its names are its layout and it
+  goes by name like an enum or a bit set; a mask with every bit set (all the actions) stays full.
 - Arrays keep the elements both lengths have. A text keeps the bytes that fit and the rest is left
   at zero.
 - Incompatible shapes (struct against scalar, array against scalar, `Asset` against something else)
@@ -59,6 +63,11 @@ copied as a block or used in place.
 
 **Paths.** `"a.b[2].c"`; the name after a bit set is a member (bool). A text value is the member of
 an enum or the text of a text field. `value_set` requires the number to fit exactly.
+
+**Checking a value.** `value_check` names, by its path, the first part of a value the schema does
+not allow: a float that is not finite, a number outside the `min`/`max` of its field (each element
+of an array field), a bool, enum or bit set with no value of its type, or a reference its visitor
+refuses. Whoever takes values from outside (an untrusted scene) checks them with it, after reading.
 
 **Text.**
 

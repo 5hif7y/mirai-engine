@@ -79,6 +79,8 @@ Assets_Mesh :: struct {
     generated:bool, // made by assets_mesh_generate: it has no file
     collision:geom.Mesh,
     disabled_edges:[]u8,
+    hull_points:[]geom.Vec3, // the convex pieces of a generated mesh, as Mesh_Generate_Options gives them
+    hull_sizes:[]u32,
     heightfield:Assets_Heightfield,
 }
 
@@ -96,6 +98,10 @@ Mesh_Generate_Options :: struct {
     heightfield:^Assets_Heightfield,
     disabled_edges:[]u8, // per triangle of what collides
     collision_mesh:geom.Mesh, // what colliders and picking take instead of the mesh drawn; empty: the mesh
+    // The convex pieces a Hull collider of the mesh is made of, each a body shape of its own: the points of
+    // every piece one after another, in mesh space, and how many each has (at least 4). Empty: one hull.
+    hull_points:[]geom.Vec3,
+    hull_sizes:[]u32,
     tangents:[][4]f32, // one per vertex, with the sign of the bitangent in w, as MikkTSpace gives them; empty: MikkTSpace's over the uvs
     render_geometry:^Mesh_Render_Geometry, // what assets_render_geometry_make made of the mesh ahead; nil: made here
 }
@@ -311,8 +317,37 @@ assets_destroy :: proc(a:^Assets) {
 assets_scan :: proc(a:^Assets) -> bool {return a.indexed || asset.registry_scan(&a.registry)==.None}
 
 // Looks again at some files of the folder, by their paths in the registry:
-// the ones that were written or that a watch saw change.
-assets_refresh :: proc(a:^Assets,paths:[]string) -> bool {return a.indexed || asset.registry_refresh(&a.registry,paths)==.None}
+// the ones that were written or that a watch saw change. With a packed index,
+// only those of folders assets_mount mounted.
+assets_refresh :: proc(a:^Assets,paths:[]string) -> bool {
+    if !a.indexed {return asset.registry_refresh(&a.registry,paths)==.None}
+    guests:=make([dynamic]string,0,len(paths),context.temp_allocator)
+    for path in paths {
+        if asset.registry_guest(&a.registry,path) {append(&guests,path)}
+    }
+    return len(guests)==0 || asset.registry_refresh(&a.registry,guests[:])==.None
+}
+
+// Mounts under prefix a folder of assets the game did not ship: levels a
+// player saved or downloaded, mods. Its files are found by id and by path at
+// once, also in a shipped game; one whose id the game or an earlier mount
+// already has is left out (refused counts those of this folder, and
+// registry.refused lists them all). It is not watched: whoever writes in it
+// calls assets_refresh with those paths. Not_Found without the folder; Invalid
+// for a prefix that is not a plain relative path, or that the assets or another
+// mount already take.
+assets_mount :: proc(a:^Assets,folder,prefix:string) -> (refused:int,error:asset.Error) {
+    if a==nil || a.allocator.procedure==nil {return 0,.Invalid}
+    return asset.registry_mount_guest(&a.registry,folder,prefix)
+}
+
+// Takes out of the registry a folder assets_mount mounted. What was loaded from
+// it stays until no world names it and assets_collect unloads it; loading it
+// again does not find it. Not_Found for a prefix no assets_mount gave.
+assets_unmount :: proc(a:^Assets,prefix:string) -> asset.Error {
+    if a==nil || a.allocator.procedure==nil {return .Invalid}
+    return asset.registry_unmount(&a.registry,prefix)
+}
 
 // The files of the folder changed in memory and not written: what an editor
 // has unsaved (asset.Registry_Memory). Assets read them instead of the disk.
@@ -407,17 +442,28 @@ assets_file :: proc(a:^Assets,id:base.Asset_Id,kind:asset.Fourcc,file:^asset.Ass
     record,found:=asset.registry_find(&a.registry,id)
     if !found {return .Not_Found}
     if record.kind!=kind {return .Invalid}
-    data:=asset.registry_read(&a.registry,record.path,a.allocator) or_return
-    assets_file_take(file,data,id,kind,a.allocator) or_return
+    limit:=assets_byte_limit(a,record.path)
+    data:=asset.registry_read(&a.registry,record.path,a.allocator,limit) or_return
+    assets_file_take(file,data,id,kind,a.allocator,limit) or_return
     a.stats.loads+=1
     return .None
+}
+
+// What a file of a guest mount (assets_mount) may take, read or decompressed:
+// what a player downloaded is refused before it takes the memory of the game.
+ASSETS_GUEST_LIMIT :: 64<<20
+
+// The most the file of an asset may take: less under a guest mount.
+@(private="file")
+assets_byte_limit :: proc(a:^Assets,path:string) -> u64 {
+    return asset.registry_guest(&a.registry,path)?ASSETS_GUEST_LIMIT:asset.DEFAULT_MEMORY_LIMIT
 }
 
 // Opens the bytes of the file of an asset, which it takes: whole, matching its
 // hash, its id and its kind. Any thread.
 @(private="file")
-assets_file_take :: proc(file:^asset.Asset,data:[]u8,id:base.Asset_Id,kind:asset.Fourcc,allocator:mem.Allocator) -> asset.Error {
-    asset.asset_take(file,data,allocator) or_return
+assets_file_take :: proc(file:^asset.Asset,data:[]u8,id:base.Asset_Id,kind:asset.Fourcc,allocator:mem.Allocator,limit:u64) -> asset.Error {
+    asset.asset_take(file,data,allocator,limit) or_return
     if !asset.blob_verify_hash(&file.blob) || file.blob.header.id!=id || file.blob.header.kind!=kind {
         asset.asset_close(file)
         return .Hash
@@ -435,6 +481,7 @@ Assets_Source :: struct {
     path:string,
     data:[]u8,
     allocator:mem.Allocator, // of path and data: one any thread can use
+    limit:u64,               // the most its file may take; 0: asset.DEFAULT_MEMORY_LIMIT
 }
 
 // The source of an asset of the registry; false when the registry has none.
@@ -442,7 +489,7 @@ Assets_Source :: struct {
 assets_source :: proc(a:^Assets,id:base.Asset_Id,allocator:mem.Allocator) -> (source:Assets_Source,found:bool) {
     record:=asset.registry_find(&a.registry,id) or_return
     if record.state!=.Asset {return}
-    source={id=id,kind=record.kind,hash=record.content_hash,allocator=allocator}
+    source={id=id,kind=record.kind,hash=record.content_hash,allocator=allocator,limit=assets_byte_limit(a,record.path)}
     if held,in_memory:=asset.registry_memory_find(&a.registry,record.path);in_memory {
         if held.removed {return {},false}
         data,error:=asset.asset_bytes_clone(held.data,allocator)
@@ -459,8 +506,9 @@ assets_source :: proc(a:^Assets,id:base.Asset_Id,allocator:mem.Allocator) -> (so
 assets_source_open :: proc(source:^Assets_Source,file:^asset.Asset) -> asset.Error {
     data:=source.data
     source.data=nil
-    if data==nil {data=asset.asset_file_read(source.path,source.allocator) or_return}
-    return assets_file_take(file,data,source.id,source.kind,source.allocator)
+    limit:=source.limit!=0?source.limit:asset.DEFAULT_MEMORY_LIMIT
+    if data==nil {data=asset.asset_file_read(source.path,source.allocator,limit) or_return}
+    return assets_file_take(file,data,source.id,source.kind,source.allocator,limit)
 }
 
 assets_source_free :: proc(source:^Assets_Source) {
@@ -648,6 +696,15 @@ assets_mesh_generate :: proc(a:^Assets,mesh:geom.Mesh,slot_materials:[]base.Asse
     }
     if len(options.disabled_edges)!=0 && len(options.disabled_edges)!=len(collides.indices)/3 {return}
     for mask in options.disabled_edges {if mask&~u8(7)!=0 {return}}
+    pieces_total:=0
+    for size in options.hull_sizes {
+        if size<4 || int(size)>len(options.hull_points)-pieces_total {return}
+        pieces_total+=int(size)
+    }
+    if pieces_total!=len(options.hull_points) {return}
+    for point in options.hull_points {
+        for value in point {if value-value!=0 {return}}
+    }
     if field:=options.heightfield;field!=nil {
         if field.columns<2 || field.rows<2 || field.columns>max(int)/field.rows || len(field.heights)!=field.columns*field.rows {return}
         if len(field.disabled_borders)!=0 && len(field.disabled_borders)!=2*(field.rows-1)+2*(field.columns-1) {return}
@@ -684,6 +741,13 @@ assets_mesh_generate :: proc(a:^Assets,mesh:geom.Mesh,slot_materials:[]base.Asse
         materials:=collides.materials if slots>0 else nil
         if held.materials,usable=cloned(materials,len(collides.indices)/3,a.allocator);!usable {return}
         if entry.disabled_edges,usable=cloned(options.disabled_edges,len(options.disabled_edges),a.allocator);!usable {return}
+    }
+    if len(options.hull_sizes)>0 {
+        error:mem.Allocator_Error
+        if entry.hull_points,error=make([]geom.Vec3,len(options.hull_points),a.allocator);error!=nil {return}
+        if entry.hull_sizes,error=make([]u32,len(options.hull_sizes),a.allocator);error!=nil {return}
+        copy(entry.hull_points,options.hull_points)
+        copy(entry.hull_sizes,options.hull_sizes)
     }
     if field:=options.heightfield;field!=nil {
         values,error:=make([]f32,len(field.heights),a.allocator)
@@ -885,7 +949,9 @@ assets_generated_free :: proc(mesh:^Assets_Mesh,a:mem.Allocator) {
     delete(mesh.heightfield.disabled_borders,a)
     delete(mesh.heightfield.holes,a)
     delete(mesh.disabled_edges,a)
+    delete(mesh.hull_points,a);delete(mesh.hull_sizes,a)
     mesh.collision,mesh.heightfield={},{}
+    mesh.hull_points,mesh.hull_sizes=nil,nil
 }
 
 assets_mesh_generated :: proc(a:^Assets,id:base.Asset_Id) -> bool {

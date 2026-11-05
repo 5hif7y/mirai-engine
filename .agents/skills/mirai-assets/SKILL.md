@@ -78,6 +78,8 @@ The packages are `std/serial` (streams, LZ4, schemas, migration, paths, JSON) an
 - **Atomic writing.** `document_save` and `scene_save` write a temporary and rename;
   `mirai asset set` does not leave the file half-written if a value is invalid.
 - **A scene is one file**, not one per entity.
+- **A guest mount never takes an id the registry has**: what the program shipped wins over what a
+  player adds ([guest mounts](references/formats.md#registry)).
 
 ## Verification
 

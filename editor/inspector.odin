@@ -13,6 +13,7 @@ import "mirai:core"
 import eaudio "mirai:engine/audio"
 import evolume "mirai:engine/volume"
 import erender "mirai:engine/render"
+import input "mirai:engine/input"
 import scene "mirai:engine/scene"
 import "mirai:host"
 import "mirai:std/base"
@@ -1423,7 +1424,8 @@ named_row :: proc(c:^Inspect,info:^runtime.Type_Info,label:string,offset:uintptr
                 write(c,info,offset,value)
             } else {notify(s,names_error_text(error,type.name,created))}
         }
-        if selected>=0 && names[selected].project && ui.button(ctx,ui.id(ctx,"rename_value",int(offset)+1),{icon=.Edit,style=.Ghost,width=th.row,height=th.row}).clicked {
+        // An input action is renamed in code; names.rename then follows it.
+        if selected>=0 && names[selected].project && info.id!=input.Action &&ui.button(ctx,ui.id(ctx,"rename_value",int(offset)+1),{icon=.Edit,style=.Ghost,width=th.row,height=th.row}).clicked {
             ins.naming,ins.naming_request=key,true
         }
     }

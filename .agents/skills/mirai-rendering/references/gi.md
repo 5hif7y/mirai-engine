@@ -269,8 +269,10 @@ absorption and a tent-shaped ozone layer. The world is flat and horizontal at th
     only with the air (`air_frame`).
   - The sky around the eye, one row per window view (texture views use that of the first), with
     u the angle to the sun around the vertical and v the zenith with more texels at the horizon;
-    it includes the lit planet ground below the horizon. It changes with the eye altitude, the sun
-    height and the air (`air_view`).
+    it includes the lit planet ground below the horizon. It changes with the sun height, the air
+    and an eye that moves up or down past `AIR_SKY_ALTITUDE_TOLERANCE` from where it was computed
+    (`air_view`); within it the row is read with the current altitude, so the horizon follows the
+    eye.
   - Every value is for a sun of illuminance 1 over the air: the illuminance scales it when
     reading it, so an intensity change recomputes nothing.
 - **Sun.** `Sun.illuminance` remains what reaches the ground with the sun overhead: above the air

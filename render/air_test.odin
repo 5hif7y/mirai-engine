@@ -205,6 +205,13 @@ the_air_draws_the_same_while_nothing_changes_and_follows_the_sun :: proc(t: ^tes
 	second := hdr_view(t, &f)
 	testing.expect(t, mem.compare(mem.slice_to_bytes(first), mem.slice_to_bytes(second)) == 0, "a frame where nothing changed is the same")
 	testing.expect(t, r.air.rows[0] == row && r.targets.aerial_key == key, "and computes no table again")
+	near, far := LEVEL, LEVEL
+	near.position.y += AIR_SKY_ALTITUDE_TOLERANCE * 0.5
+	far.position.y += AIR_SKY_ALTITUDE_TOLERANCE * 2
+	testing.expect(t, renderer_frame(r, {camera = near}), r.error)
+	testing.expectf(t, r.air.rows[0] == row, "an eye that rises within the tolerance keeps its sky: %v", r.air.rows[0])
+	testing.expect(t, renderer_frame(r, {camera = far}), r.error)
+	testing.expectf(t, r.air.rows[0].altitude != row.altitude, "and one that rises past it draws its sky again: %v", r.air.rows[0])
 	scene_set_environment(r, sun_at(30), AIR_SKY)
 	testing.expect(t, renderer_frame(r, {camera = LEVEL}), r.error)
 	testing.expectf(t, r.air.rows[0].sun != row.sun, "a sun that moves draws its sky again: %v", r.air.rows[0])

@@ -810,7 +810,7 @@ refusal_report :: proc(problems:^core.Problems,e:core.Entity,refused:Net_Terrain
 terrain_net_send :: proc(
     authority:core.Ref(core.Network),n:^Terrain_Net,state:^Terrain_Net_World,time:core.Time,outbox:^multiplayer.Net_Outbox,
     connections:core.Ref(multiplayer.Net_Connections),replayed:core.Ref(terrain.Terrain_Replay_Events),data:core.Ref(terrain.Terrain_Data),
-    net_settings:core.Ref(multiplayer.Net_Settings),session:core.Ref(multiplayer.Net_Session),root:core.Ref(scene.Scene_Root),
+    session:core.Ref(multiplayer.Net_Session),root:core.Ref(scene.Scene_Root),
 ) {
     if n==nil {return}
     net_world(n,root)
@@ -884,7 +884,7 @@ terrain_net_send :: proc(
             }
         }
     }
-    if !time.resimulating {net_prune(n,time,net_settings)}
+    if !time.resimulating {net_prune(n,time,session)}
 }
 
 @(private)
@@ -907,9 +907,9 @@ prediction_keep :: proc(n:^Terrain_Net,state:^Terrain_Net_World,p:Net_Prediction
 
 // Client: what no correction can go back to any more.
 @(private)
-net_prune :: proc(n:^Terrain_Net,time:core.Time,net_settings:core.Ref(multiplayer.Net_Settings)) {
+net_prune :: proc(n:^Terrain_Net,time:core.Time,session:core.Ref(multiplayer.Net_Session)) {
     keep:=u64(NET_KEEP_TICKS)
-    if net_settings.ptr!=nil {keep=max(keep,u64(net_settings.history))}
+    keep=max(keep,u64(multiplayer.session_history(session)))
     keep+=2
     old :: proc(placed,tick,keep:u64) -> bool {return placed!=0 && placed+keep<tick+1}
     for &src in n.sources {

@@ -9,15 +9,17 @@ import mm "mirai:std/math"
 
 @(private="file")
 rewind_put :: proc(history:^Rewind_History,tick:u64,poses:..Rewind_Pose) {
-    frame:=&history.frames[tick%REWIND_TICKS]
+    frame:=&history.frames[tick%u64(len(history.frames))]
     frame.tick,frame.count=tick,len(poses)
     copy(frame.poses[:],poses)
 }
 
 @(test)
 rewind_pose_interpolates_between_ticks_and_not_across_a_teleport :: proc(t:^testing.T) {
+    slots:=u64(31)
     history:=new(Rewind_History)
-    defer free(history)
+    history.frames,history.allocator=make([]Rewind_Frame,slots),context.allocator
+    defer {rewind_free(history);free(history)}
     runner,other:=core.Entity(5),core.Entity(9)
     turned:=mm.quat_axis_angle({0,1,0},1)
     rewind_put(history,100,{runner,{0,0,0},1},{other,{9,0,0},1})
@@ -44,10 +46,10 @@ rewind_pose_interpolates_between_ticks_and_not_across_a_teleport :: proc(t:^test
     _,_,ok=rewind_pose(history,other,102)
     testing.expect(t,!ok)
     // A tick the ring wrote over is gone.
-    rewind_put(history,100+REWIND_TICKS,{runner,{7,0,0},1})
+    rewind_put(history,100+slots,{runner,{7,0,0},1})
     _,_,ok=rewind_pose(history,runner,100)
     testing.expect(t,!ok)
-    position,_,ok=rewind_pose(history,runner,f64(100+REWIND_TICKS))
+    position,_,ok=rewind_pose(history,runner,f64(100+slots))
     testing.expect(t,ok && position=={7,0,0})
 }
 
@@ -93,7 +95,7 @@ interpolate_others_shows_bodies_of_others_in_the_past :: proc(t:^testing.T) {
         f.app={info=&f.info,allocator=context.allocator,tick_dt=1.0/60,shared=&f.shared}
         net_test_physics(&f.world,&f.shared,&f.app)
         if testing.expect(t,wire.sim_network_init(&f.network,{seed=31,endpoints=2,packets=64})) &&
-           testing.expect(t,net_test_session(&f.session,&f.world,&f.info,&f.app,&f.network,1,.Client,settings={max_objects=8,predicted_capacity=8,history=32,interpolate_others=case_.others})) {
+           testing.expect(t,net_test_session(&f.session,&f.world,&f.info,&f.app,&f.network,1,.Client,settings={max_objects=8,predicted_capacity=8,replication={history_seconds=0.5},interpolate_others=case_.others})) {
             f.shared.session=&f.session
             r:=net_test_replica(&f.session,core.world_ref(&f.world,&f.info),f.e,case_.role,.Server)
             testing.expectf(t,r.mode==case_.mode,"interpolate_others %v, role %v: %v, not %v",case_.others,case_.role,r.mode,case_.mode)

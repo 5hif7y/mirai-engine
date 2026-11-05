@@ -228,6 +228,8 @@ time_read :: proc(h:^Host,p:^Peer,rd:^serial.Bit_Reader,late:=false) -> bool {
         state_read(rd,&protocol.input,protocol.input.all,current,i==0?nil:previous) or_return
         copy(previous,current)
         if pr.input_any && i32(tick-pr.input_newest)<=0 {continue}
+        // Further ahead would take the slot of a tick not yet simulated.
+        if i32(tick-h.back.tick)>i32(h.history) {p.stats.inputs_early+=1;continue}
         if pr.input_any {p.stats.inputs_missed+=u64(max(i32(tick-pr.input_newest)-1,0))}
         pr.input_newest,pr.input_any=tick,true
         p.stats.inputs_received+=1

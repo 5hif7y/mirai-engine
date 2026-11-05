@@ -123,13 +123,16 @@ Ask :: struct {id:base.Entity_Id}
 **Settings.** `Net_Settings` (`host` storage) tunes the session and is read when it opens; zero
 takes the default:
 
-- `max_clients` 32, `max_objects` 1024, `history` 32, `timeout` 10 s, `connect_timeout` 5 s,
-  `view_radius` 128 m.
+- `max_clients` 32, `max_objects` 1024, `timeout` 10 s, `connect_timeout` 5 s, `view_radius`
+  128 m.
+- `replication.history_seconds`: how far back the session goes, the same at every tick rate
+  ([history](networking.md#time-and-inputs)); a client takes the server's. `session_history` gives
+  it in ticks.
 - `port` (`DEFAULT_PORT`): the game's UDP port. A server without `--server <port>` opens it, an
   address without a port takes it, and networked Play looks for a free one starting from it
   (`settings_port`). One that is not a UDP port does not open the network: it is `net.settings`.
 - Tolerances: position 0.05 m, velocity 0.5 m/s and rad/s, rotation 0.07 rad, scale 0.001.
-- `max_resimulate`: ticks repeated in one frame, 0.3 s of ticks (at most `history`-1).
+- `max_resimulate`: ticks repeated in one frame, 0.3 s of ticks (at most the history).
   `resimulate_budget`: one second of ticks per second. `critical_ticks`: half a second.
 - `correction_time`: 0.1 s. `sync_test`: 0 (off).
 - `absent_seconds`: 300 s that the seat of a player who left waits for them; negative, none.
@@ -489,15 +492,16 @@ How it lives depends on its role (`wire.Role`) and on who simulates it:
 
 **Prediction and correction.**
 
-- On each tick the client keeps a copy of the `World` in a ring of `history` ticks, with the tick's
-  input and the pose and quantized state of each predicted replica.
+- On each tick the client keeps a copy of the `World` in a ring as deep as the history, with the
+  tick's input and the pose and quantized state of each predicted replica.
   - Each slot copies again only the tables that changed since it was written, and of those the rows
     whose stamp differs, also after a rollback; storages are always copied
     ([copy of what changed](../../mirai-core/references/core.md#tables)). Physics copies its
     state block by block without comparing again the geometry the slot already has, in pools of the
     size of what it uses (`copy_kept`); a slot of a replaced world copies everything again.
-  - The comparison buffers and the authoritative history are reserved on opening; quantization
-    reuses the previous record when the row, the layout or its links do not change.
+  - The comparison buffers and the authoritative history are reserved on opening, and made again
+    only when the server announces a different history on connecting; quantization reuses the
+    previous record when the row, the layout or its links do not change.
 - It compares position, rotation and scale of all the predicted ones, velocities of bodies and the
   quantized words of joints and components, with the tolerances of `Net_Settings`.
 - If it differs and the replica is **critical**, the world goes back to the copy of the next tick
@@ -578,8 +582,8 @@ melee swing) where that player aimed.
   latter and counts it in `views_corrected`: a client does not choose how much past it sees.
   Negative, the client is believed within `REWIND_SECONDS`.
 - At the end of every tick, under its number, the server keeps in `Rewind_History` the `Transform`
-  it publishes of each entity with the `Rewind` component, in a ring of `REWIND_TICKS` ticks and
-  `REWIND_ENTITIES` entities per tick; those that do not fit are a problem. `rewind_record` writes
+  it publishes of each entity with the `Rewind` component, in a ring as deep as the history,
+  made when the session opens, and `REWIND_ENTITIES` entities per tick; those that do not fit are a problem. `rewind_record` writes
   it before `net_tick_tail`, only on the server; it is not copied with the world.
 - It keeps the pose of the entity, not that of its bones: a hit is tested against shapes placed
   from that pose.

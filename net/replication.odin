@@ -1,6 +1,7 @@
 package mirai_net
 
 import "base:intrinsics"
+import "core:math"
 import "core:mem"
 import "mirai:std/base"
 import "mirai:std/serial"
@@ -62,7 +63,10 @@ Replication_Desc :: struct {
     leave_margin:f32,      // fraction of the reach of a view an object in it may go beyond before it counts as out, default 0.1; negative: none
     lease_ticks:int,       // ticks a delegated authority lasts without sending state, default 120
     input_redundancy:int,  // inputs repeated in every datagram, default 4, at most 8
-    input_buffer:int,      // ticks of input kept per connection on the server, default 32
+    // seconds both ends can go back, as ticks of tick_rate (host_history): the client's history,
+    // the input a server keeps ahead of its tick and its lag compensation. The server announces
+    // its ticks in the handshake and a client takes them. Default 0.5, at most HISTORY_MAX_SECONDS
+    history_seconds:f32,
     input_lead:f32,        // ticks of input the server should have in hand, default 2
     interpolation_delay:f32, // ticks behind the server that remote objects are shown besides the jitter, default 2.5
     display_jump:f32,      // client: seconds the display of remote objects may fall behind where it should be before it jumps there; default 30 ticks
@@ -97,7 +101,27 @@ Input_Status :: enum u8 {
 Type_Stats :: struct {creates,updates,destroys,bits:u64}
 
 @(private) INPUT_MAX_BYTES :: 96
-@(private) INPUT_RING :: 16
+@(private) INPUT_RING :: 16 // client: inputs kept until acknowledged, more than input_redundancy
+
+HISTORY_SECONDS :: f32(0.5)
+HISTORY_MAX_SECONDS :: f32(2)
+
+// Ticks of history for seconds at a tick rate. A ring of them takes one slot more: the
+// newest is the tick being written, and the whole depth lies behind it.
+history_ticks :: proc(seconds:f32,tick_rate:int) -> int {
+    return max(int(math.ceil(seconds*f32(tick_rate))),1)
+}
+
+// The ticks of history of the session: on a server its own, on a client the server's once
+// connected (Command Connected), its own before.
+host_history :: proc(h:^Host) -> int {
+    return h.desc.mode==.Client && h.front.history>0?h.front.history:h.history
+}
+
+// Server: slots of the input ring of a connection; it takes input up to the history ahead of
+// the tick it published last.
+@(private)
+input_depth :: #force_inline proc(h:^Host) -> int {return h.history+1}
 
 @(private)
 Front_Flag :: enum u8 {Alive,Poll,Dormant,Listed,Stale}
@@ -133,11 +157,12 @@ Front :: struct {
     object_bits:[]u64,
     clock:Clock,
     input_size:int,
-    input_ticks:[]u32, // connections x input_buffer: tick+1
+    input_ticks:[]u32, // connections x input_depth: tick+1
     input_data:[]u8,
     input_last:[]u8,   // connections x input_size
     input_seen:[]bool,
     server_connection:Connection,
+    history:int, // client: the ticks of history the server announced when it accepted
 }
 
 @(private)
@@ -160,7 +185,6 @@ repl_init :: proc(h:^Host) -> Error {
     d.leave_margin=max(d.leave_margin,0)
     if d.lease_ticks<=0 {d.lease_ticks=120}
     d.input_redundancy=d.input_redundancy<=0?4:min(d.input_redundancy,8)
-    if d.input_buffer<=0 {d.input_buffer=32}
     if d.input_lead<=0 {d.input_lead=2}
     if d.interpolation_delay<=0 {d.interpolation_delay=2.5}
     if !(abs(d.display_jump)<=max(f32)) {return refuse(h,"replication.display_jump","finite seconds; 0 or less takes 30 ticks")}
@@ -192,8 +216,8 @@ repl_init :: proc(h:^Host) -> Error {
         f.free_count=d.max_objects
         if protocol.has_input {
             f.input_size=int(protocol.input.fragments[0].size)
-            f.input_ticks=host_make(h,u32,h.desc.max_connections*d.input_buffer)
-            f.input_data=host_make(h,u8,h.desc.max_connections*d.input_buffer*f.input_size)
+            f.input_ticks=host_make(h,u32,h.desc.max_connections*input_depth(h))
+            f.input_data=host_make(h,u8,h.desc.max_connections*input_depth(h)*f.input_size)
             f.input_last=host_make(h,u8,h.desc.max_connections*f.input_size)
             f.input_seen=host_make(h,bool,h.desc.max_connections)
         }
@@ -705,7 +729,7 @@ input_take :: proc(h:^Host,connection:Connection,tick:u32,out:rawptr) -> Input_S
     f:=&h.front
     index:=int(base.handle_index(base.Handle(connection)))
     if f.input_size==0 || out==nil || connection==0 || index>=len(f.input_seen) || h.connection_handles[index]!=connection {return .None}
-    size,depth:=f.input_size,h.desc.replication.input_buffer
+    size,depth:=f.input_size,input_depth(h)
     last:=f.input_last[index*size:][:size]
     slot:=index*depth+int(tick)%depth
     if f.input_ticks[slot]==tick+1 {
@@ -806,13 +830,14 @@ front_absorb :: proc(h:^Host,buffer:^Command_Buffer) {
             if server {
                 if f.input_size>0 {
                     connection:=int(base.handle_index(base.Handle(command.connection)))
-                    depth:=h.desc.replication.input_buffer
+                    depth:=input_depth(h)
                     mem.zero_slice(f.input_ticks[connection*depth:][:depth])
                     mem.zero_slice(f.input_last[connection*f.input_size:][:f.input_size])
                     f.input_seen[connection]=false
                 }
             } else {
                 f.server_connection=command.connection
+                f.history=int(command.tick)
                 clock_reset(&f.clock)
             }
         case .Disconnected:
@@ -843,7 +868,7 @@ front_absorb :: proc(h:^Host,buffer:^Command_Buffer) {
             if o:=front_object(h,command.object);o!=nil && !server {o.role=command.role}
         case .Input:
             connection:=int(base.handle_index(base.Handle(command.connection)))
-            depth:=h.desc.replication.input_buffer
+            depth:=input_depth(h)
             slot:=connection*depth+int(command.tick)%depth
             target:=f.input_data[slot*f.input_size:][:f.input_size]
             mem.zero_slice(target)

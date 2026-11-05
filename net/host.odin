@@ -92,7 +92,7 @@ Host_Desc :: struct {
 }
 
 Command_Kind :: enum u8 {
-    Connected,
+    Connected,          // tick: the ticks of history of the server (host_history)
     Disconnected,       // reason
     Message,            // channel, data
     Object_Created,     // object, type, role, simulation, tick, mask, words
@@ -199,6 +199,7 @@ Host :: struct {
     start:time.Tick,
     failed:bool,
     refused:Refusal, // why host_init returned Invalid
+    history:int,     // ticks of Replication_Desc.history_seconds at tick_rate
 
     // Simulation half.
     staging:^Frame,
@@ -287,6 +288,9 @@ host_init :: proc(h:^Host,desc:Host_Desc) -> Error {
     if d.mode==.Client {d.max_connections=1} else if d.max_connections<=0 {d.max_connections=32}
     if d.max_connections>MAX_CONNECTIONS {return refuse(h,"max_connections","at most 1024; 0 takes 32")}
     if d.tick_rate<=0 {d.tick_rate=60}
+    if !(d.replication.history_seconds<=HISTORY_MAX_SECONDS) {return refuse(h,"replication.history_seconds","at most 2 seconds; 0 or less takes 0.5")}
+    if d.replication.history_seconds<=0 {d.replication.history_seconds=HISTORY_SECONDS}
+    h.history=history_ticks(d.replication.history_seconds,d.tick_rate)
     if d.send_rate<=0 {d.send_rate=256<<10}
     if d.min_send_rate<=0 {d.min_send_rate=max(d.send_rate/16,PACKET_BYTES*4)}
     if d.packets_per_update<=0 {d.packets_per_update=4}

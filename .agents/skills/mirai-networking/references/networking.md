@@ -355,6 +355,12 @@ connection is for a replica.
   `input_redundancy`, each as a difference from the previous.
 - `input_take(h,connection,tick,&out)` (server) delivers the input of that tick (`Fresh`), the
   last earlier one if it did not arrive in time (`Repeated`) or zeros (`None`).
+- **History.** `Replication_Desc.history_seconds` becomes ticks of `tick_rate` in `host_init`
+  (`host_history`). Every ring of the past takes them and one slot more, the tick being written:
+  the server keeps input up to that far ahead of the tick it published last and drops what comes
+  further (`inputs_early`). The server announces its ticks in Accepted and a client takes them in
+  place of its own, up to what `HISTORY_MAX_SECONDS` gives at its tick rate; more ends the
+  attempt with `Capacity`.
 
 ## Prediction (`rollback.odin`)
 

@@ -190,7 +190,6 @@ settings_resolve :: proc(settings:Net_Settings,tick_dt:f32) -> (d:Net_Settings) 
     if d.port<=0 {d.port=DEFAULT_PORT}
     if d.max_clients<=0 {d.max_clients=32}
     if d.max_objects<=0 {d.max_objects=1024}
-    if d.history<=0 {d.history=32}
     if d.predicted_capacity<=0 {d.predicted_capacity=256}
     if d.view_radius<=0 {d.view_radius=128}
     if d.position_tolerance<=0 {d.position_tolerance=0.05}
@@ -200,10 +199,9 @@ settings_resolve :: proc(settings:Net_Settings,tick_dt:f32) -> (d:Net_Settings) 
     if d.resimulate_budget<=0 {d.resimulate_budget=int(1/tick_dt+0.5)}
     if d.critical_ticks<=0 {d.critical_ticks=int(0.5/tick_dt+0.5)}
     if d.max_resimulate<=0 {d.max_resimulate=int(0.3/tick_dt+0.5)}
-    d.max_resimulate=clamp(d.max_resimulate,1,d.history-1)
     if d.correction_time<=0 {d.correction_time=0.1}
     if d.rewind_tolerance==0 {d.rewind_tolerance=0.2}
-    d.sync_test=clamp(d.sync_test,0,d.history-1)
+    d.sync_test=max(d.sync_test,0)
     return
 }
 
@@ -530,6 +528,7 @@ reason_text :: proc(reason:Disconnect_Reason,address:string,protocol:u64,allocat
     case .Kicked:            return fmt.aprintf("the server %s kicked this client",address,allocator=allocator)
     case .Replaced:          return fmt.aprintf("the server %s took another connection of the same player",address,allocator=allocator)
     case .Denied_Player:     return fmt.aprintf("the server %s refused the connection: this client presented no player, or two",address,allocator=allocator)
+    case .Capacity:          return fmt.aprintf("the connection to the server %s ended: this client has no room for what the server has (more objects than Net_Settings.max_objects, or a history longer than %v s at its tick rate); raise them, or lower them on the server",address,wire.HISTORY_MAX_SECONDS,allocator=allocator)
     }
     return fmt.aprintf("the connection to the server %s was lost: %v",address,reason,allocator=allocator)
 }
@@ -640,6 +639,11 @@ invite_code :: proc(s:core.Ref(Net_Session)) -> string {return s.invite_code}
 
 // Whether this application is a client of a session now.
 is_client :: proc(s:core.Ref(Net_Session)) -> bool {return s.host_ready && s.mode==.Client}
+
+// The ticks the session can go back: how far a correction of the client and the lag
+// compensation of the server reach (Net_Settings.replication.history_seconds, the server's on a
+// client). 0 without a network.
+session_history :: proc(s:core.Ref(Net_Session)) -> int {return s.ptr!=nil && s.host_ready?wire.host_history(&s.host):0}
 
 // Client: its connection as the server names it, the peer of its seat
 // (input.Seat.peer); 0 until the server said it.

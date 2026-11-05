@@ -170,6 +170,9 @@ In `plugins/multiplayer/runtime`:
   client presents as is nor derives it from a name; a connection presents only one.
 - **The network does not write `core.Clock`:** a client requests the server's pause and scale
   through `core.Clock_Requests`.
+- **The past is sized in seconds, by the server.** Every ring of the past (the client's copies and
+  records, the server's input and lag compensation) is `history_seconds` at the tick rate plus the
+  tick being written, made when the session opens or connects; none is a fixed count of ticks.
 - **A correction is proportional to what is wrong.**
   - Each state is compared at its own tick and with per-field tolerances.
   - Only the critical (what is own and what shared a group with what the client drives)

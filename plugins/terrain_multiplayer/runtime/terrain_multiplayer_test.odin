@@ -191,7 +191,7 @@ end_tick :: proc(e:^End,_:^Fixture,resimulating:=false) {
     terrain_net_follow(core.ref(&e.authority),&e.net,&e.state,time,&e.replays,&e.outbox,core.ref(&e.session),core.ref(&e.data),core.read(&e.terrains),
         core.read(&e.seats),core.read(&e.drivables),core.read(&e.worlds),e.settings,core.ref(&e.root),&f.app,&e.problems)
     terrain.terrain_replay(&e.replays,&e.replayed,&e.digs,&e.requests,&e.data,core.read(&e.terrains),core.read(&e.worlds),&f.app,&e.problems)
-    terrain_net_send(core.ref(&e.authority),&e.net,&e.state,time,&e.outbox,core.ref(&e.connections),core.ref(&e.replayed),core.ref(&e.data),{},core.ref(&e.session),core.ref(&e.root))
+    terrain_net_send(core.ref(&e.authority),&e.net,&e.state,time,&e.outbox,core.ref(&e.connections),core.ref(&e.replayed),core.ref(&e.data),core.ref(&e.session),core.ref(&e.root))
     core.queue_clear(&e.connections.events)
 }
 

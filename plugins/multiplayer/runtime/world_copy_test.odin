@@ -268,7 +268,7 @@ sync_test_run :: proc(t:^testing.T,outside:bool,late:=false) -> (problems:core.P
     if !testing.expect(t,wire.sim_network_init(&network,{seed=41,endpoints=2,packets=64})) {return}
     defer wire.sim_network_destroy(&network)
     session:Net_Session
-    if !testing.expect(t,net_test_session(&session,&world,&info,&app,&network,1,.Client,settings={max_objects=8,predicted_capacity=8,history=16,sync_test=4})) {return}
+    if !testing.expect(t,net_test_session(&session,&world,&info,&app,&network,1,.Client,settings={max_objects=8,predicted_capacity=8,replication={history_seconds=0.25},sync_test=4})) {return}
     defer session_destroy(&session)
     shared.session=&session
     session.problems=&problems
@@ -332,7 +332,7 @@ sync_test_leaves_out_the_ticks_that_states_arriving_late_change :: proc(t:^testi
 sync_test_after_a_correction_compares_with_what_the_correction_left :: proc(t:^testing.T) {
     f:Correction_Fixture
     defer correction_fixture_destroy(&f)
-    if !correction_fixture_init(t,&f,.Predicted,{max_objects=8,predicted_capacity=8,history=32,sync_test=4}) {return}
+    if !correction_fixture_init(t,&f,.Predicted,{max_objects=8,predicted_capacity=8,replication={history_seconds=0.5},sync_test=4}) {return}
     problems:core.Problems
     f.session.problems=&problems
     correction_fixture_state(&f,8,{0,0.1,0})

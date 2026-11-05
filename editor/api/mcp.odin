@@ -28,7 +28,7 @@ TOOLS_RESERVE :: 512
 // editor that tools/list does not give.
 MCP_CALL_TOOL :: "call"
 @(private)
-MCP_CALL_DESCRIPTION :: "Runs any method of the editor or of a plugin by its name (such as animation.request or panel.save) with its params. engine_describe lists the methods, and with method, plugin or prefix gives the JSON Schema of their params and result."
+MCP_CALL_DESCRIPTION :: "Runs any method of the editor or of a plugin by its name (such as animation.request or panel.save) with its params. engine_describe lists the methods, and with methods (a list of names), plugin or prefix gives the JSON Schema of their params and result."
 @(private)
 MCP_CALL_SCHEMA :: `{"type":"object","properties":{"method":{"type":"string","description":"The name of the method, such as terrain.sculpt"},"params":{"type":"object","description":"Its params, as engine_describe gives their schema"}},"required":["method"],"additionalProperties":false}`
 

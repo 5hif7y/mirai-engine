@@ -188,7 +188,7 @@ describe_without_params_lists_each_method_with_its_plugin_and_the_plugins_found 
 }
 
 @(test)
-describe_gives_whole_entries_of_a_method_a_prefix_or_a_plugin :: proc(t:^testing.T) {
+describe_gives_whole_entries_of_named_methods_a_prefix_or_a_plugin :: proc(t:^testing.T) {
     f:Fixture;if !fixture_start(&f,t) {return}
     defer fixture_finish(&f)
     fixture_plugins(t,&f)
@@ -209,9 +209,11 @@ describe_gives_whole_entries_of_a_method_a_prefix_or_a_plugin :: proc(t:^testing
     raw_method:=at(reply,"result","methods",4)
     testing.expect_value(t,string_of(at(raw_method,"name")),"test.raw")
     testing.expect(t,at(raw_method,"result")!=nil,"a free-form result is described as any JSON")
-    reply=rpc(t,&f,`{"jsonrpc":"2.0","id":1,"method":"engine.describe","params":{"method":"test.echo"}}`)
-    testing.expect_value(t,len(at(reply,"result","methods").(json.Array)),1)
+    reply=rpc(t,&f,`{"jsonrpc":"2.0","id":1,"method":"engine.describe","params":{"methods":["test.echo","test.add","test.echo"]}}`)
+    testing.expect_value(t,len(at(reply,"result","methods").(json.Array)),2)
+    testing.expect(t,at(reply,"result","methods",1,"params")!=nil,"each named method has its schema")
     echo:=at(reply,"result","methods",0)
+    if string_of(at(echo,"name"))!="test.echo" {echo=at(reply,"result","methods",1)}
     testing.expect_value(t,integer(at(echo,"params","properties","times","default")),1)
     testing.expect_value(t,integer(at(echo,"params","properties","times","maximum")),4)
     testing.expect_value(t,integer(at(echo,"params","properties","text","maxLength")),32)
@@ -229,7 +231,9 @@ describe_gives_whole_entries_of_a_method_a_prefix_or_a_plugin :: proc(t:^testing
     reply=rpc(t,&f,`{"jsonrpc":"2.0","id":1,"method":"engine.describe","params":{"prefix":"scene."}}`)
     testing.expect_value(t,integer(at(reply,"error","code")),INVALID_PARAMS)
     testing.expect(t,strings.contains(string_of(at(reply,"error","message")),"without params"),"the error says how to list the names")
-    for params in ([]string{`{"method":"test.echo","prefix":"test."}`,`{"method":"test.echo","plugin":"editor"}`,`{"compact":true}`,`{"schemas":false}`,`{"method":"missing"}`,`{"verbose":true}`}) {
+    reply=rpc(t,&f,`{"jsonrpc":"2.0","id":1,"method":"engine.describe","params":{"methods":["test.echo","missing","gone"]}}`)
+    testing.expect(t,strings.contains(string_of(at(reply,"error","message")),`"missing", "gone"`),"the error names every unknown method")
+    for params in ([]string{`{"methods":["test.echo"],"prefix":"test."}`,`{"methods":["test.echo"],"plugin":"editor"}`,`{"compact":true}`,`{"schemas":false}`,`{"methods":["missing"]}`,`{"method":"test.echo"}`,`{"verbose":true}`}) {
         reply=rpc(t,&f,strings.concatenate({`{"jsonrpc":"2.0","id":1,"method":"engine.describe","params":`,params,"}"},context.temp_allocator))
         testing.expectf(t,integer(at(reply,"error","code"))==INVALID_PARAMS,"%s is refused",params)
     }
@@ -384,7 +388,7 @@ mcp_calls_a_tool_and_returns_object_results_as_text_and_structured_content :: pr
     reply=mcp(t,&f,`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"test_echo","arguments":{"text":"say \"hi\"\n","times":2}}}`)
     testing.expect_value(t,string_of(at(tool_text(t,reply),"text")),"say \"hi\"\nsay \"hi\"\n")
     testing.expect_value(t,string_of(at(reply,"result","structuredContent","text")),"say \"hi\"\nsay \"hi\"\n")
-    reply=mcp(t,&f,`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"engine_describe","arguments":{"method":"test.add"}}}`)
+    reply=mcp(t,&f,`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"engine_describe","arguments":{"methods":["test.add"]}}}`)
     testing.expect_value(t,string_of(at(tool_text(t,reply),"methods",0,"name")),"test.add")
     testing.expect_value(t,string_of(at(reply,"result","structuredContent","methods",0,"name")),"test.add")
     reply=mcp(t,&f,`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"test_raw"}}`)
@@ -588,9 +592,9 @@ describe_gives_the_guides_of_the_methods_it_gives :: proc(t:^testing.T) {
     reply:=rpc(t,&f,`{"jsonrpc":"2.0","id":1,"method":"engine.describe","params":{"plugin":"animation"}}`)
     guides,ok:=at(reply,"result","guides").(json.Array)
     testing.expect(t,ok && len(guides)==1 && string_of(guides[0])=="Animate by intent.","the guide of the plugin comes with its methods")
-    reply=rpc(t,&f,`{"jsonrpc":"2.0","id":2,"method":"engine.describe","params":{"method":"test.echo"}}`)
+    reply=rpc(t,&f,`{"jsonrpc":"2.0","id":2,"method":"engine.describe","params":{"methods":["test.echo"]}}`)
     testing.expect_value(t,string_of(at(reply,"result","guides",0)),"Echo repeats.")
-    reply=rpc(t,&f,`{"jsonrpc":"2.0","id":3,"method":"engine.describe","params":{"method":"test.add"}}`)
+    reply=rpc(t,&f,`{"jsonrpc":"2.0","id":3,"method":"engine.describe","params":{"methods":["test.add"]}}`)
     testing.expect(t,at(reply,"result","guides")==nil,"a method without a guide comes alone")
     reply=rpc(t,&f,`{"jsonrpc":"2.0","id":4,"method":"engine.describe"}`)
     testing.expect(t,at(reply,"result","guides")==nil,"the list of every method carries no guide")

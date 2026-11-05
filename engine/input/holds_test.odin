@@ -71,6 +71,8 @@ a_held_action_reaches_its_seat_from_the_next_tick_whatever_its_bindings :: proc(
         hold(&f.requests,f.local,HOLD_JUMP,{1,0},3)
         hold(&f.requests,f.local,HOLD_MOVE,{0,1})
         testing.expect(t,!seat_down(typed,f.local,.Jump),"nothing acts before the tick")
+        _,ahead:=holds_at(f.seats.values[core.row_of(read,f.local)],f.local,&f.requests,f.time.tick)
+        testing.expect_value(t,ahead,2)
         hold_test_tick(&f)
         testing.expect(t,seat_pressed(typed,f.local,.Jump),"pressed on the next tick")
         testing.expect(t,seat_pressed(typed,f.remote,.Jump),"and on the server, from what the client sent")
@@ -80,6 +82,9 @@ a_held_action_reaches_its_seat_from_the_next_tick_whatever_its_bindings :: proc(
         hold_test_tick(&f)
         testing.expect(t,seat_down(typed,f.remote,.Jump) && !seat_pressed(typed,f.remote,.Jump))
         testing.expect_value(t,seat_action(read,f.remote,HOLD_JUMP).held_ticks,3)
+        // Its seat still has the jump, which the next tick no longer holds.
+        _,ahead=holds_at(f.seats.values[core.row_of(read,f.local)],f.local,&f.requests,f.time.tick)
+        testing.expect(t,ahead==1 && f.seats.values[core.row_of(read,f.local)].hold_count==2)
         hold_test_tick(&f)
         state:=seat_action(read,f.remote,HOLD_JUMP)
         testing.expect(t,state.released && state.tapped && state.released_held==3,"released after its ticks")

@@ -8,7 +8,7 @@ import "core:strings"
 import "mirai:editor/api"
 import "mirai:project"
 
-RECORD_USAGE :: "record [project] [--out <folder>] [--scene S] [--format png16|exr] [--fps N] [--seconds S] [--size WxH] [--no-audio] [--dev|--release]"
+RECORD_USAGE :: "record [project] [--out <folder>] [--scene S] [--format png16|exr] [--fps N] [--seconds S] [--size WxH] [--sheet N] [--no-audio] [--dev|--release]"
 
 // mirai record: a sequence of the game of a project frame after frame at a
 // fixed rate, as play.record writes it, with its sound. It uses the session of
@@ -18,8 +18,8 @@ RECORD_USAGE :: "record [project] [--out <folder>] [--scene S] [--format png16|e
 // exit 1 with validation errors.
 cmd_record :: proc(root:string,args:[]string) -> int {
     folder,out,scene:=".","",""
-    Params :: struct {path:string,format:string,fps:int,seconds:f64,width,height:int,audio:bool}
-    params:=Params{format="Png16",fps=30,seconds=2,width=1280,height=720,audio=true}
+    Params :: struct {path:string,format:string,fps:int,seconds:f64,width,height:int,audio:bool,sheet:int}
+    params:=Params{format="Png16",fps=30,seconds=2,width=1280,height=720,audio=true,sheet=16}
     mode:Build_Mode=.Keep
     usage :: proc() -> int {fmt.eprintfln("Usage: mirai %s",RECORD_USAGE);return 2}
     value :: proc(args:[]string,i:^int) -> (string,bool) {
@@ -56,6 +56,10 @@ cmd_record :: proc(root:string,args:[]string) -> int {
                 h,h_ok:=strconv.parse_int(text[cut+1:],10)
                 params.width,params.height,ok=w,h,w_ok && h_ok
             } else {ok=false}
+        case "--sheet":
+            text,ok=value(args,&i)
+            number,valid:=strconv.parse_int(text,10)
+            params.sheet,ok=number,ok && valid
         case "--no-audio": params.audio=false
         case "--dev":  mode=.Dev
         case "--release": mode=.Release

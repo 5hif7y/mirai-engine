@@ -142,6 +142,55 @@ a_montage_puts_images_side_by_side_at_one_height :: proc(t:^testing.T) {
     testing.expect_value(t,error,Error.Bad_Count)
 }
 
+@(test)
+a_sheet_tiles_evenly_spaced_frames_in_order_each_with_its_number :: proc(t:^testing.T) {
+    // 9 of 31 frames: the first, the last and every 30/8 between, each shown once.
+    shown:[9]int
+    for k in 0..<9 {
+        shown[k]=sheet_frame(k,9,31)
+        testing.expect_value(t,sheet_tile(shown[k],9,31),k)
+    }
+    testing.expect(t,shown[0]==0 && shown[8]==30 && shown[4]==15)
+    for k in 1..<9 {testing.expect(t,shown[k]>shown[k-1])}
+    testing.expect_value(t,sheet_tile(1,9,31),-1)
+    testing.expect_value(t,sheet_frame(0,1,31),0)
+
+    sheet,error:=sheet_make(5,320,180,context.temp_allocator)
+    testing.expect_value(t,error,Error.None)
+    defer sheet_destroy(&sheet)
+    testing.expect(t,sheet.columns==3 && sheet.rows==2 && sheet.tile==[2]int{320,180})
+    testing.expect_value(t,sheet.image.width,3*320+2*SHEET_GAP)
+    frame:=make([]f32,320*180*4,context.temp_allocator)
+    for i in 0..<320*180 {frame[i*4+1]=0.5}
+    frame[0]=math.nan_f32()
+    testing.expect_value(t,sheet_put(&sheet,4,frame,320,180,false,0),Error.None)
+    testing.expect_value(t,sheet_put(&sheet,0,frame,320,180,true,1234567),Error.None)
+    at :: proc(s:^Sheet,x,y:int) -> [4]u8 {
+        p:=s.image.pixels[(y*s.image.width+x)*4:][:4]
+        return {p[0],p[1],p[2],p[3]}
+    }
+    // Tile 4 is second in the second row, past a gap; its middle is the frame as stored.
+    middle:=at(&sheet,320+SHEET_GAP+160,180+SHEET_GAP+90)
+    testing.expect_value(t,middle,[4]u8{0,128,0,255})
+    // Tile 0 encodes linear light; its corner has the number in white on black.
+    testing.expect_value(t,at(&sheet,160,90)[1],u8(188))
+    white,black:=0,0
+    for y in 0..<20 {
+        for x in 0..<120 {
+            p:=at(&sheet,x,y)
+            if p=={255,255,255,255} {white+=1} else if p=={0,0,0,255} {black+=1}
+        }
+    }
+    testing.expect(t,white>0 && black>0,"the label is drawn")
+    testing.expect_value(t,at(&sheet,320+SHEET_GAP+160,90),[4]u8{0,0,0,255})
+    testing.expect_value(t,sheet_put(&sheet,5,frame,320,180,false,0),Error.Bad_Count)
+    testing.expect_value(t,sheet_put(&sheet,0,frame[:4],320,180,false,0),Error.Empty)
+    _,error=sheet_make(0,320,180)
+    testing.expect_value(t,error,Error.Bad_Count)
+    _,error=sheet_make(SHEET_CAPACITY+1,320,180)
+    testing.expect_value(t,error,Error.Bad_Count)
+}
+
 // A wall lit in a gradient, with blotches of `strength` of its light every
 // `every` pixels, `size` pixels wide.
 wall :: proc(width,height:int,scale,strength:f64,every,size:int) -> Image {

@@ -76,6 +76,23 @@ input_holds :: proc(seats:^core.Table(Seat),requests:^Hold_Requests,time:core.Ti
     }
 }
 
+// What a seat holds in the tick that runs at tick: its holds with the
+// requests waiting for that tick applied, as input_holds applies them.
+holds_at :: proc(seat:Seat,e:core.Entity,requests:^Hold_Requests,tick:u64) -> (holds:[HOLD_CAPACITY]Action_Hold,count:int) {
+    ahead:=seat
+    if requests!=nil {
+        for r in requests.items {
+            if r.seat==e && int(r.action)<ACTION_CAPACITY {_=hold_set(&ahead,r,tick)}
+        }
+    }
+    for hold in ahead.holds[:min(int(ahead.hold_count),HOLD_CAPACITY)] {
+        if hold.until!=0 && hold.until<=tick {continue}
+        holds[count]=hold
+        count+=1
+    }
+    return
+}
+
 @(private)
 hold_set :: proc(seat:^Seat,r:Hold_Request,tick:u64) -> bool {
     at:=-1

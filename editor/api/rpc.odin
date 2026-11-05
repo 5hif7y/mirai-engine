@@ -325,7 +325,7 @@ string_value :: proc(allocator:runtime.Allocator,text:string) -> (value:string,o
 describe_register :: proc(s:^Server) -> bool {
     return method_register(s,{
         name="engine.describe",
-        summary="Lists every method with its plugin and the plugins of the project; method, plugin or prefix give the JSON Schema of their params and result.",
+        summary="Lists every method with its plugin and the plugins of the project; methods, plugin or prefix give the JSON Schema of their params and result.",
         params=Describe_Params,result=Describe_Result,writes_result=true,handler=describe_handler,flags={.Read_Only,.Idempotent,.Core},
     })==.None
 }
@@ -333,8 +333,11 @@ describe_register :: proc(s:^Server) -> bool {
 // What engine.describe names the plugin of the methods of the editor.
 DESCRIBE_EDITOR :: "editor"
 
+// Methods engine.describe gives by name in one call at most.
+DESCRIBE_METHODS :: 32
+
 Describe_Params :: struct {
-    method:[MAX_NAME]u8 `mirai:"text,optional,label=Only this method; without prefix or plugin"`,
+    methods:[DESCRIBE_METHODS][MAX_NAME]u8 `mirai:"text,optional,label=Only these methods by name; without prefix or plugin"`,
     prefix:[MAX_NAME]u8 `mirai:"text,optional,label=Only the methods whose name starts with it (such as scene.)"`,
     plugin:[MAX_NAME]u8 `mirai:"text,optional,label=Only the methods of this plugin; editor names those of the editor"`,
 }
@@ -390,26 +393,39 @@ describe_handler :: proc(call:^Call) {
     s:=call.server
     w:=call.out
     p:=call_params(call,Describe_Params)
-    name:=base.text_get(p.method[:])
+    names_buffer:[DESCRIBE_METHODS]string
+    count:=0
+    unknown:=strings.builder_make(call.allocator)
+    for &entry in p.methods {
+        name:=base.text_get(entry[:])
+        if name=="" {continue}
+        names_buffer[count]=name
+        count+=1
+        if method_find(s,name)==nil {
+            if strings.builder_len(unknown)>0 {strings.write_string(&unknown,", ")}
+            strings.write_quoted_string(&unknown,name)
+        }
+    }
+    names:=names_buffer[:count]
     prefix:=base.text_get(p.prefix[:])
     plugin:=base.text_get(p.plugin[:])
-    if name!="" && (prefix!="" || plugin!="") {call_fail(call,INVALID_PARAMS,"method names one method: pass it without prefix and plugin");return}
-    if name!="" && method_find(s,name)==nil {call_failf(call,INVALID_PARAMS,"unknown method %q",name);return}
+    if count>0 && (prefix!="" || plugin!="") {call_fail(call,INVALID_PARAMS,"methods names the methods: pass them without prefix and plugin");return}
+    if strings.builder_len(unknown)>0 {call_failf(call,INVALID_PARAMS,"unknown methods %s; engine.describe without params lists them all",strings.to_string(unknown));return}
     if plugin!="" && !describe_plugin_known(s,plugin) {describe_plugin_fail(call,plugin);return}
     matched:=0
     for &method in s.methods[:s.method_count] {
-        if describe_listed(&method,name,prefix,plugin) {matched+=1}
+        if describe_listed(&method,names,prefix,plugin) {matched+=1}
     }
     if matched==0 && plugin!="" {call_failf(call,INVALID_PARAMS,"no method of plugin %q starts with %q",plugin,prefix);return}
     if matched==0 {call_failf(call,INVALID_PARAMS,"no method starts with %q; engine.describe without params lists them all",prefix);return}
-    whole:=name!="" || prefix!="" || plugin!=""
+    whole:=count>0 || prefix!="" || plugin!=""
     raw(w,`{"server":{"name":`);serial.text_write_string(w,s.name)
     raw(w,`,"version":`);serial.text_write_string(w,s.version)
     raw(w,`},"methods":[`)
     first:=true
     buffer:[MAX_NAME]u8
     for &method in s.methods[:s.method_count] {
-        if !describe_listed(&method,name,prefix,plugin) {continue}
+        if !describe_listed(&method,names,prefix,plugin) {continue}
         if !first {raw(w,",")}
         first=false
         raw(w,`{"name":`);serial.text_write_string(w,method.name)
@@ -430,7 +446,7 @@ describe_handler :: proc(call:^Call) {
             about:=guide.topic==plugin
             for &method in s.methods[:s.method_count] {
                 if about {break}
-                if !describe_listed(&method,name,prefix,plugin) {continue}
+                if !describe_listed(&method,names,prefix,plugin) {continue}
                 about=method.plugin==guide.topic || method.name==guide.topic || strings.has_prefix(method.name,guide.topic) && len(method.name)>len(guide.topic) && method.name[len(guide.topic)]=='.'
             }
             if !about {continue}
@@ -458,8 +474,10 @@ method_plugin :: #force_inline proc(method:^Method) -> string {
 }
 
 @(private)
-describe_listed :: proc(method:^Method,name,prefix,plugin:string) -> bool {
-    return (name=="" || method.name==name) && (plugin=="" || method_plugin(method)==plugin) && strings.has_prefix(method.name,prefix)
+describe_listed :: proc(method:^Method,names:[]string,prefix,plugin:string) -> bool {
+    named:=len(names)==0
+    for name in names {named||=method.name==name}
+    return named && (plugin=="" || method_plugin(method)==plugin) && strings.has_prefix(method.name,prefix)
 }
 
 @(private)

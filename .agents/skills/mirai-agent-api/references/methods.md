@@ -12,9 +12,10 @@ advances frames, what waits for Edit and common errors. Conventions, errors and 
 
 - `engine.describe`: without params it is the index: each method with its plugin (`editor` for
   those of the core) and the plugins the project finds, with which ones it uses; entries with
-  schemas come out with `method`, or with `plugin` and `prefix`, which combine. `method` goes
-  alone; an unknown `method`, a `prefix` that leaves none or a `plugin` without methods is
-  `-32602`, and the last one names the plugins that have methods.
+  schemas come out with `methods`, the names of the ones a task needs in one call, or with
+  `plugin` and `prefix`, which combine. `methods` goes alone; unknown names (all of them, in the
+  error), a `prefix` that leaves none or a `plugin` without methods is `-32602`, and the last one
+  names the plugins that have methods.
 - `engine.diagnostics`: after a failed capture, test or Play, read it before repeating.
   - `since` with the previous `console.serial` reads only what is new.
   - A repeated id is an `asset_errors` entry with `problem:"Duplicate_Id"`: `detail:"Reassigned"`
@@ -536,6 +537,14 @@ result of `play.status`, `paused`, `simulating` and `input_released` are the use
   camera of its `View`, without screen UI, and writes `frame_000000.png` (16 bits, after the
   tonemap) or `.exr` (half, before the tonemap, linear) and `audio.wav` (32-bit floats, at the
   sample of each frame). It ends paused; the recording holds the server.
+  - Reviewing a run costs one image: read `manifest.json` first (a header line, then a line per
+    frame with its file, the `tick` it shows, the game `seconds`, the camera and the `inputs` that
+    `play.input` held in its ticks), then look at `sheet.png`, `sheet` tiles of evenly spaced
+    frames from the first to the last, left to right and top to bottom, each with its tick in the
+    corner; the manifest's `sheet.frames` gives the frame of each tile and each frame its `tile`.
+    Open a full frame only for a tile that looks wrong, and `play.seek` to its tick to inspect it.
+  - The sheet is 8-bit sRGB: from `Exr` it is the linear image encoded and clipped at 1, without
+    the tonemap. `sheet:0` writes none.
 - `play.history` and `play.seek`: the past the run keeps (not networked) and the jump to one of its
   ticks, paused, playing the frames again from the previous copy; `matches` false says that what
   was played again is not what was seen. Fails with the range if the tick is older

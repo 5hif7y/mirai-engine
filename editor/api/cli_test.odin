@@ -126,7 +126,7 @@ rpc_command_cases :: proc(t:^testing.T,tool:Tool,f:^Fixture,port:string) {
     code,out,_=run_tool(tool,"","rpc","test.shapes",`{"position":[1,2,3],"flags":["Ice"]}`,"--port",port)
     testing.expect_value(t,code,0)
     testing.expect(t,strings.contains(out,"\"position\": [\n    1,\n    2,\n    3\n  ]"),out)
-    code,out,_=run_tool(tool,"","rpc","engine.describe",`{"method":"test.add"}`,"--port",port,"--timeout","5")
+    code,out,_=run_tool(tool,"","rpc","engine.describe",`{"methods":["test.add"]}`,"--port",port,"--timeout","5")
     testing.expect_value(t,code,0)
     testing.expect(t,strings.contains(out,`"tool": "test_add"`),out)
     code,out,err=run_tool(tool,"","rpc","test.fail","--port",port)
@@ -188,6 +188,8 @@ rpc_result_cases :: proc(t:^testing.T,tool:Tool,port:string) {
     for line in ([]string{"test.echo (core)\n","    times: integer 1..4, default 1\n","  example: mirai rpc test.echo '{\"text\":\"x\"}'\n","    text: string up to 160\n"}) {
         testing.expectf(t,strings.contains(out,line),"%q in:\n%s",line,out)
     }
+    code,out,err=run_tool(tool,"","rpc","describe","test.echo","test.add","--port",port)
+    testing.expectf(t,code==0 && strings.contains(out,"test.echo (core)\n") && strings.contains(out,"example: mirai rpc test.add"),"%d %s %s",code,out,err)
     code,out,_=run_tool(tool,"","rpc","describe","--port",port)
     testing.expectf(t,code==0 && strings.contains(out,"Adds two integers.") && !strings.contains(out,"example"),"%d %s",code,out)
     code,_,err=run_tool(tool,"","rpc","describe","scene.","--port",port)

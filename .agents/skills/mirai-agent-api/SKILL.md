@@ -25,8 +25,9 @@ difference with the catalog, it rules.
   [`--plugins`](references/api.md#mirai-mcp).
 - Headless editor in the background and port file `.mirai/api.json`:
   [sessions](references/api.md#sessions).
-- Recording a game sequence at fixed fps (16-bit PNG or EXR, and WAV) and going back to a Play
-  tick: [`play.record`, `play.seek`](references/methods.md#play) and
+- Recording a game sequence at fixed fps (16-bit PNG or EXR, and WAV), reviewing it in one
+  contact sheet with a manifest of its frames, and going back to a Play tick:
+  [`play.record`, `play.seek`](references/methods.md#play) and
   [`mirai record`](references/api.md#mirai-record).
 - Capturing the world without UI and comparing it with a reference:
   [`mirai capture`](references/api.md#mirai-capture); measuring PNGs, cropping them, enlarging
@@ -57,7 +58,8 @@ difference with the catalog, it rules.
    the port.
 2. `mirai rpc describe` lists the methods by plugin and says which plugins exist and which the
    project uses; `mirai rpc describe <plugin>` gives those of an area. Before calling a method for
-   the first time, `mirai rpc describe <method|prefix>`: names, params or result fields are not
+   the first time, `mirai rpc describe <method|prefix>` (several methods at once:
+   `mirai rpc describe a b c`): names, params or result fields are not
    guessed. Read: `scene.inspect` (ids and values), `component.list` (components, fields, ranges
    and initial values), `asset.list`; a single field with `--select`, and a state that takes time
    (`build.status`, `play.network.status`) with `--wait-until`.
@@ -130,7 +132,10 @@ difference with the catalog, it rules.
   a_result_the_handler_writes_is_described_by_its_type
   the_description_of_the_methods_has_the_shape_it_declares`; those of an editor method, with
   `api_result_shape_expect` in its test (`ai_methods_write_the_results_they_declare`).
-- Writers of a recording (EXR, 16-bit PNG, WAV): `mirai test cook/movie`; the Play history:
+- Writers of a recording (EXR, 16-bit PNG, WAV): `mirai test cook/movie`; its contact sheet:
+  `mirai test cook/image a_sheet_tiles_evenly_spaced_frames_in_order_each_with_its_number`; the
+  held actions of its manifest: `mirai test engine/input
+  a_held_action_reaches_its_seat_from_the_next_tick_whatever_its_bindings`; the Play history:
   `mirai test editor a_run_goes_to_any_frame_it_played_and_plays_on_from_there
   a_frame_changed_from_outside_its_input_while_it_plays_does_not_match_when_played_again
   an_edit_where_a_run_went_back_is_kept_as_a_keyframe_and_drops_the_frames_after_it

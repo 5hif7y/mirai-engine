@@ -926,7 +926,7 @@ def scenario_fade(b: Bench):
     metrics, passes, parts = {}, {}, {}
     engine_start(b)
     try:
-        description = rpc(b, "engine.describe", {"method": "scene.set"})
+        description = rpc(b, "engine.describe", {"methods": ["scene.set"]})
         if not description["methods"][0]["params"]["properties"].get("components"):
             raise BenchError("scene.set does not expose component editing")
         rpc(b, "editor.action", {"name": "new"})

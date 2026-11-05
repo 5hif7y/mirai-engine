@@ -10,7 +10,7 @@ import "mirai:editor/api"
 import "mirai:project"
 import "mirai:std/serial"
 
-RPC_USAGE :: "rpc <method> [json|-|--file F] [--select FIELDS] [--wait-until CONDITION [--every S]] | rpc describe [plugin|method|prefix] | rpc --batch <calls.jsonl> [--project P|--port N] [--timeout S] [--wait S] [--client NAME]"
+RPC_USAGE :: "rpc <method> [json|-|--file F] [--select FIELDS] [--wait-until CONDITION [--every S]] | rpc describe [plugin|method|prefix|method...] | rpc --batch <calls.jsonl> [--project P|--port N] [--timeout S] [--wait S] [--client NAME]"
 
 // How often --wait-until calls again without --every, in milliseconds.
 RPC_EVERY_MS :: 1000
@@ -142,7 +142,6 @@ cmd_rpc :: proc(root:string,args:[]string) -> int {
         if len(connection.rest)!=2 {fmt.eprintfln("Usage: mirai %s",RPC_USAGE);return 2}
         return rpc_batch(connection,connection.rest[1])
     case "describe":
-        if len(connection.rest)>2 {fmt.eprintfln("Usage: mirai %s",RPC_USAGE);return 2}
         return rpc_describe(connection,connection.rest[1:])
     }
     request,problem,parsed:=rpc_request(connection.rest[:])
@@ -321,10 +320,11 @@ rpc_similar_names :: proc(describe,name:string) -> string {
     return strings.join(first[:],", ",context.temp_allocator)
 }
 
-// mirai rpc describe [plugin|method|prefix]: without one, the methods by
-// plugin and the plugins the project does not use; with the name of a plugin
-// (editor for the editor), or a method or the prefix of some, those methods
-// with their params, an example of valid params and their result.
+// mirai rpc describe [plugin|method|prefix|method...]: without one, the
+// methods by plugin and the plugins the project does not use; with the name
+// of a plugin (editor for the editor), a method or the prefix of some, or
+// several methods, those methods with their params, an example of valid
+// params and their result.
 @(private="file")
 rpc_describe :: proc(connection:Connection,args:[]string) -> int {
     listing,err,called:=rpc_call_waiting(connection,"engine.describe","{}",1)
@@ -333,9 +333,17 @@ rpc_describe :: proc(connection:Connection,args:[]string) -> int {
         fmt.print(rpc_describe_list_text(listing))
         return 0
     }
+    result:string
+    if len(args)>1 {
+        names:=make([]string,len(args),context.temp_allocator)
+        for arg,i in args {names[i]=serial.text_quote(arg)}
+        result,err,called=rpc_call_waiting(connection,"engine.describe",fmt.tprintf(`{{"methods":[%s]}}`,strings.join(names,",",context.temp_allocator)),1)
+        if !called {return rpc_fail(err)}
+        fmt.print(rpc_describe_text(result,""))
+        return 0
+    }
     name:=args[0]
     key:=rpc_describe_is_plugin(listing,name)?"plugin":"prefix"
-    result:string
     result,err,called=rpc_call_waiting(connection,"engine.describe",fmt.tprintf(`{{"%s":%s}}`,key,serial.text_quote(name)),1)
     if !called {
         if err.code!=api.INVALID_PARAMS || key=="plugin" {return rpc_fail(err)}

@@ -366,7 +366,7 @@ ai_prompt_write :: proc(s:^Session,task:^Ai_Task,entities:[]Ai_Entity) -> bool {
         for name in AI_PROMPT_SCHEMAS {
             method:=api.method_find(&st.server,name)
             if method==nil {continue}
-            if !listed {strings.write_string(&b,"- Parameters of the tools used most, as JSON Schema; they are complete, so call those tools without looking them up (`engine_describe` has the others: without params it lists the methods and the plugins, and `plugin` or `prefix` give the schemas of a few):\n");listed=true}
+            if !listed {strings.write_string(&b,"- Parameters of the tools used most, as JSON Schema; they are complete, so call those tools without looking them up (`engine_describe` has the others: without params it lists the methods and the plugins, and `methods`, `plugin` or `prefix` give the schemas of a few):\n");listed=true}
             w:serial.Writer
             serial.writer_init(&w,0,context.temp_allocator)
             api.method_schema_write(&w,&st.server,method,false)
@@ -393,7 +393,7 @@ ai_prompt_write :: proc(s:^Session,task:^Ai_Task,entities:[]Ai_Entity) -> bool {
     ai_attachments_prompt(s,task,&b)
     fmt.sbprintf(&b,"- %s has the region, the camera, the selection and the open scene.\n",ai_task_path(s,task,AI_FILE_CONTEXT))
     strings.write_string(&b,"- To let the user try a scene in Play, write a link to it in your response as `[What to try](play:path of the scene under the assets folder)`: the chat draws it as a button that opens the scene and plays it.\n")
-    strings.write_string(&b,"- The tools of the server `mirai` are the basics of a scene. Every other method, of the editor or of a plugin (animation, terrain, navigation, physics, particles, interfaces and the rest), goes through the tool `call` with its name as `method` and its `params`; `engine_describe` with `method`, `prefix` or `plugin` gives their schemas. The methods named below by their tool name (such as `panel_save`) go through `call` too when they are not tools.\n")
+    strings.write_string(&b,"- The tools of the server `mirai` are the basics of a scene. Every other method, of the editor or of a plugin (animation, terrain, navigation, physics, particles, interfaces and the rest), goes through the tool `call` with its name as `method` and its `params`; `engine_describe` with `methods` (several names at once), `prefix` or `plugin` gives their schemas. The methods named below by their tool name (such as `panel_save`) go through `call` too when they are not tools.\n")
     if tool:=ai_client_path(engine);tool!="" {fmt.sbprintf(&b,"- For many calls, write and run a script instead of calling tools one by one, with `%s rpc <method> '<json>'` (or `--file params.json`) for each call, never with requests of your own to the editor.\n",tool)}
     strings.write_string(&b,"- Do not edit scene files while the editor has them open.\n")
     if task.play {

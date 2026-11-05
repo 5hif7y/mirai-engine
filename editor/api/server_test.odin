@@ -396,7 +396,7 @@ a_stable_poll_loop_allocates_nothing :: proc(t:^testing.T) {
         `{"jsonrpc":"2.0","id":3,"method":"test.fail"}`,
         `{"jsonrpc":"2.0","id":4,"method":"test.raw","params":{"a":[1,2,3]}}`,
         `{"jsonrpc":"2.0","id":5,"method":"engine.describe","params":{}}`,
-        `{"jsonrpc":"2.0","id":6,"method":"engine.describe","params":{"method":"test.shapes"}}`,
+        `{"jsonrpc":"2.0","id":6,"method":"engine.describe","params":{"methods":["test.shapes"]}}`,
         `[{"jsonrpc":"2.0","id":1,"method":"test.add","params":{"a":1,"b":2}},{"jsonrpc":"2.0","method":"nope"}]`,
         `{"jsonrpc":"2.0","id":7,"method":"test.add","params":{"a":"bad"}}`,
         `{"jsonrpc":"2.0","id":8,"method":"nope"}`,

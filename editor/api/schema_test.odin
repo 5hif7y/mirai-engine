@@ -249,7 +249,7 @@ the_description_of_the_methods_has_the_shape_it_declares :: proc(t:^testing.T) {
     testing.expect_value(t,method_register(&s,{name="grow",plugin="foliage",handler=noop}),Register_Error.None)
     server_plugins_set(&s,{{"foliage",true},{"terrain",false}})
     buffer:=make([]u8,64*1024,context.temp_allocator)
-    for params in ([]string{`{}`,`{"plugin":"foliage"}`,`{"plugin":"editor","prefix":"sh"}`,`{"method":"shapes"}`}) {
+    for params in ([]string{`{}`,`{"plugin":"foliage"}`,`{"plugin":"editor","prefix":"sh"}`,`{"methods":["shapes","grow"]}`}) {
         w:serial.Writer
         serial.writer_init_fixed(&w,buffer)
         _,ran:=method_execute(&s,method_find(&s,"engine.describe"),params,&w)

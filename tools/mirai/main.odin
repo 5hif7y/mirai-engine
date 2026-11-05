@@ -37,7 +37,7 @@ COMMANDS :: [?]Command{
     {"setup",SETUP_USAGE,"Installs Slang or ripgrep pinned in .deps, or adds mirai and ripgrep to the PATH",cmd_setup},
     {"session",SESSION_USAGE,"Opens a headless editor of the project in the background for rpc, capture and mcp, or closes it",cmd_session},
     {"capture",CAPTURE_USAGE,"Captures the world of the project without the editor UI, with its validation errors and image statistics",cmd_capture},
-    {"record",RECORD_USAGE,"Records the game of the project frame after frame at a fixed rate as 16-bit PNG or EXR images and a WAV, with its validation errors",cmd_record},
+    {"record",RECORD_USAGE,"Records the game of the project frame after frame at a fixed rate as 16-bit PNG or EXR images and a WAV, with a contact sheet and a manifest of its frames and its validation errors",cmd_record},
     {"render",RENDER_USAGE,"Measures the fixed views of a project as the user sees them (cost per pass, stability, luminance, captures) against the base build",cmd_render},
     {"bench",BENCH_USAGE,"Measures the frame cost of a project against the base build in alternating pairs, alone among the checkouts, and writes the table for a report",cmd_bench},
     {"rpc",RPC_USAGE,"Calls a method of the editor of the project or of the given port, shows fields of the response or waits for a state; describe shows the params of the methods",cmd_rpc},

@@ -122,7 +122,7 @@ It prints its result with the editor's validation and exits with 1 if there are 
 ```sh
 mirai rpc <method> [json|-|--file F] [--select FIELDS] [--wait-until CONDITION [--every S]]
   [--project P] [--port N] [--timeout S] [--wait S]
-mirai rpc describe [plugin|method|prefix] [--project P|--port N]
+mirai rpc describe [plugin|method|prefix|method...] [--project P|--port N]
 mirai rpc --batch <calls.jsonl> [the same options]
 ```
 
@@ -161,7 +161,7 @@ from the end if `i` is negative (`entities[0].id`, `entities[-1]`).
 It reads `engine.describe`: with no argument, the methods grouped by plugin (`editor` first) with
 their summary, and the plugins the project finds and does not use. With the name of a plugin (or
 `editor`), the methods of that area; with a method, or with a prefix (`scene.` or `scene`), those
-that start that way. For each, its flags and its summary, each param with its type (range, length,
+that start that way; with several methods, those (`methods` of `engine.describe`). For each, its flags and its summary, each param with its type (range, length,
 unit, enum, id), `required` or its default value and its label, an example of valid params and
 each field of the result with its type and its label. A name that lists none is `-32602` with the
 similar ones.
@@ -194,7 +194,7 @@ batch, without sessions or server events.
   summary, `inputSchema` and annotations from its flags, and at the end `call` (`method` and
   `params`), which runs any method by its name. `tools/call` is not filtered: it also takes the
   name of a tool that was not listed.
-- `engine.describe` with `method`, `prefix` or `plugin` adds to `guides` the guides
+- `engine.describe` with `methods`, `prefix` or `plugin` adds to `guides` the guides
   (`api.server_guides_set`) of the methods it gives: those of the plugin of any of them, that of
   the method or that of a prefix of its name ending in a dot. Without parameters it gives no
   guides. It paginates with `nextCursor`. `outputSchema` goes with a result declared with a type

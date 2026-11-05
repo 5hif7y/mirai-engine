@@ -11,6 +11,11 @@ import "mirai:rhi"
 // the sun; the aerial perspective of a view with its camera. Each is
 // recomputed only then, always from the same samples.
 
+// How far, metres, the eye of a view may rise or fall from the altitude its
+// sky row was computed at before it is computed again: over it the light of
+// the sky and the dip of the horizon barely move.
+AIR_SKY_ALTITUDE_TOLERANCE :: 1
+
 // AIR_* of air.slang.
 AIR_TRANSMITTANCE_TEXTURE :: rhi.TEXTURE_TABLE_CAPACITY - 2
 AIR_SCATTERING_TEXTURE :: rhi.TEXTURE_TABLE_CAPACITY - 3
@@ -203,8 +208,10 @@ air_frame :: proc(r: ^Renderer, cmd: ^rhi.Command_List) -> bool {
 }
 
 // The air of a view into its constants, its row of the sky computed again
-// when its eye or the sun moved: a window view has its own, those drawn into
-// a texture take that of the first view of the window.
+// when its eye moved more than AIR_SKY_ALTITUDE_TOLERANCE up or down or the sun
+// moved: a window view has its own, those drawn into a texture take that of
+// the first view of the window. The row is read with the altitude of the eye,
+// as only the dip of the horizon would move with it, a fraction of a texel.
 @(private)
 air_view :: proc(p: ^Pass, f: ^Gpu_Frame) {
 	r := p.r
@@ -217,7 +224,7 @@ air_view :: proc(p: ^Pass, f: ^Gpu_Frame) {
 	if p.texture && !p.first {return}
 	sun := linalg.normalize0(r.scene.sun.direction).y
 	held := &r.air.rows[row]
-	if held.held && held.altitude == altitude && held.sun == sun {return}
+	if held.held && abs(altitude - held.altitude) <= AIR_SKY_ALTITUDE_TOLERANCE && held.sun == sun {return}
 	cmd := p.cmd
 	rhi.cmd_timestamp(cmd, "air sky")
 	Params :: struct {air: Gpu_Air, sun: Vec4}

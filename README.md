@@ -64,6 +64,17 @@ same scene, at the same time. Connect your favorite agent inside the editor, or 
 - **Multiplayer games, first-party.** Authoritative server, client prediction, rollback, lag
   compensation, delta replication and dedicated servers, with networked Play inside the editor.
 
+### Debugging with your agent
+
+- **It sees what you see.** An agent captures the editor with its UI or the game frame by frame,
+  so you can point at a glitch instead of describing it.
+- **It plays the game itself.** In its own copy of your Play, an agent presses actions, advances
+  exact ticks and checks the result.
+- **It reads your game while you play.** Entities, components, the player and what failed and why,
+  live, without stopping you.
+- **Rewind.** Every Play keeps its recent past. Pause, scrub back to the moment it went wrong,
+  inspect or fix the world there and play on from that frame. Agents can jump to any tick too.
+
 ### Data-oriented to the core
 
 - **A game is data and functions.** Components and storages are flat structs; loop functions

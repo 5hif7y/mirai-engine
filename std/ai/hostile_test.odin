@@ -654,10 +654,10 @@ hostile_corridors_forged_and_followed :: proc(t:^testing.T) {
             switch hostile_int(&h,7) {
             case 0: _=nav_corridor_corners(&c,&mesh,corners[:hostile_int(&h,5)],hostile_f32(&h))
             case 1: _=nav_corridor_move(&c,&mesh,&filter,hostile_nav_point(&h,2))
-            case 2: nav_corridor_shortcut(&c,&mesh,&filter,hostile_nav_point(&h,2),hostile_f32(&h))
+            case 2: c.count=i32(nav_path_straighten(&mesh,&filter,hostile_nav_point(&h,2),hostile_nav_point(&h,2),c.path[:],int(c.count)))
             case 3: _,_,_,_=nav_corridor_cross(&c,&mesh)
             case 4: _=nav_corridor_valid(&c,&mesh,&filter,hostile_int(&h,80)-4)
-            case 5: _=nav_corridor_set(&c,&mesh,hostile_nav_point(&h,2),refs[:hostile_int(&h,n+1)])
+            case 5: _=nav_corridor_set(&c,&mesh,&filter,hostile_nav_point(&h,2),refs[:hostile_int(&h,n+1)])
             case 6: nav_corridor_reset(&c,refs[hostile_int(&h,max(n,1))],hostile_nav_point(&h,2))
             }
             _=nav_corridor_first(&c)

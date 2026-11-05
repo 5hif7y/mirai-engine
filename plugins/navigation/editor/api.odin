@@ -410,6 +410,7 @@ path :: proc(s:^editor.Session,call:^api.Call) {
     corners:=make([]ai.Nav_Corner,512,context.temp_allocator)
     target:=end
     if partial && count>0 {target,_=ai.nav_closest_point_on_poly(mesh,refs[count-1],end)}
+    count=ai.nav_path_straighten(mesh,&filter,start,target,refs,count)
     n_corners,_:=ai.nav_straight_path(mesh,start,target,refs[:count],corners)
     w:=call.out
     serial.text_write_raw(w,"{")

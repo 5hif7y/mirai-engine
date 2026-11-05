@@ -10,7 +10,7 @@ corridor_plan :: proc(t:^testing.T,c:^Nav_Corridor,q:^Nav_Query,mesh:^Nav_Mesh,f
     count,status,_:=nav_find_path(q,mesh,from,nearest(t,mesh,b),a,b,filter,path[:])
     testing.expect_value(t,status,Search_Status.Found)
     nav_corridor_reset(c,from,a)
-    testing.expect(t,nav_corridor_set(c,mesh,b,path[:count]))
+    testing.expect(t,nav_corridor_set(c,mesh,filter,b,path[:count]))
 }
 
 @(test)
@@ -43,12 +43,69 @@ a_corridor_follows_the_agent_and_gives_its_next_corner :: proc(t:^testing.T) {
         if length>0.25 {step*=0.25/length}
         testing.expect(t,nav_corridor_move(&c,&mesh,&filter,position+step))
         position=c.position
-        nav_corridor_shortcut(&c,&mesh,&filter,next,4)
         // Never through the wall.
         testing.expect(t,!(position.x>4.01 && position.x<4.99 && position.z<5.99))
     }
     testing.expect(t,arrived)
     testing.expect(t,c.count==1 && c.path[0]==nearest(t,&mesh,b))
+}
+
+@(test)
+a_planned_path_is_straightened_but_keeps_around_a_costly_area :: proc(t:^testing.T) {
+    mesh:Nav_Mesh
+    testing.expect(t,nav_mesh_init(&mesh,{tile_width=8,climb=0.3,max_tiles=4}))
+    defer nav_mesh_destroy(&mesh)
+    // Area 2 is a band at x 4..5 below z 6; area 3 a patch at x 2..3 below z 5.
+    tile:=cell_tile(t,{0,0},8,8,size=8)
+    for &p,i in tile.polys {
+        cell:=i/2
+        if cell%8==4 && cell/8<6 {p.area=2}
+        if cell%8==2 && cell/8<5 {p.area=3}
+    }
+    testing.expect(t,nav_mesh_add_tile(&mesh,tile))
+    q:Nav_Query
+    testing.expect(t,nav_query_init(&q,512))
+    defer nav_query_destroy(&q)
+    a,b:=math.Vec3{0.5,0,1.5},math.Vec3{6.5,0,1.5}
+    from:=nearest(t,&mesh,a)
+    // A* goes around both; the agent's filter only minds the band.
+    planned:=test_filter()
+    planned.costs[2],planned.costs[3]=10,10
+    path:[256]Nav_Ref
+    count,status,_:=nav_find_path(&q,&mesh,from,nearest(t,&mesh,b),a,b,&planned,path[:])
+    testing.expect_value(t,status,Search_Status.Found)
+    filter:=test_filter()
+    filter.costs[2]=10
+    corners:[16]Nav_Corner
+    raw,_:=nav_straight_path(&mesh,a,b,path[:count],corners[:])
+    length :: proc(corners:[]Nav_Corner) -> (sum:f32) {
+        for i in 1..<len(corners) {sum+=linalg.distance(corners[i-1].position,corners[i].position)}
+        return
+    }
+    before:=length(corners[:raw])
+    c:Nav_Corridor
+    nav_corridor_reset(&c,from,a)
+    testing.expect(t,nav_corridor_set(&c,&mesh,&filter,b,path[:count]))
+    areas:bit_set[0..=NAV_AREA_MAX;u64]
+    for ref in c.path[:c.count] {
+        _,poly:=nav_poly_of(&mesh,ref)
+        areas+={poly.area}
+    }
+    n,complete:=nav_straight_path(&mesh,c.position,c.target,c.path[:c.count],corners[:])
+    testing.expect(t,complete)
+    // Straight through the patch, around the band by its top corners.
+    testing.expect(t,3 in areas)
+    testing.expect(t,length(corners[:n])<before-0.1)
+    for corner in corners[:n] {
+        testing.expect(t,!(corner.position.x>4.01 && corner.position.x<4.99 && corner.position.z<5.99))
+    }
+    testing.expect(t,n==4 && linalg.distance(corners[1].position,math.Vec3{4,0,6})<1e-3 && linalg.distance(corners[2].position,math.Vec3{5,0,6})<1e-3)
+    // With the band as cheap as the ground, the path goes straight through it.
+    filter.costs[2]=1
+    nav_corridor_reset(&c,from,a)
+    testing.expect(t,nav_corridor_set(&c,&mesh,&filter,b,path[:count]))
+    n,_=nav_straight_path(&mesh,c.position,c.target,c.path[:c.count],corners[:])
+    testing.expect_value(t,n,2)
 }
 
 @(test)
@@ -150,10 +207,9 @@ following_a_path_and_querying_the_mesh_do_not_allocate :: proc(t:^testing.T) {
         if status!=.Found {break}
         nav_straight_path(&mesh,a,b,path[:count],corners[:])
         nav_corridor_reset(&c,from,a)
-        nav_corridor_set(&c,&mesh,b,path[:count])
+        nav_corridor_set(&c,&mesh,&filter,b,path[:count])
         nav_corridor_move(&c,&mesh,&filter,a+{0.1*f32(round),0,0})
         nav_corridor_corners(&c,&mesh,corners[:])
-        nav_corridor_shortcut(&c,&mesh,&filter,{2.9,0,1},4)
         nav_raycast(&mesh,from,a,{2.5,0,1.5},&filter,visited[:])
         nav_random_point(&mesh,&filter,&rng)
         nav_random_point_around(&q,&mesh,from,a,2,&filter,&rng)

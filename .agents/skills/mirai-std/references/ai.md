@@ -92,6 +92,10 @@ counterclockwise seen from above, and the queries do not depend on the winding.
   below the straight line.
 - `nav_straight_path` pulls the path taut with the funnel and cuts at each link: corners with
   `Start`, `End` and `Link` (the start of a link, with its reference).
+- `nav_path_straighten` removes, in one pass, each bend of the pulled path that a raycast skips at
+  no more cost than the bend: the ray's polygons replace the bend's. A ray never crosses an area
+  dearer than the stretch it replaces, so a path does not cut through what A* went around; the
+  path is pulled again and stays as it was if that costs more.
 - `nav_find_nearest`, `nav_poly_height` (through the detail mesh), `nav_closest_point_on_poly`,
   `nav_move_along_surface` (moving without crossing walls or links), `nav_raycast` (over the surface
   seen from above), `nav_random_point`, `nav_random_point_around` and `nav_distance_to_wall`.
@@ -100,9 +104,10 @@ counterclockwise seen from above, and the queries do not depend on the winding.
 
 - `Nav_Corridor` is the path an agent follows, flat and of fixed capacity: what exceeds it is cut
   and the target stays on the last polygon, to plan again near it.
+- `nav_corridor_set` takes a planned path and straightens it once (`nav_path_straighten`); the
+  corridor is not straightened again while it is followed.
 - Each tick: `nav_corridor_move` takes the start to where the agent is (what it walked off the path
-  is added ahead), `nav_corridor_corners` gives the next corners up to the first link and
-  `nav_corridor_shortcut` shortens the front when the agent sees its next corner straight ahead.
+  is added ahead) and `nav_corridor_corners` gives the next corners up to the first link.
 - `nav_corridor_cross` crosses the link at the front and leaves the agent at its end;
   `nav_corridor_valid` says whether the first steps still exist and the filter walks them.
 

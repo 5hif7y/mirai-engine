@@ -469,7 +469,6 @@ agent_follow :: proc(n:^Navigation,p:^Nav_Path,e:core.Entity,agent:Nav_Agent,pos
         core.push(&events.queue,Nav_Event{kind=.Crossing,entity=e,link=kind,manual=p.manual,from=from,to=to})
         return
     }
-    ai.nav_corridor_shortcut(&p.corridor,mesh,filter,next.position,6)
     speed:=walk.max_speed if walk.max_speed>0 else 3
     if .End in next.flags && distance<1 {speed*=max(distance,0.2)}
     p.velocity=flat/max(distance,1e-4)*speed
@@ -729,7 +728,7 @@ agents_search :: proc(n:^Navigation,a:^Navigation_Agents,b:^Navigation_Builds,pa
         }
         target:=a.query.end
         if partial {target,_=ai.nav_closest_point_on_poly(mesh,a.refs[count-1],a.query.end)}
-        if !ai.nav_corridor_set(&p.corridor,mesh,target,a.refs[:count]) {agent_fail(p,e,events);continue}
+        if !ai.nav_corridor_set(&p.corridor,mesh,&a.query.filter,target,a.refs[:count]) {agent_fail(p,e,events);continue}
         p.partial=partial || final!=.Found
         p.state=.Moving
         p.time=0
@@ -845,7 +844,7 @@ agent_medium_path :: proc(n:^Navigation,a:^Navigation_Agents,p:^Nav_Path,e:core.
     } else {
         mesh:=&n.classes[p.class].mesh
         if !crosses && (partial || part<count) {target,_=ai.nav_closest_point_on_poly(mesh,a.refs[part-1],q.end)}
-        set=ai.nav_corridor_set(&p.corridor,mesh,target,a.refs[:part])
+        set=ai.nav_corridor_set(&p.corridor,mesh,&q.filter,target,a.refs[:part])
     }
     if !set {agent_fail(p,e,events);return}
     p.medium=crosses

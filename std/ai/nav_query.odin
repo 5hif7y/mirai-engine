@@ -372,6 +372,176 @@ nav_on_segment_xz :: proc "contextless" (p,a,b:math.Vec3) -> bool {
     return cross*cross<=tolerance*tolerance*length2 && ax*bx+az*bz<=0
 }
 
+NAV_STRAIGHTEN_POLYS :: 256 // longest path nav_path_straighten works on
+NAV_STRAIGHTEN_RAY :: 64    // polygons one of its rays may cross
+NAV_STRAIGHTEN_INSET :: 0.01 // metres a ray ends inside the polygon past a corner
+
+// Takes out the bends of the straight path from `start` to `end` through
+// path[:count] that a raycast skips at no more cost than the bend walks: the
+// polygons the ray crosses replace those the bend went through. One pass over
+// the bends; the path is pulled again and stays as it was when that costs
+// more. len(path) is its room. The new count.
+nav_path_straighten :: proc(mesh:^Nav_Mesh,filter:^Nav_Filter,start,end:math.Vec3,path:[]Nav_Ref,count:int) -> int {
+    if mesh==nil || filter==nil || count<2 || count>min(len(path),NAV_STRAIGHTEN_POLYS) {return count}
+    corners:[NAV_STRAIGHTEN_POLYS+2]Nav_Corner
+    at:[NAV_STRAIGHTEN_POLYS+2]int
+    n,complete:=nav_straight_path(mesh,start,end,path[:count],corners[:])
+    if !complete || n<3 || !nav_corner_indices(path[:count],corners[:n],at[:n]) {return count}
+    before,priced:=nav_pulled_cost(mesh,filter,path[:count],corners[:n],at[:n])
+    if !priced {return count}
+    original:[NAV_STRAIGHTEN_POLYS]Nav_Ref
+    copy(original[:count],path[:count])
+    total:=count
+    changed:=false
+    for k:=1;k+1<n; {
+        delta,removed:=nav_remove_bend(mesh,filter,path[:min(len(path),NAV_STRAIGHTEN_POLYS)],&total,corners[:n],at[:n],k)
+        if !removed {k+=1;continue}
+        for j in k+1..<n {at[j]+=delta}
+        copy(corners[k:n-1],corners[k+1:n])
+        copy(at[k:n-1],at[k+1:n])
+        n-=1
+        changed=true
+    }
+    if !changed {return count}
+    n,complete=nav_straight_path(mesh,start,end,path[:total],corners[:])
+    if complete && nav_corner_indices(path[:total],corners[:n],at[:n]) {
+        after,ok:=nav_pulled_cost(mesh,filter,path[:total],corners[:n],at[:n])
+        if ok && after<=before {return total}
+    }
+    copy(path[:count],original[:count])
+    return count
+}
+
+// For each corner of a straight path, the index in `path` of the polygon the
+// path goes on through from it: of the link for a link start, of the last
+// node for the end.
+@(private)
+nav_corner_indices :: proc "contextless" (path:[]Nav_Ref,corners:[]Nav_Corner,at:[]int) -> bool {
+    i:=0
+    for corner,k in corners {
+        if k>0 {
+            if .End in corner.flags && .Link not_in corner.flags {
+                i=len(path)-1
+            } else {
+                for i<len(path) && path[i]!=corner.ref {i+=1}
+                if i>=len(path) {return false}
+            }
+        }
+        at[k]=i
+    }
+    return true
+}
+
+// The index in `path` of the last polygon the straight path walks before
+// corner k: the one before its link for a link start.
+@(private)
+nav_corner_last_poly :: #force_inline proc "contextless" (corners:[]Nav_Corner,at:[]int,k:int) -> int {
+    return at[k]-1 if .Link in corners[k].flags else at[k]
+}
+
+// What walking a straight path costs, as A* counts it: each stretch on the
+// polygons it crosses, each link from end to end.
+@(private)
+nav_pulled_cost :: proc(mesh:^Nav_Mesh,filter:^Nav_Filter,path:[]Nav_Ref,corners:[]Nav_Corner,at:[]int) -> (cost:f32,ok:bool) {
+    from:=corners[0].position
+    for k in 1..<len(corners) {
+        first:=at[k-1]
+        if .Link in corners[k-1].flags {
+            link:=nav_link_of(mesh,path[first])
+            if link==nil {return}
+            enter,leave,_,_:=nav_link_ends(link,path[first])
+            cost+=linalg.distance(enter,leave)*nav_filter_cost(filter,link.desc.area)+link.desc.cost
+            from=leave
+            first+=1
+        }
+        last:=nav_corner_last_poly(corners,at,k)
+        if last>=first {cost+=nav_segment_cost(mesh,filter,from,corners[k].position,path[first:last+1])}
+        from=corners[k].position
+    }
+    return cost,true
+}
+
+// What the segment from a to b costs over `polys`, in the order it crosses
+// them: each part by the cost of its area, and what none of them holds by the
+// last one's.
+@(private)
+nav_segment_cost :: proc(mesh:^Nav_Mesh,filter:^Nav_Filter,a,b:math.Vec3,polys:[]Nav_Ref) -> f32 {
+    length:=linalg.distance(a,b)
+    if !(length>0) {return 0}
+    cost,walked,area_cost:=f32(0),f32(0),f32(1)
+    for ref in polys {
+        tile,poly:=nav_poly_of(mesh,ref)
+        if poly==nil {continue}
+        corners:[NAV_VERTS_PER_POLY]math.Vec3
+        n:=nav_poly_vertices(tile,poly,&corners)
+        ok,tmin,tmax,_,_:=nav_segment_poly_xz(a,b,corners[:n])
+        area_cost=nav_filter_cost(filter,poly.area)
+        if !ok {continue}
+        from:=max(tmin,walked)
+        if tmax>from {cost+=(tmax-from)*length*area_cost;walked=tmax}
+    }
+    return cost+max(1-walked,0)*length*area_cost
+}
+
+// Replaces the polygons from corner k-1 to corner k+1 with those of a ray
+// between them when the ray reaches k+1 and costs no more than the bend at k.
+// How much the index of what follows moved.
+@(private)
+nav_remove_bend :: proc(mesh:^Nav_Mesh,filter:^Nav_Filter,path:[]Nav_Ref,total:^int,corners:[]Nav_Corner,at:[]int,k:int) -> (delta:int,ok:bool) {
+    previous,bend,next:=corners[k-1],corners[k],corners[k+1]
+    if .Link in previous.flags || bend.flags&{.Start,.End,.Link}!={} {return}
+    count:=total^
+    from,through,to:=at[k-1],at[k],nav_corner_last_poly(corners,at,k+1)
+    if to<through || to>=count {return}
+    // A corner is a vertex that several polygons of the path share: the ray
+    // aims a little inside the first of them, the side the bend reaches it
+    // from, so that it ends on that one without grazing the others.
+    target:=next.position
+    if next.flags&{.Link,.End}=={} {
+        first:=through
+        for first<to {
+            on,_:=nav_closest_point_on_poly(mesh,path[first],target)
+            if (on.x-target.x)*(on.x-target.x)+(on.z-target.z)*(on.z-target.z)<=1e-6 {break}
+            first+=1
+        }
+        to=first
+        tile,poly:=nav_poly_of(mesh,path[to])
+        if poly==nil {return}
+        inward:=nav_poly_center(tile,poly)-target
+        distance:=linalg.length(inward)
+        if distance>0 {target+=inward*(min(NAV_STRAIGHTEN_INSET,distance*0.5)/distance)}
+    }
+    visited:[NAV_STRAIGHTEN_RAY]Nav_Ref
+    t,_,crossed:=nav_raycast(mesh,path[from],previous.position,target,filter,visited[:])
+    if t!=max(f32) || crossed==0 || crossed>=len(visited) {return}
+    // Never onto an area dearer than the bend walks, however short the part.
+    dearest:f32
+    for ref in path[from:to+1] {
+        if _,poly:=nav_poly_of(mesh,ref);poly!=nil {dearest=max(dearest,nav_filter_cost(filter,poly.area))}
+    }
+    for ref in visited[:crossed] {
+        _,poly:=nav_poly_of(mesh,ref)
+        if poly==nil || nav_filter_cost(filter,poly.area)>dearest {return}
+    }
+    // The ray ends on a polygon of the bend that holds the next corner.
+    resume:=-1
+    for j in through..=to {if path[j]==visited[crossed-1] {resume=j+1;break}}
+    if resume<0 {return}
+    for ref in visited[1:max(crossed-1,1)] {
+        for j in 0..<from {if path[j]==ref {return}}
+        for j in resume..<count {if path[j]==ref {return}}
+    }
+    size:=from+crossed+count-resume
+    if size>len(path) {return}
+    straight:=nav_segment_cost(mesh,filter,previous.position,target,visited[:crossed])
+    bent:=nav_segment_cost(mesh,filter,previous.position,bend.position,path[from:through+1])+nav_segment_cost(mesh,filter,bend.position,target,path[through:to+1])
+    if !(straight<=bent) {return}
+    copy(path[from+crossed:size],path[resume:count])
+    copy(path[from:from+crossed],visited[:crossed])
+    total^=size
+    return from+crossed-resume,true
+}
+
 // Which edges of a polygon lead to a polygon the filter walks.
 @(private)
 nav_open_edges :: proc "contextless" (mesh:^Nav_Mesh,ref:Nav_Ref,filter:^Nav_Filter) -> (open:[NAV_VERTS_PER_POLY]Nav_Ref) {

@@ -1,6 +1,5 @@
 package ai
 
-import "core:math/linalg"
 import math "mirai:std/math"
 
 // The path an agent follows, as plain data that copies with the agent: the
@@ -26,9 +25,10 @@ nav_corridor_reset :: proc "contextless" (c:^Nav_Corridor,ref:Nav_Ref,position:m
     c.count=1 if ref!=0 else 0
 }
 
-// Takes a path that starts on the polygon the agent is on. When it does not
-// fit, its first part, with the target moved onto the last polygon kept.
-nav_corridor_set :: proc "contextless" (c:^Nav_Corridor,mesh:^Nav_Mesh,target:math.Vec3,path:[]Nav_Ref) -> bool {
+// Takes a path that starts on the polygon the agent is on and straightens it
+// once (nav_path_straighten). When it does not fit, its first part, with the
+// target moved onto the last polygon kept.
+nav_corridor_set :: proc(c:^Nav_Corridor,mesh:^Nav_Mesh,filter:^Nav_Filter,target:math.Vec3,path:[]Nav_Ref) -> bool {
     if len(path)==0 || !nav_ref_valid(mesh,path[0]) {return false}
     count:=min(len(path),NAV_CORRIDOR_CAPACITY)
     // A cut path does not end on a link: its end would have no polygon.
@@ -39,6 +39,7 @@ nav_corridor_set :: proc "contextless" (c:^Nav_Corridor,mesh:^Nav_Mesh,target:ma
     if count<len(path) || nav_ref_is_link(path[count-1]) {
         c.target,_=nav_closest_point_on_poly(mesh,c.path[count-1],target)
     }
+    c.count=i32(nav_path_straighten(mesh,filter,c.position,c.target,c.path[:],count))
     return true
 }
 
@@ -101,38 +102,6 @@ nav_merge_start_moved :: proc "contextless" (path:[]Nav_Ref,count:int,visited:[]
     if need+size>len(path) {size=len(path)-need}
     if size>0 {copy(path[need:need+size],path[from:from+size])}
     for i in 0..<need {path[i]=visited[len(visited)-1-i]}
-    return need+size
-}
-
-// Shortens the front of the corridor when the agent can walk straight
-// toward `next` (its next corner), seen up to `range` metres: the polygons
-// the straight line crosses replace those the path took to get there.
-nav_corridor_shortcut :: proc(c:^Nav_Corridor,mesh:^Nav_Mesh,filter:^Nav_Filter,next:math.Vec3,range:f32) {
-    first:=nav_corridor_first(c)
-    if c.count<3 || nav_ref_is_link(first) || !nav_ref_valid(mesh,first) || !(range>0) {return}
-    delta:=math.Vec3{next.x-c.position.x,0,next.z-c.position.z}
-    distance:=linalg.length(delta)
-    if !(distance>0.01) {return}
-    distance=min(distance+0.01,range)
-    goal:=c.position+delta*(distance/linalg.length(delta))
-    visited:[16]Nav_Ref
-    t,_,count:=nav_raycast(mesh,first,c.position,goal,filter,visited[:])
-    if count>1 && t>0.99 {c.count=i32(nav_merge_start_shortcut(c.path[:],len(nav_corridor_slice(c)),visited[:count]))}
-}
-@(private)
-nav_merge_start_shortcut :: proc "contextless" (path:[]Nav_Ref,count:int,visited:[]Nav_Ref) -> int {
-    furthest_path,furthest_visited:=-1,-1
-    search: for i:=count-1;i>=0;i-=1 {
-        for j:=len(visited)-1;j>=0;j-=1 {
-            if path[i]==visited[j] {furthest_path,furthest_visited=i,j;break search}
-        }
-    }
-    if furthest_path<0 || furthest_visited<=0 {return count}
-    need:=furthest_visited
-    size:=max(0,count-furthest_path)
-    if need+size>len(path) {size=len(path)-need}
-    if size>0 {copy(path[need:need+size],path[furthest_path:furthest_path+size])}
-    for i in 0..<need {path[i]=visited[i]}
     return need+size
 }
 

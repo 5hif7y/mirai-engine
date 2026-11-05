@@ -540,13 +540,14 @@ net_test_own :: proc(w:^Net_Test_World,e:core.Entity,connection:Connection) {
 }
 
 @(private)
-net_test_session :: proc(s:^Net_Session,w:^Net_Test_World,info:^core.World_Info,app:^host.App,network:^wire.Sim_Network,endpoint:int,mode:wire.Mode,transport:wire.Transport={},settings:=Net_Settings{max_objects=8,predicted_capacity=8,history=16,resimulate_budget=600}) -> bool {
+net_test_session :: proc(s:^Net_Session,w:^Net_Test_World,info:^core.World_Info,app:^host.App,network:^wire.Sim_Network,endpoint:int,mode:wire.Mode,transport:wire.Transport={},settings:=Net_Settings{max_objects=8,predicted_capacity=8,replication={history_seconds=0.25},resimulate_budget=600}) -> bool {
     s.allocator,s.info=context.allocator,info
-    s.desc=settings_resolve(settings,1.0/60)
+    tick_dt:=app.tick_dt>0?app.tick_dt:1.0/60
+    s.desc=settings_resolve(settings,tick_dt)
     if !protocol_build(s,core.world_ref(w,info)) {return false}
     exchange:=transport
     if exchange.send==nil {exchange=wire.sim_endpoint_transport(network,endpoint)}
-    desc:=wire.Host_Desc{mode=mode,protocol=&s.protocol,transport=exchange,protocol_id=99,seed=u64(endpoint+1),tick_rate=60,replication=s.desc.replication,hold=s.follows,allocator=context.allocator}
+    desc:=wire.Host_Desc{mode=mode,protocol=&s.protocol,transport=exchange,protocol_id=99,seed=u64(endpoint+1),tick_rate=int(1/tick_dt+0.5),replication=s.desc.replication,hold=s.follows,allocator=context.allocator}
     desc.replication.max_objects=s.desc.max_objects
     if wire.host_init(&s.host,desc)!=.None {return false}
     s.host_ready,s.mode=true,mode
@@ -1070,7 +1071,7 @@ replicas_joined_to_any_of_many_driven_bodies_are_critical :: proc(t:^testing.T) 
     testing.expect(t,wire.sim_network_init(&network,{seed=9,endpoints=2,packets=64}))
     defer wire.sim_network_destroy(&network)
     s:Net_Session
-    if !testing.expect(t,net_test_session(&s,&world,&info,&app,&network,1,.Client,settings={max_objects=64,predicted_capacity=8,history=16})) {return}
+    if !testing.expect(t,net_test_session(&s,&world,&info,&app,&network,1,.Client,settings={max_objects=64,predicted_capacity=8,replication={history_seconds=0.25}})) {return}
     defer session_destroy(&s)
     c:=&s.client
     replica :: proc(c:^Client,index:int,e:core.Entity,role:Role) {c.replicas[index]={object=Object(index),entity=e,role=role,slot=-1}}

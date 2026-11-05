@@ -38,8 +38,8 @@ MAX_CONNECTIONS :: 1024
 @(private) SECTION_RESERVE :: 4 // bits kept free for the terminators of the sections still to come
 @(private) DATA_HEADER :: 3     // bytes: type and sequence
 @(private) CHECKSUM_BYTES :: 4
-@(private) ACCEPT_BYTES :: 12   // server salt and object capacity, sealed on an encrypted connection
-@(private) TRANSPORT_VERSION :: 3 // of the layout of the datagrams after the handshake: raised when it changes
+@(private) ACCEPT_BYTES :: 16   // server salt, object capacity and ticks of history, sealed on an encrypted connection
+@(private) TRANSPORT_VERSION :: 4 // of the layout of the datagrams after the handshake: raised when it changes
 
 Connection_Stats :: struct {
     rtt,rtt_variance,jitter:f32, // seconds
@@ -57,6 +57,7 @@ Connection_Stats :: struct {
     object_bytes_sent,object_bytes_received:u64,
     objects_sent,objects_received:u64,
     inputs_received,inputs_missed:u64,
+    inputs_early:u64,            // server: further ahead of its tick than the history, dropped
     budget_starved:u64,          // updates that left objects waiting for lack of budget
     send_limit:f32,              // bytes per second congestion control allows now
     send_limit_cuts:u64,         // times it cut the limit for congestion
@@ -209,11 +210,11 @@ peer_connect :: proc(h:^Host,address:Address,credentials:^Credentials) {
 }
 
 @(private)
-peer_established :: proc(h:^Host,p:^Peer) {
+peer_established :: proc(h:^Host,p:^Peer,history:int) {
     p.key=base.hash_combine(h.back.key,p.client_salt~p.server_salt)
     p.state=.Connected
     p.last_receive=h.back.now
-    command_push(h,{kind=.Connected,connection=peer_handle(h,p),client_id=p.secure.client_id})
+    command_push(h,{kind=.Connected,connection=peer_handle(h,p),client_id=p.secure.client_id,tick=u32(history)})
     repl_peer_connected(h,p)
 }
 
@@ -423,15 +424,17 @@ handshake_accept :: proc(h:^Host,p:^Peer) {
     if h.desc.security.mode==.Encrypted {
         s:=&p.secure
         sealed:[ACCEPT_BYTES+TAG_BYTES]u8
-        salt,objects:=u64le(p.server_salt),u32le(h.desc.replication.max_objects)
+        salt,objects,history:=u64le(p.server_salt),u32le(h.desc.replication.max_objects),u32le(h.history)
         mem.copy(&sealed[0],&salt,8)
         mem.copy(&sealed[8],&objects,4)
+        mem.copy(&sealed[12],&history,4)
         aead_seal(&s.accept,0,s.public[:],sealed[:ACCEPT_BYTES],sealed[ACCEPT_BYTES:])
         serial.bit_write_bytes(&w,s.public[:])
         serial.bit_write_bytes(&w,sealed[:])
     } else {
         serial.bit_write(&w,p.server_salt,64)
         serial.bit_write(&w,u64(h.desc.replication.max_objects),32)
+        serial.bit_write(&w,u64(h.history),32)
     }
     handshake_send(h,&w,p.address)
 }
@@ -557,7 +560,7 @@ packet_receive :: proc(h:^Host,bytes:[]u8,from:Address) {
         // One store per value until odin-lang/Odin#7937 (see ODIN_WORKAROUNDS).
         slot.client_salt,slot.server_salt,slot.stamp=salt,rng_next(&b.rng),stamp
         slot.secure=session
-        peer_established(h,slot)
+        peer_established(h,slot,h.history)
         handshake_accept(h,slot)
     case .Challenge:
         stamp:=serial.bit_read(&r,64)
@@ -579,18 +582,20 @@ packet_receive :: proc(h:^Host,bytes:[]u8,from:Address) {
             return
         }
         server_salt:u64le
-        objects:u32le
+        objects,history:u32le
         mem.copy(&server_salt,&answer[0],8)
         mem.copy(&objects,&answer[8],4)
+        mem.copy(&history,&answer[12],4)
         p.server_salt=u64(server_salt)
-        if int(objects)>h.desc.replication.max_objects {
+        // The history of the server is the client's: at most what this end would keep itself.
+        if int(objects)>h.desc.replication.max_objects || history==0 || int(history)>history_ticks(HISTORY_MAX_SECONDS,h.desc.tick_rate) {
             // The server holds the connection already: it hears why, and this end never had it.
             p.key=base.hash_combine(b.key,p.client_salt~p.server_salt)
             peer_notice(h,p,.Capacity)
             peer_drop(h,p,.Capacity,false)
             return
         }
-        peer_established(h,p)
+        peer_established(h,p,int(history))
     case .Denied:
         reason:=serial.bit_read(&r,8)
         if server || r.error || p==nil || p.state==.Connected || p.client_salt!=salt {b.stats.packets_invalid+=1;return}

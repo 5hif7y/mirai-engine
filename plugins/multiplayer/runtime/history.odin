@@ -15,7 +15,7 @@ Authoritative :: struct {
 
 @(private)
 authority_at :: proc(s:^Net_Session,r:^Replica,index:int) -> (^Authoritative,[]u32) {
-    at:=int(r.slot)*s.desc.history+index
+    at:=int(r.slot)*s.client.history+index
     return &s.client.authoritative[at],s.client.authoritative_words[at*s.client.words_per:][:s.client.words_per]
 }
 
@@ -35,8 +35,8 @@ authoritative_capture :: proc(s:^Net_Session,r:^Replica,command:^wire.Command) {
     record,words:=authority_at(s,r,r.authority_next)
     record^={object=r.object,tick=command.tick,mask=command.mask,available=r.available}
     copy(words,command.words)
-    r.authority_next=(r.authority_next+1)%s.desc.history
-    r.authority_count=min(r.authority_count+1,s.desc.history)
+    r.authority_next=(r.authority_next+1)%s.client.history
+    r.authority_count=min(r.authority_count+1,s.client.history)
 }
 
 @(private)
@@ -63,13 +63,13 @@ components_mask :: proc(s:^Net_Session,t:^Net_Type) -> (mask:u64) {
 
 @(private)
 record_components :: proc(s:^Net_Session,w:core.World_Ref,r:^Replica,tick:u32) {
-    at:=(int(tick)%s.desc.history)*s.desc.predicted_capacity+int(r.slot)
+    at:=(int(tick)%s.client.history)*s.desc.predicted_capacity+int(r.slot)
     words:=s.client.record_words[at*s.client.words_per:][:s.client.words_per]
     record:=&s.client.records[at]
     record.bindings=wire.object_binding_revision(&s.host)
     previous:=record_of(&s.client,&s.desc,r,tick-1) or_else nil
     if previous!=nil {
-        old:=(int(tick-1)%s.desc.history)*s.desc.predicted_capacity+int(r.slot)
+        old:=(int(tick-1)%s.client.history)*s.desc.predicted_capacity+int(r.slot)
         copy(words,s.client.record_words[old*s.client.words_per:][:s.client.words_per])
     } else {mem.zero_slice(words)}
     t:=net_type(s,r.type)
@@ -94,7 +94,7 @@ record_components_differ :: proc(s:^Net_Session,r:^Replica,tick:u32,command:^wir
     t:=net_type(s,r.type)
     mask:=components_mask(s,t)&command.mask
     if mask==0 {return false}
-    at:=(int(tick)%s.desc.history)*s.desc.predicted_capacity+int(r.slot)
+    at:=(int(tick)%s.client.history)*s.desc.predicted_capacity+int(r.slot)
     words:=s.client.record_words[at*s.client.words_per:][:s.client.words_per]
     for leaf in s.protocol.types[t.type].leaves {
         if mask&u64(1<<uint(leaf.bit))==0 {continue}

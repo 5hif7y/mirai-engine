@@ -291,9 +291,9 @@ an_object_the_host_has_no_room_for_names_the_capacity_to_raise :: proc(t:^testin
         if !testing.expectf(t,found!=nil,"no %s problem among %d",code,problems.count) {return}
         testing.expectf(t,strings.contains(core.problem_text(found),field),"%s",core.problem_text(found))
     }
-    objects,last:=full(t,{max_objects=1,predicted_capacity=8,history=16},2)
+    objects,last:=full(t,{max_objects=1,predicted_capacity=8,replication={history_seconds=0.25}},2)
     named(t,&objects,last,"net.objects_full","Net_Settings.max_objects")
-    states,first:=full(t,{max_objects=8,predicted_capacity=8,history=16,replication={state_words=1}},1)
+    states,first:=full(t,{max_objects=8,predicted_capacity=8,replication={history_seconds=0.25,state_words=1}},1)
     named(t,&states,first,"net.states_full","Net_Settings.replication.state_words")
 }
 

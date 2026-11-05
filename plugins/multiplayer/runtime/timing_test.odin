@@ -129,7 +129,7 @@ timing_init :: proc(x:^Timing,t:^testing.T,conditions:wire.Sim_Conditions,update
     wire.sim_endpoint_conditions(&x.network,0,conditions)
     wire.sim_endpoint_conditions(&x.network,1,conditions)
     for &session,index in x.sessions {
-        if !testing.expect(t,net_test_session(&session,&x.worlds[index],&x.info,&x.apps[index],&x.network,index,index==0?.Server:.Client,settings={max_objects=max(objects,8),predicted_capacity=8,history=16,resimulate_budget=600})) {return false}
+        if !testing.expect(t,net_test_session(&session,&x.worlds[index],&x.info,&x.apps[index],&x.network,index,index==0?.Server:.Client,settings={max_objects=max(objects,8),predicted_capacity=8,replication={history_seconds=0.25},resimulate_budget=600})) {return false}
         session.problems=&x.problems[index]
         x.shares[index].session=&session
     }

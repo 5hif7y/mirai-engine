@@ -144,8 +144,7 @@ Net_Settings :: struct {
     timeout:f64,             // seconds of silence after which the other end is given up. 10
     connect_timeout:f64,     // client. 5
     max_objects:int,         // replicated entities; a client needs as many as its server. 1024
-    history:int,             // client: ticks of world snapshots kept to correct a prediction. 32
-    max_resimulate:int,      // client: ticks it may simulate again in one frame; what does not fit is closed by correction_time. 0.3 s of ticks, at most history-1
+    max_resimulate:int,      // client: ticks it may simulate again in one frame; what does not fit is closed by correction_time. 0.3 s of ticks, at most the history (replication.history_seconds)
     resimulate_budget:int,   // client: ticks it may simulate again per second. The tick rate
     critical_ticks:int,      // client: ticks a replica stays critical after it last shared an island of the simulation with what the client drives. Half a second
     predicted_capacity:int,  // client: replicas simulated ahead of the server at once. 256
@@ -159,10 +158,10 @@ Net_Settings :: struct {
     rotation_tolerance:f32,  // radians. 0.07
     scale_tolerance:f32,     // 0.001
     correction_time:f32,     // client: seconds in which an error that is not simulated again is closed by two thirds. 0.1
-    sync_test:int,           // client, to debug: ticks it goes back before each frame to run each again and compare with the first time (net.sync_test); 0: none. At most history-1
+    sync_test:int,           // client, to debug: ticks it goes back before each frame to run each again and compare with the first time (net.sync_test); 0: none. At most the history
     // server: seconds the view a client says it saw (Input_Packet.view_behind) may be off from
     // the one its round trip, jitter, input lead and interpolation delay give, before the server
-    // takes the latter instead. 0.2; negative: the client is believed, within REWIND_SECONDS
+    // takes the latter instead. 0.2; negative: the client is believed, within REWIND_SECONDS and the history
     rewind_tolerance:f32,
     absent_seconds:f64,      // server: seconds the seat of a player who left waits off for that player to come back. 300; negative: it goes when they leave
     replication:wire.Replication_Desc,

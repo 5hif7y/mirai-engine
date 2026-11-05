@@ -1,5 +1,6 @@
 package multiplayer
 
+import "base:runtime"
 import "core:math/linalg"
 import "mirai:core"
 import mm "mirai:std/math"
@@ -17,12 +18,9 @@ import mm "mirai:std/math"
 // target was then, and judges against that: nothing moves, and the world is
 // never put back.
 
-// The ticks a server remembers: more than REWIND_SECONDS at any tick rate up
-// to 256 Hz.
-REWIND_TICKS :: 128
 // The entities with Rewind a tick remembers; the rest of a tick is a problem.
 REWIND_ENTITIES :: 64
-// How far back a player can be seen by default.
+// How far back a player can be seen by default, within the history of the session.
 REWIND_SECONDS :: f32(0.5)
 // A move longer than this between two ticks is a teleport, metres: the pose
 // is not interpolated across it.
@@ -43,19 +41,36 @@ Rewind_Frame :: struct {
     poses:[REWIND_ENTITIES]Rewind_Pose,
 }
 
-// Server: the poses of the entities with Rewind, a frame per tick in a ring.
-// It is of this end: neither copied with the world nor sent.
-@(storage,copy=false)
+// Server: the poses of the entities with Rewind, a frame per tick in a ring as
+// deep as the history of the session (session_history) and one more for the
+// tick being written. It is of this end: neither copied with the world nor sent.
+@(storage,host,by_world,free="rewind_free")
 Rewind_History :: struct {
-    frames:[REWIND_TICKS]Rewind_Frame,
+    frames:[]Rewind_Frame, // by tick modulo its length
+    allocator:runtime.Allocator,
+}
+
+rewind_free :: proc(history:^Rewind_History) {
+    delete(history.frames,history.allocator)
+    history^={}
 }
 
 // At the end of a tick, with what the server publishes: the Transform of
 // every entity with Rewind, under the number of the tick.
 @(step="fixed",loops="game",stage="end",before="net_tick_tail")
 rewind_record :: proc(session:core.Ref(Net_Session),time:core.Time,marked:core.Read(Rewind),transforms:core.Read(core.Transform),history:^Rewind_History,problems:^core.Problems) {
-    if session.ptr==nil || session.mode!=.Server || time.resimulating {return}
-    frame:=&history.frames[time.tick%REWIND_TICKS]
+    if session.ptr==nil || !session.host_ready || session.mode!=.Server || time.resimulating {return}
+    if slots:=session_history(session)+1;len(history.frames)!=slots {
+        // Made when the session opens, as a load; a stable tick does not allocate.
+        rewind_free(history)
+        frames,error:=make([]Rewind_Frame,slots)
+        if error!=nil {
+            core.report(problems,core.NONE,"multiplayer.rewind","the poses of %d ticks for lag compensation were not made (out of memory); free memory, or lower Net_Settings.replication.history_seconds",slots-1)
+            return
+        }
+        history^={frames=frames,allocator=context.allocator}
+    }
+    frame:=&history.frames[time.tick%u64(len(history.frames))]
     frame.tick,frame.count=time.tick,0
     for row in 0..<core.count(marked) {
         e:=core.entity_at(marked,row)
@@ -100,7 +115,8 @@ rewind_pose :: proc(history:^Rewind_History,e:core.Entity,tick:f64) -> (position
 
 @(private)
 rewind_find :: proc(history:^Rewind_History,e:core.Entity,tick:u64) -> (pose:Rewind_Pose,ok:bool) {
-    frame:=&history.frames[tick%REWIND_TICKS]
+    if len(history.frames)==0 {return}
+    frame:=&history.frames[tick%u64(len(history.frames))]
     if frame.tick!=tick || tick==0 {return}
     for p in frame.poses[:frame.count] {
         if p.entity==e {return p,true}

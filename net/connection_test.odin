@@ -166,6 +166,37 @@ a_client_with_too_few_objects_never_connects_and_the_server_hears_why :: proc(t:
     testing.expect(t,on_client!=0)
 }
 
+// A server announces its history when it accepts, and its client takes it in place of its
+// own; the server keeps input that far ahead of the tick it published last and drops what
+// comes further, at every tick rate.
+@(test)
+a_client_takes_the_history_of_its_server_and_the_input_fits_it :: proc(t:^testing.T) {
+    Case :: struct {rate:int,security:Security}
+    for c in ([]Case{{60,.None},{240,.Encrypted},{480,.None}}) {
+        tp:Test_Protocol;test_protocol_init(&tp);defer test_protocol_destroy(&tp)
+        w:Test_World;test_world_init(&w,2);defer test_world_destroy(&w)
+        server:=test_host(&w,{mode=.Server,protocol=&tp.protocol,tick_rate=c.rate,security={mode=c.security}})
+        client:=test_host(&w,{mode=.Client,protocol=&tp.protocol,tick_rate=c.rate,replication={history_seconds=0.1},security={mode=c.security}})
+        depth:=int(HISTORY_SECONDS*f32(c.rate))
+        testing.expectf(t,host_history(server)==depth && host_history(client)==history_ticks(0.1,c.rate),"%d Hz: histories %d and %d",c.rate,host_history(server),host_history(client))
+        on_server,on_client:=test_connect(&w,server,client)
+        if !testing.expectf(t,on_server!=0 && on_client!=0,"%d Hz: the client connects",c.rate) {continue}
+        testing.expectf(t,host_history(client)==depth,"%d Hz: the client keeps %d ticks, not the server's %d",c.rate,host_history(client),depth)
+        host_publish(server,1)
+        input:=Test_Input{buttons=1}
+        for tick in u32(1+depth)..=u32(2+depth) {testing.expect_value(t,input_submit(client,tick,&input),Error.None)}
+        host_publish(client,1)
+        test_step(&w,8)
+        host_poll(server)
+        stats,_:=connection_stats(server,on_server)
+        got:Test_Input
+        kept:=input_take(server,on_server,u32(1+depth),&got)
+        testing.expectf(t,kept==.Fresh && got.buttons==1,"%d Hz: the input %d ticks ahead is kept (%v)",c.rate,depth,kept)
+        early:=input_take(server,on_server,u32(2+depth),&got)
+        testing.expectf(t,early!=.Fresh && stats.inputs_early==1,"%d Hz: the input %d ticks ahead is dropped (%v, %d early)",c.rate,depth+1,early,stats.inputs_early)
+    }
+}
+
 @(test)
 disconnects_and_timeouts_reach_both_ends_with_their_reason :: proc(t:^testing.T) {
     w:Test_World;test_world_init(&w,3);defer test_world_destroy(&w)

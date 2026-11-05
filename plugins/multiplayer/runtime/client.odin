@@ -133,6 +133,7 @@ Client :: struct {
     words:[]u32,        // newest quantized state of every replica, words_per each
     words_per:int,
     interpolation:wire.Interpolation,
+    history:int,        // slots of the rings that follow: the server's ticks of history plus one (history_make)
     frames:[]Frame,     // by tick modulo history
     records:[]Record,   // one row of predicted_capacity per tick of the history
     record_words:[]u32,
@@ -181,20 +182,6 @@ client_init :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App) -> bool {
     error:runtime.Allocator_Error
     if c.replicas,error=make([]Replica,d.max_objects,allocator);error!=nil {return false}
     if c.words,error=make([]u32,d.max_objects*c.words_per,allocator);error!=nil {return false}
-    if c.frames,error=make([]Frame,d.history,allocator);error!=nil {return false}
-    for &frame in c.frames {
-        data,alloc_error:=mem.alloc(max(w.info.sizes[.World],1),max(w.info.aligns[.World],1),allocator)
-        if alloc_error!=nil || data==nil {return false}
-        frame.world=data
-        if !w.info.init[.World](data,allocator) {return false}
-        if frame.marks,error=make([]core.Copy_Mark,len(w.info.tables),allocator);error!=nil {return false}
-        if frame.delays,error=make([]Delay,d.max_objects,allocator);error!=nil {return false}
-    }
-    if c.records,error=make([]Record,d.history*d.predicted_capacity,allocator);error!=nil {return false}
-    if c.record_words,error=make([]u32,d.history*d.predicted_capacity*c.words_per,allocator);error!=nil {return false}
-    if c.authoritative,error=make([]Authoritative,d.history*d.predicted_capacity,allocator);error!=nil {return false}
-    if c.authoritative_words,error=make([]u32,d.history*d.predicted_capacity*c.words_per,allocator);error!=nil {return false}
-    if c.record_ticks,error=make([]u32,d.history,allocator);error!=nil {return false}
     if c.record_free,error=make([]i32,d.predicted_capacity,allocator);error!=nil {return false}
     if c.islands,error=make([]u32,d.max_objects,allocator);error!=nil {return false}
     c.budget=f32(d.resimulate_budget)
@@ -204,21 +191,49 @@ client_init :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App) -> bool {
         if alloc_error!=nil || data==nil {return false}
         c.sync_world=data
         if !w.info.init[.World](data,allocator) {return false}
-        if c.sync_hashes,error=make([]u64,(d.history+1)*(len(w.info.tables)+1),allocator);error!=nil {return false}
-        if c.sync_fed,error=make([]u64,d.history+1,allocator);error!=nil {return false}
         // What simulates outside the tables leaves a hash of it for the test.
         if check:=core.world_storage_of(w,core.Sync_Check);check!=nil {check.on=true}
     }
     for &slot,index in c.record_free {slot=i32(d.predicted_capacity-1-index)}
     c.record_free_count=d.predicted_capacity
+    if !history_make(s,w,c,wire.host_history(&s.host)) {return false}
     return wire.interpolation_init(&c.interpolation,{state_size=size_of(Sample),capacity=d.max_objects,depth=INTERPOLATION_DEPTH,allocator=allocator})==.None
 }
 
+// The rings of a history of ticks, each with one slot more: the newest is the tick being
+// written, and the whole history lies behind it. Allocated whole or not at all.
 @(private)
-client_destroy :: proc(s:^Net_Session) {
-    c:=&s.client
+history_make :: proc(s:^Net_Session,w:core.World_Ref,c:^Client,ticks:int) -> (ok:bool) {
+    d:=&s.desc
     allocator:=s.allocator
-    context.allocator=allocator
+    slots:=ticks+1
+    c.history=slots
+    error:runtime.Allocator_Error
+    defer if !ok {history_free(s,c)}
+    if c.frames,error=make([]Frame,slots,allocator);error!=nil {return false}
+    for &frame in c.frames {
+        data,alloc_error:=mem.alloc(max(w.info.sizes[.World],1),max(w.info.aligns[.World],1),allocator)
+        if alloc_error!=nil || data==nil {return false}
+        frame.world=data
+        if !w.info.init[.World](data,allocator) {return false}
+        if frame.marks,error=make([]core.Copy_Mark,len(w.info.tables),allocator);error!=nil {return false}
+        if frame.delays,error=make([]Delay,d.max_objects,allocator);error!=nil {return false}
+    }
+    if c.records,error=make([]Record,slots*d.predicted_capacity,allocator);error!=nil {return false}
+    if c.record_words,error=make([]u32,slots*d.predicted_capacity*c.words_per,allocator);error!=nil {return false}
+    if c.authoritative,error=make([]Authoritative,slots*d.predicted_capacity,allocator);error!=nil {return false}
+    if c.authoritative_words,error=make([]u32,slots*d.predicted_capacity*c.words_per,allocator);error!=nil {return false}
+    if c.record_ticks,error=make([]u32,slots,allocator);error!=nil {return false}
+    if d.sync_test>0 {
+        if c.sync_hashes,error=make([]u64,(slots+1)*(len(w.info.tables)+1),allocator);error!=nil {return false}
+        if c.sync_fed,error=make([]u64,slots+1,allocator);error!=nil {return false}
+    }
+    return true
+}
+
+@(private)
+history_free :: proc(s:^Net_Session,c:^Client) {
+    allocator:=s.allocator
     for &frame in c.frames {
         if frame.world!=nil {
             s.info.destroy[.World](frame.world)
@@ -227,16 +242,43 @@ client_destroy :: proc(s:^Net_Session) {
         delete(frame.marks,allocator)
         delete(frame.delays,allocator)
     }
+    delete(c.frames,allocator)
+    delete(c.records,allocator);delete(c.record_ticks,allocator)
+    delete(c.record_words,allocator);delete(c.authoritative,allocator);delete(c.authoritative_words,allocator)
+    delete(c.sync_hashes,allocator);delete(c.sync_fed,allocator)
+    c.frames,c.records,c.record_ticks,c.record_words,c.authoritative,c.authoritative_words,c.sync_hashes,c.sync_fed=nil,nil,nil,nil,nil,nil,nil,nil
+    c.history=0
+}
+
+// Takes the history the server announced when it accepted. A connection is a transaction:
+// the rings are made again only here, and on failure the client keeps its own.
+@(private)
+history_follow :: proc(s:^Net_Session,w:core.World_Ref) -> bool {
+    c:=&s.client
+    ticks:=wire.host_history(&s.host)
+    if ticks+1==c.history {return true}
+    old:=c^
+    if !history_make(s,w,c,ticks) {
+        c^=old
+        return false
+    }
+    history_free(s,&old)
+    c.any=false
+    return true
+}
+
+@(private)
+client_destroy :: proc(s:^Net_Session) {
+    c:=&s.client
+    allocator:=s.allocator
+    context.allocator=allocator
+    history_free(s,c)
     if c.sync_world!=nil {
         s.info.destroy[.World](c.sync_world)
         mem.free(c.sync_world,allocator)
     }
-    delete(c.sync_hashes,allocator)
-    delete(c.sync_fed,allocator)
     if c.interpolation.data!=nil {wire.interpolation_destroy(&c.interpolation)}
-    delete(c.replicas,allocator);delete(c.words,allocator);delete(c.frames,allocator)
-    delete(c.records,allocator);delete(c.record_ticks,allocator);delete(c.record_free,allocator)
-    delete(c.record_words,allocator);delete(c.authoritative,allocator);delete(c.authoritative_words,allocator)
+    delete(c.replicas,allocator);delete(c.words,allocator);delete(c.record_free,allocator)
     delete(c.islands,allocator);delete(c.sections)
     c^={}
 }
@@ -277,6 +319,9 @@ client_commands :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App,commands:[
     for &command in commands {
         #partial switch command.kind {
         case .Connected:
+            if !history_follow(s,w) {
+                core.report(s.problems,core.NONE,"net.history","the history of %d ticks the server keeps was not made (out of memory), so this client keeps its own of %d; free memory, or lower Net_Settings.replication.history_seconds on the server",wire.host_history(&s.host),s.client.history-1)
+            }
             s.status=.Connected
             s.joined+=1
             append(&s.arrived,Connection_Event{kind=.Connected,connection=command.connection})
@@ -785,7 +830,7 @@ frame_copy :: proc(w:core.World_Ref,frame:^Frame) -> bool {
 
 @(private)
 snapshot_problem :: proc(s:^Net_Session,tick:u32) {
-    core.report(s.problems,core.NONE,"net.snapshot","the copy of the world at tick %d was not made (out of memory), so a correction of the server cannot go back to it; free memory, or lower Net_Settings.history",tick)
+    core.report(s.problems,core.NONE,"net.snapshot","the copy of the world at tick %d was not made (out of memory), so a correction of the server cannot go back to it; free memory, or lower Net_Settings.replication.history_seconds",tick)
 }
 
 // The interpolated replicas go where the buffer has them at a server tick,
@@ -870,7 +915,7 @@ client_tail :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App,tick:u32,outbo
     if s.desc.sync_test>0 {
         // What the tick left, settled as a tick run again leaves it.
         core.world_settle(w)
-        sync_hashes(s,w,c.sync_hashes[(int(tick)%s.desc.history)*(len(w.info.tables)+1):][:len(w.info.tables)+1])
+        sync_hashes(s,w,c.sync_hashes[(int(tick)%s.client.history)*(len(w.info.tables)+1):][:len(w.info.tables)+1])
     }
     if s.status==.Connected {
         packet:=Input_Packet{actions=driven_actions(s,w)}
@@ -902,8 +947,8 @@ records_capture :: proc(s:^Net_Session,w:core.World_Ref,tick:u32) {
     d:=&s.desc
     motions:=core.world_table_of(w,core.Motion)
     es:=core.world_entities(w)
-    c.record_ticks[int(tick)%d.history]=tick+1
-    row:=c.records[(int(tick)%d.history)*d.predicted_capacity:][:d.predicted_capacity]
+    c.record_ticks[int(tick)%c.history]=tick+1
+    row:=c.records[(int(tick)%c.history)*d.predicted_capacity:][:d.predicted_capacity]
     islands:=0
     for &r in c.replicas[:c.replica_high] {
         if r.object==0 || r.role!=.Predicted && r.role!=.Held || !core.alive(es,r.entity) {continue}
@@ -988,8 +1033,8 @@ replica_critical :: proc(d:^Net_Settings,x:^Replica,tick:u32) -> bool {
 // What was predicted of a replica for a tick; kept is false when the tick left the history.
 @(private)
 record_of :: proc(c:^Client,d:^Net_Settings,x:^Replica,tick:u32) -> (record:^Record,kept:bool) {
-    if c.record_ticks[int(tick)%d.history]!=tick+1 {return nil,false}
-    record=&c.records[(int(tick)%d.history)*d.predicted_capacity+int(x.slot)]
+    if c.record_ticks[int(tick)%c.history]!=tick+1 {return nil,false}
+    record=&c.records[(int(tick)%c.history)*d.predicted_capacity+int(x.slot)]
     return record.object==x.object?record:nil,true
 }
 
@@ -1175,7 +1220,7 @@ client_reconcile :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App,dt:f32) {
     clock:=wire.clock_state(&s.host)
     c.silence=u32(clock.rtt*clock.rate*1.5)+8
     c.budget=min(c.budget+max(dt,0)*f32(d.resimulate_budget),f32(max(d.resimulate_budget,d.max_resimulate)))
-    c.frame_left=d.max_resimulate
+    c.frame_left=min(d.max_resimulate,c.history-1)
     if !c.any {
         for &x in c.replicas[:c.replica_high] {x.pending=false}
         return
@@ -1349,7 +1394,7 @@ client_rollback :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App,target:u32
         // SyncTest runs the tick again from the copy this correction made, without the states of the server.
         if c.sync_hashes!=nil {
             core.world_settle(w)
-            sync_hashes(s,w,c.sync_hashes[(int(tick)%d.history)*(len(w.info.tables)+1):][:len(w.info.tables)+1])
+            sync_hashes(s,w,c.sync_hashes[(int(tick)%c.history)*(len(w.info.tables)+1):][:len(w.info.tables)+1])
         }
         authoritative_apply(s,w,tick,false)
         records_capture(s,w,tick)
@@ -1399,13 +1444,13 @@ client_sync_test :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App) {
     input:=core.world_storage_of(w,core.Input)
     if w.info.loops[.Game][.Fixed]==nil || clock==nil {return}
     last:=c.newest
-    first:=last-u32(d.sync_test)+1
+    first:=last-u32(min(d.sync_test,c.history-1))+1
     for tick:=first;i32(last-tick)>=0;tick+=1 {
-        if at:=&c.frames[int(tick)%len(c.frames)];!at.valid || at.tick!=tick || c.record_ticks[int(tick)%d.history]!=tick+1 {return}
+        if at:=&c.frames[int(tick)%len(c.frames)];!at.valid || at.tick!=tick || c.record_ticks[int(tick)%c.history]!=tick+1 {return}
     }
     if !w.info.copy(c.sync_world,w.data) {return}
     count:=len(w.info.tables)+1
-    hashes:=c.sync_hashes[d.history*count:][:count]
+    hashes:=c.sync_hashes[c.history*count:][:count]
     present_input:core.Input
     if input!=nil {present_input=input^}
     c.sync_testing=true
@@ -1418,12 +1463,12 @@ client_sync_test :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App) {
         clock.resimulating=false
         s.stats.sync_tested+=1
         // The network gave the tick something else: a state of the server that came after it ran.
-        if c.sync_fed[d.history]!=c.sync_fed[int(tick)%d.history] {
+        if c.sync_fed[c.history]!=c.sync_fed[int(tick)%c.history] {
             s.stats.sync_skipped+=1
             continue
         }
         sync_hashes(s,w,hashes)
-        expected:=c.sync_hashes[(int(tick)%d.history)*count:][:count]
+        expected:=c.sync_hashes[(int(tick)%c.history)*count:][:count]
         for hash,table in hashes {
             if hash==expected[table] {continue}
             sync_problem(s,w,tick,table,tick==last)

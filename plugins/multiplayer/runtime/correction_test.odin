@@ -286,12 +286,12 @@ Correction_Fixture :: struct {
 }
 
 @(private)
-correction_fixture_init :: proc(t:^testing.T,f:^Correction_Fixture,role:Role,settings:Net_Settings) -> bool {
+correction_fixture_init :: proc(t:^testing.T,f:^Correction_Fixture,role:Role,settings:Net_Settings,rate:=60) -> bool {
     f.info=net_test_info()
     net_test_init(&f.world,context.allocator)
     f.e=net_test_body(&f.world,1)
     f.shared={info=&f.info}
-    f.app={info=&f.info,allocator=context.allocator,tick_dt=1.0/60,shared=&f.shared}
+    f.app={info=&f.info,allocator=context.allocator,tick_dt=1/f32(rate),shared=&f.shared}
     net_test_physics(&f.world,&f.shared,&f.app)
     if !testing.expect(t,wire.sim_network_init(&f.network,{seed=31,endpoints=2,packets=64})) {return false}
     if !testing.expect(t,net_test_session(&f.session,&f.world,&f.info,&f.app,&f.network,1,.Client,settings=settings)) {return false}
@@ -341,11 +341,71 @@ correction_fixture_position :: proc(f:^Correction_Fixture) -> [3]f32 {
     return local.position
 }
 
+// The history is in seconds: at every tick rate a state as old as max_resimulate (0.3 s) runs
+// again in one frame, and the whole history (0.5 s) is still compared.
+@(test)
+a_correction_holds_its_window_at_every_tick_rate :: proc(t:^testing.T) {
+    for rate in ([]int{60,240,480}) {
+        f:Correction_Fixture
+        defer correction_fixture_destroy(&f)
+        if !correction_fixture_init(t,&f,.Predicted,{max_objects=8,predicted_capacity=8},rate) {return}
+        s:=&f.session
+        c:=&s.client
+        depth:=int(wire.HISTORY_SECONDS*f32(rate))
+        window:=int(0.3*f32(rate)+0.5)
+        testing.expectf(t,c.history==depth+1,"%d Hz: a history of %d slots, not %d",rate,c.history,depth+1)
+        for tick in 11..=depth+10 {correction_fixture_tick(&f,u32(tick))}
+        newest:=c.newest
+        _,kept:=record_of(c,&s.desc,&c.replicas[1],newest-u32(depth))
+        _,gone:=record_of(c,&s.desc,&c.replicas[1],newest-u32(depth)-1)
+        testing.expectf(t,kept && !gone,"%d Hz: the history reaches %d ticks back",rate,depth)
+        correction_fixture_state(&f,newest-u32(window),{0,0.1,0})
+        client_reconcile(s,core.world_ref(&f.world,&f.info),&f.app,1/f32(rate))
+        testing.expectf(t,s.stats.corrected==1 && s.stats.deferred==0,"%d Hz: a state %d ticks old runs again (corrected %d, deferred %d)",rate,window,s.stats.corrected,s.stats.deferred)
+    }
+}
+
+// A client takes the history its server announces when it accepts, in place of its own.
+@(test)
+a_client_keeps_the_history_of_its_server :: proc(t:^testing.T) {
+    info:=net_test_info();defer delete(info.tables);defer delete(info.storages)
+    worlds:[2]Net_Test_World
+    apps:[2]host.App
+    sessions:[2]Net_Session
+    for &world,index in worlds {net_test_init(&world,context.allocator);apps[index]={info=&info,allocator=context.allocator,tick_dt=1.0/240}}
+    defer for &world in worlds {net_test_destroy(&world)}
+    defer for &app in apps {host.app_world_scratch_free(&app);delete(app.worlds)}
+    network:wire.Sim_Network
+    testing.expect(t,wire.sim_network_init(&network,{seed=5,endpoints=2,packets=256}))
+    defer wire.sim_network_destroy(&network)
+    seconds:=[2]f32{0.5,0.1}
+    for &session,index in sessions {
+        settings:=Net_Settings{max_objects=8,predicted_capacity=8,replication={history_seconds=seconds[index]}}
+        if !testing.expect(t,net_test_session(&session,&worlds[index],&info,&apps[index],&network,index,index==0?.Server:.Client,settings=settings)) {return}
+    }
+    defer for &session in sessions {session_destroy(&session);delete(session.arrived)}
+    client:=&sessions[1]
+    testing.expect_value(t,client.client.history,25)
+    testing.expect_value(t,wire.host_connect(&client.host,wire.address_memory(0)),wire.Error.None)
+    for frame in 1..=60 {
+        now:=f64(frame)/60
+        wire.sim_network_advance(&network,now)
+        for &session in sessions {wire.host_update(&session.host,now)}
+        wire.host_poll(&sessions[0].host)
+        client_commands(client,core.world_ref(&worlds[1],&info),&apps[1],wire.host_poll(&client.host),&worlds[1].received)
+        if client.status==.Connected {break}
+    }
+    testing.expect_value(t,client.status,Status.Connected)
+    testing.expect_value(t,session_history(core.ref(client)),120)
+    testing.expect_value(t,client.client.history,121)
+    testing.expect_value(t,len(client.client.frames),121)
+}
+
 @(test)
 an_error_too_deep_for_the_frame_is_closed_over_the_next_ticks_without_a_teleport :: proc(t:^testing.T) {
     f:Correction_Fixture
     defer correction_fixture_destroy(&f)
-    if !correction_fixture_init(t,&f,.Predicted,{max_objects=8,predicted_capacity=8,history=32,max_resimulate=4}) {return}
+    if !correction_fixture_init(t,&f,.Predicted,{max_objects=8,predicted_capacity=8,replication={history_seconds=0.5},max_resimulate=4}) {return}
     expected:Net_Test_World
     net_test_copy(&expected,&f.world)
     defer net_test_destroy(&expected)
@@ -371,7 +431,7 @@ an_error_too_deep_for_the_frame_is_closed_over_the_next_ticks_without_a_teleport
 an_error_of_a_body_out_of_reach_is_closed_over_the_next_ticks_and_its_records_follow :: proc(t:^testing.T) {
     f:Correction_Fixture
     defer correction_fixture_destroy(&f)
-    if !correction_fixture_init(t,&f,.Shown,{max_objects=8,predicted_capacity=8,history=32}) {return}
+    if !correction_fixture_init(t,&f,.Shown,{max_objects=8,predicted_capacity=8,replication={history_seconds=0.5}}) {return}
     c:=&f.session.client
     fourth,_:=record_of(c,&f.session.desc,&c.replicas[1],4)
     eighth,_:=record_of(c,&f.session.desc,&c.replicas[1],8)
@@ -410,7 +470,7 @@ an_error_of_a_body_out_of_reach_is_closed_over_the_next_ticks_and_its_records_fo
 a_state_older_than_the_history_puts_the_replica_where_the_server_had_it :: proc(t:^testing.T) {
     f:Correction_Fixture
     defer correction_fixture_destroy(&f)
-    if !correction_fixture_init(t,&f,.Predicted,{max_objects=8,predicted_capacity=8,history=8}) {return}
+    if !correction_fixture_init(t,&f,.Predicted,{max_objects=8,predicted_capacity=8,replication={history_seconds=7.0/60}}) {return}
     c:=&f.session.client
     _,kept:=record_of(c,&f.session.desc,&c.replicas[1],1)
     testing.expect(t,!kept,"tick 1 is out of a history of 8 ticks at tick 10")

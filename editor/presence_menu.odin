@@ -52,9 +52,9 @@ presence_hit :: proc(s:^Session,w:core.World_Ref) -> bool {
     g:=s.gui
     if g.ctx.popup.count>0 || g.modal!=.None {return false}
     point:=s.viewport.pointer
-    if m:=s.ai;m!=nil && m.show_agents_in_scene {
+    if m:=s.ai;m!=nil {
         for &task in m.tasks[:m.task_count] {
-            if !ai_scene_task_visible(s,w,&task) {continue}
+            if !ai_scene_figure_shown(s,w,&task) {continue}
             glyph,on_glyph:=ai_scene_screen(s,w,&task)
             body,on_body:=ai_scene_body_screen(s,w,&task)
             if on_glyph && ui.rect_contains(glyph,point) || on_body && ui.rect_contains(body,point) {

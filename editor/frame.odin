@@ -483,9 +483,7 @@ editor_begin :: proc(s:^Session,g:^Editor_Ui,v:^Viewport,selection:^Selection,wo
 editor_tools :: proc(s:^Session,g:^Editor_Ui,v:^Viewport,world:core.World_Ref) {
     started:=platform.clock_ns();defer api_timed(s,.Tools,started)
     if !g.begun {return}
-    if s.mode!=.Play {
-        if !scene_covered(s) {tools_update(s,world)}
-    } else if s.play_input_released && .Left in platform.input_frame(s.app.platform).mouse_pressed {presence_hit(s,world)}
+    if s.mode!=.Play && !scene_covered(s) {tools_update(s,world)}
     collab_follow(s)
     viewport_camera(v)
     view_write(s,world)

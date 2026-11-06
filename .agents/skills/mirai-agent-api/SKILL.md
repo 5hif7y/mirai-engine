@@ -55,7 +55,8 @@ difference with the catalog, it rules.
 1. Open it with `mirai edit` (window or manual mode and port per
    [arguments](../mirai-editor/references/editor.md#arguments)) or, without a window and in the
    background, with `mirai session start [project] --dev`; `mirai rpc --project <project>` finds
-   the port.
+   the port. If the user's windowed editor holds the project, `--copy` opens a session on a fresh
+   copy under its `.mirai/tmp/`, whose path it prints; `mirai session stop <copy>` deletes it.
 2. `mirai rpc describe` lists the methods by plugin and says which plugins exist and which the
    project uses; `mirai rpc describe <plugin>` gives those of an area. Before calling a method for
    the first time, `mirai rpc describe <method|prefix>` (several methods at once:

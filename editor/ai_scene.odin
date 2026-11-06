@@ -30,6 +30,12 @@ ai_scene_task_visible :: proc(s:^Session,w:core.World_Ref,task:^Ai_Task) -> bool
     return ai_agent_visible(task)
 }
 
+// Its figure, glyph and name are drawn and take clicks.
+@(private)
+ai_scene_figure_shown :: proc(s:^Session,w:core.World_Ref,task:^Ai_Task) -> bool {
+    return s.ai!=nil && s.ai.show_agents_in_scene && presence_in_scene(s) && ai_scene_task_visible(s,w,task)
+}
+
 @(private)
 ai_scene_highlights :: proc(s:^Session,w:core.World_Ref,levels:[]u8) {
     m:=s.ai
@@ -167,16 +173,7 @@ ai_scene_screen :: proc(s:^Session,w:core.World_Ref,task:^Ai_Task) -> (rect:ui.R
     eyes,top,loaded:=ai_scene_eyes(s,task)
     if !loaded {return}
     if figure:=ai_scene_figure_of(s,task);figure!=nil {eyes=presence_shown(figure,eyes)}
-    projection:=s.viewport.view_projection
-    if s.mode==.Play {
-        if view:=core.world_storage_of(w,core.View);view!=nil && view.camera!=core.NONE {
-            camera:=host.camera_from_view(view^)
-            aspect:=s.viewport.size.x/s.viewport.size.y
-            lens:=camera.far>0?mm.perspective(camera.fov_y*mm.RAD_PER_DEG,aspect,camera.near,camera.far):mm.perspective_infinite(camera.fov_y*mm.RAD_PER_DEG,aspect,camera.near)
-            projection=lens*mm.look_at(camera.position,camera.position+camera.forward,camera.up)
-        }
-    }
-    return presence_glyph_rect(s,eyes+{0,top,0},projection)
+    return presence_glyph_rect(s,eyes+{0,top,0},s.viewport.view_projection)
 }
 
 // The rectangle of the window the figure of a turn covers: its bounds seen
@@ -206,9 +203,8 @@ ai_scene_draw :: proc(s:^Session,w:core.World_Ref) {
     if state==nil {return}
     presence_style(s)
     ai_scene_ghosts(s,w,state)
-    if !m.show_agents_in_scene {return}
     for &task,index in m.tasks[:m.task_count] {
-        if !ai_scene_task_visible(s,w,&task) {continue}
+        if !ai_scene_figure_shown(s,w,&task) {continue}
         task.figure_shown=true
         if ai_scene_figure_prepare(s,&task,&state.figures[index]) {host.app_instance_add(s.app,state.figures[index].instance)}
         if rect,ok:=ai_scene_screen(s,w,&task);ok {

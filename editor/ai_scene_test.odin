@@ -109,6 +109,16 @@ ai_scene_outlines_follow_pending_authors_and_keep_selection_without_steady_alloc
     testing.expect(t,!ai_scene_task_visible(&session,ref,&m.tasks[2]),"a turn without context that changed nothing is not in the scene")
     m.tasks[2].context_ids[0],m.tasks[2].context_count=3,1
     testing.expect(t,ai_scene_task_visible(&session,ref,&m.tasks[2]),"the context the user selected puts a turn in the scene")
+    // A game is seen alone: no figure, glyph or name while it plays, paused or stepped.
+    modes:=[?]struct{mode:Mode,stepped,shown:bool}{
+        {.Edit,false,true},{.Simulate,false,true},{.Simulation_Paused,false,true},
+        {.Play,false,false},{.Paused,false,false},{.Paused,true,false},{.Watch,false,false},
+    }
+    for c in modes {
+        session.mode,session.play_stepped=c.mode,c.stepped
+        testing.expectf(t,ai_scene_figure_shown(&session,ref,&m.tasks[2])==c.shown,"figure shown in %v (stepped %v): %v",c.mode,c.stepped,c.shown)
+    }
+    session.mode,session.play_stepped=.Edit,false
     m.task_count=2
     m.tasks[0].state=.Done
     testing.expect(t,ai_task_finish(&session,m,&m.tasks[0]))

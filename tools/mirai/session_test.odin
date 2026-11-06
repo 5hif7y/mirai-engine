@@ -11,10 +11,10 @@ import "mirai:project"
 @(test)
 session_options_take_their_flags_and_leave_the_rest_to_the_editor :: proc(t:^testing.T) {
     context.allocator=context.temp_allocator
-    options,problem:=session_options({"--dev","--discard","--timeout","30","--frames","5","--dev"})
+    options,problem:=session_options({"--dev","--discard","--copy","--timeout","30","--frames","5","--dev"})
     testing.expect_value(t,problem,"")
     testing.expect_value(t,options.mode,Build_Mode.Dev)
-    testing.expect(t,options.discard && !options.no_build && !options.orphans)
+    testing.expect(t,options.discard && options.copy && !options.no_build && !options.orphans)
     testing.expect_value(t,options.timeout,30)
     testing.expect(t,slice.equal(options.editor_args,[]string{"--frames","5"}))
     options,problem=session_options({})
@@ -142,4 +142,39 @@ a_path_is_inside_a_folder_only_past_a_separator :: proc(t:^testing.T) {
     when ODIN_OS==.Windows {
         testing.expect(t,path_inside(`C:\M\.mirai\engine\dev\mirai-editor.exe`,"c:/m/.mirai/engine"))
     }
+}
+
+// A copy for a session takes the sources, the assets and the caches, never
+// the files of the editor that holds the project; stop knows it by its place.
+@(test)
+a_session_copy_takes_the_project_and_its_caches_without_the_files_of_its_editor :: proc(t:^testing.T) {
+    context.allocator=context.temp_allocator
+    folder,error:=os.make_directory_temp("","mirai-copy-*",context.temp_allocator)
+    if !testing.expect(t,error==nil) {return}
+    defer os.remove_all(folder)
+    folder=project.path_absolute(folder)
+    kept:=[]string{project.PROJECT_FILE,"assets/scenes/main.scene","game/game.odin","source/art.fbx",
+        ".mirai/cache/registry/index",".mirai/thumbs/main.png"}
+    left:=[]string{".git/HEAD",".mirai/api.json",".mirai/session.json",".mirai/session.lock",
+        ".mirai/session.log",".mirai/editor.dll",".mirai/editor-live-12-0.dll",".mirai/gen/world.odin",
+        ".mirai/tmp/probe.scene",".mirai/cache/textures.lock"}
+    for files in ([][]string{kept,left}) {
+        for file in files {
+            path:=project.path(folder,file)
+            testing.expect(t,os.make_directory_all(os.dir(path))==nil)
+            testing.expect(t,os.write_entire_file(path,file)==nil)
+        }
+    }
+    copy,problem:=session_copy(folder)
+    if !testing.expect_value(t,problem,"") {return}
+    testing.expect(t,path_inside(copy,project.path(folder,".mirai","tmp")),"under .mirai/tmp/ of the project")
+    for file in kept {
+        data,read:=os.read_entire_file(project.path(copy,file),context.temp_allocator)
+        testing.expectf(t,read==nil && string(data)==file,"%s is copied",file)
+    }
+    for file in left {testing.expectf(t,!os.exists(project.path(copy,file)),"%s stays out",file)}
+    testing.expect(t,session_copied(copy) && !session_copied(folder))
+    testing.expect(t,!session_copied(project.path(folder,".mirai","tmp","other")),"only what session_copy names")
+    testing.expect(t,session_copy_remove(copy,"test") && !os.exists(copy))
+    testing.expect(t,os.is_file(project.path(folder,".mirai","api.json")),"the project keeps its own files")
 }

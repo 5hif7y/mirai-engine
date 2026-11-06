@@ -396,7 +396,7 @@ tools come from `.deps`, also from a worktree.
 | Git plugins of a project | `mirai plugin add\|update\|remove\|sync\|list\|catalog\|check ...` |
 | Check types | `mirai check <package> [-flag...]` |
 | Run tests | `mirai test <package> [test...] [--list\|--failed\|--quiet] [-flag...]` |
-| Headless background editor | `mirai session start\|restart\|stop\|status [project] [--dev]` |
+| Headless background editor | `mirai session start\|restart\|stop\|status [project] [--dev] [--copy]` |
 | Call the editor API | `mirai rpc <method> [json] [--select c] [--wait-until c=v] [--project P]` |
 | Capture without UI | `mirai capture [project] --out x.png [--reference r.png] [--repeat]` |
 | Validate demo image and cost | `mirai render check [project] [--views a,b] [--quality]` |
@@ -415,7 +415,7 @@ tools come from `.deps`, also from a worktree.
 - **Session against the editor:** `mirai session start`, then `mirai rpc` or `mirai capture`, and
   `mirai session stop`; after a code change, `mirai session restart` (or `mirai build editor`,
   which restarts the session that holds the build); after a failure, `mirai rpc
-  engine.diagnostics`.
+  engine.diagnostics`. With the project open in a window, `session start --copy` drives a copy.
 - **Search:** for the Odin code in `.deps`, pass its path to `rg` or `--no-ignore`. If `rg` is not
   there, `mirai setup rg` installs it pinned in `.deps` and in the PATH.
 - **When handing a command to the user** to try a change, `edit` and `play` carry `--dev`; without

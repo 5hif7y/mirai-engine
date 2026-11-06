@@ -355,7 +355,8 @@ their picking.
   bounds, and looks toward it; without a selection it uses the camera target. Each attributed
   transaction relocates it next to the last live entity of its record or where the last one it
   deleted was ([review](ai-review.md#finish-revert-and-retry)): the position is recomputed in those
-  transactions, not in stable frames, and in Play it follows the live player.
+  transactions, not in stable frames; a turn in Play places it by the live player, and it shows
+  once the game stops ([figures](editor.md#figures-of-whoever-works)).
 - The other editors of a shared session see the figures and the outlines of what changed
   ([collaboration](collaboration.md#what-travels)).
 

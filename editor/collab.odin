@@ -1167,7 +1167,7 @@ collab_in_game :: proc(s:^Session) -> bool {
 // it and no selection: what they had selected belongs to the editor they left.
 collab_draw :: proc(s:^Session) {
     st:=collab_state(s)
-    if st==nil || st.role==.None || st.phase!=.Joined || s.mode==.Play || s.mode==.Watch {return}
+    if st==nil || st.role==.None || st.phase!=.Joined || !presence_in_scene(s) {return}
     now:=wire.host_time(&st.host)
     lines:=&s.viewport.lines
     w:=edited_world(s)

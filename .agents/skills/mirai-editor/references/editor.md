@@ -324,6 +324,9 @@ session ([collaboration](collaboration.md#what-travels)) is drawn with the same 
   smoothing (`presence_follow`), and jumps if far (`PRESENCE_SNAP`). The instance is rebuilt only
   if the place, the rotation, the color, the assets or the round of derived rows change
   (`Presence_Key`); at rest, a frame does not allocate.
+- A game is seen alone (`presence_in_scene`): in Play, paused or stepped, and in Watch no figure,
+  glyph or name is drawn or clicked, nor enters a capture; they stay in the bar and the chat. In
+  Simulate they stay, like the gizmo and the grid.
 
 **Editor assets.** `editor/assets` is mounted in the registry of every project under `.editor`
 (`EDITOR_ASSETS_PREFIX`). They are loaded by their path, but the content browser, `asset.list`,

@@ -14,7 +14,7 @@ import "mirai:cook/workspace"
 import "mirai:project"
 import "mirai:std/subprocess"
 
-SESSION_USAGE :: "session start|restart|stop|status [project] [--dev|--release] [--no-build] [--discard] [--orphans] [--timeout S] [editor arguments]"
+SESSION_USAGE :: "session start|restart|stop|status [project] [--dev|--release] [--no-build] [--copy] [--discard] [--orphans] [--timeout S] [editor arguments]"
 
 // <proyecto>/.mirai/session.json: the editor mirai session opened last in the
 // project, with the mode of its binaries and its arguments, which restart
@@ -30,13 +30,16 @@ Session_Record :: struct {
 // stays open between commands for mirai rpc, capture and mcp to drive.
 //   start    builds the project (unless --no-build), opens the editor in the
 //            background and returns once its API answers, with its port, its
-//            process and its log; one that already answers is reused
+//            process and its log; one that already answers is reused. --copy
+//            opens instead a fresh copy of the project (session_copy), beside
+//            the editor that holds it
 //   restart  closes it, builds and opens it again, with the mode and the
 //            arguments of the last one unless others are given
 //   stop     asks it to quit and ends it if it does not. Unsaved changes go
 //            alone when they are all of copies under .mirai/tmp/, and with
 //            --discard otherwise. --orphans ends instead the headless editors
-//            of this checkout that no port file names
+//            of this checkout that no port file names. Of a copy, it discards
+//            what is unsaved and deletes the copy
 //   status   says whether one answers, and which editors of this checkout no
 //            port file names
 // The editor names its port in <proyecto>/.mirai/api.json (api.PORT_FILE). An
@@ -71,7 +74,7 @@ cmd_session :: proc(root:string,args:[]string) -> int {
 // What start and restart take; what is not theirs goes to the editor.
 Session_Options :: struct {
     mode:Build_Mode,
-    no_build,discard,orphans:bool,
+    no_build,discard,orphans,copy:bool,
     timeout:int, // seconds for the API to answer
     editor_args:[]string,
 }
@@ -89,6 +92,7 @@ session_options :: proc(args:[]string) -> (options:Session_Options,problem:strin
         case "--no-build": options.no_build=true
         case "--discard":  options.discard=true
         case "--orphans":  options.orphans=true
+        case "--copy":     options.copy=true
         case "--timeout":
             value,valid:=0,false
             if i+1<len(args) {value,valid=strconv.parse_int(args[i+1],10)}
@@ -169,16 +173,26 @@ session_start :: proc(root,folder:string,args:[]string) -> int {
     options,problem:=session_options(args)
     if problem=="" && (options.discard || options.orphans) {problem="--discard belongs to stop and restart, and --orphans to stop"}
     if problem!="" {fmt.eprintfln("mirai session: %s. Usage: mirai %s",problem,SESSION_USAGE);return 2}
-    file,code:=session_open(root,folder,options.mode,options.no_build,options.timeout,options.editor_args)
-    if code!=0 {return code}
-    session_print(folder,file)
+    opened:=folder
+    if options.copy {
+        copy,copy_problem:=session_copy(folder)
+        if copy_problem!="" {fmt.eprintfln("mirai session: %s",copy_problem);return 1}
+        opened=copy
+    }
+    file,code:=session_open(root,opened,options.mode,options.no_build,options.timeout,options.editor_args)
+    if code!=0 {
+        if options.copy {session_copy_remove(opened,"session start")}
+        return code
+    }
+    if options.copy {fmt.eprintfln("mirai session: opened a copy of %s; mirai rpc --project %s drives it and mirai session stop %s closes and deletes it",folder,opened,opened)}
+    session_print(opened,file)
     return 0
 }
 
 @(private="file")
 session_restart :: proc(root,folder:string,args:[]string) -> int {
     options,problem:=session_options(args)
-    if problem=="" && options.orphans {problem="--orphans belongs to stop"}
+    if problem=="" && (options.orphans || options.copy) {problem="--orphans belongs to stop, and --copy to start"}
     if problem!="" {fmt.eprintfln("mirai session restart: %s. Usage: mirai %s",problem,SESSION_USAGE);return 2}
     mode,editor_args:=options.mode,options.editor_args
     if record,recorded:=session_record(folder);recorded {
@@ -270,7 +284,7 @@ session_reusable :: proc(root,folder:string,mode:Build_Mode,file:api.Port_File,c
         return true
     }
     if !file.manual {
-        fmt.eprintfln("mirai %s: the project is open in a windowed editor (pid %d); close it, or drive it with mirai rpc --project %s",command,file.pid,folder)
+        fmt.eprintfln("mirai %s: the project is open in a windowed editor (pid %d); close it, drive it with mirai rpc --project %s, or test a copy of it with mirai session start %s --copy",command,file.pid,folder,folder)
         return false
     }
     engine:=build.engine_mode_resolve(root,mode)
@@ -359,6 +373,82 @@ session_discardable :: proc(folder:string,paths:[]string) -> bool {
     return true
 }
 
+// <project>/.mirai/tmp/<SESSION_COPY_PREFIX>*: the copies session start --copy
+// makes. Under the generated folder they stay out of the assets folder that the
+// editor of the project watches, out of its packages and out of version
+// control, on the same disk as the caches they take.
+SESSION_COPY_PREFIX :: "session-copy-"
+
+// Whether a path relative to the project, with forward slashes, stays out of
+// a copy: the history of git and the generated folder except its caches, so
+// that neither the port file, the record, the locks nor the libraries of the
+// editor that holds the project go with it.
+session_copy_skips :: proc(relative:string) -> bool {
+    first,_,rest:=strings.partition(relative,"/")
+    if first==".git" {return true}
+    if first!=project.FOLDER_NAMES[.Generated] || rest=="" {return false}
+    kept,_,_:=strings.partition(rest,"/")
+    if kept!=project.CACHE_FOLDER && kept!=project.THUMBNAIL_FOLDER {return true}
+    return strings.has_suffix(relative,".lock")
+}
+
+// A fresh copy of the project at folder under its .mirai/tmp/, without what
+// session_copy_skips leaves out; problem says why it could not and what to do.
+session_copy :: proc(folder:string) -> (copy,problem:string) {
+    temporary:=project.path(folder,".mirai","tmp",allocator=context.temp_allocator)
+    if error:=os.make_directory_all(temporary);error!=nil && error!=.Exist {
+        return "",fmt.tprintf("could not create %s (%v); check that the project folder is writable",temporary,error)
+    }
+    created,error:=os.make_directory_temp(temporary,SESSION_COPY_PREFIX+"*",context.temp_allocator)
+    if error!=nil {return "",fmt.tprintf("could not create a copy in %s (%v); check that it is writable",temporary,error)}
+    copy=project.path_absolute(created)
+    walker:=os.walker_create(folder)
+    defer os.walker_destroy(&walker)
+    for info in os.walker_walk(&walker) {
+        if info.fullpath=="" {continue}
+        relative,relative_error:=os.get_relative_path(folder,info.fullpath,context.temp_allocator)
+        if relative_error!=nil {problem=fmt.tprintf("%s is not inside %s (%v)",info.fullpath,folder,relative_error);break}
+        relative,_=strings.replace_all(relative,"\\","/",context.temp_allocator)
+        if session_copy_skips(relative) {
+            if info.type==.Directory {os.walker_skip_dir(&walker)}
+            continue
+        }
+        to:=project.path(copy,relative,allocator=context.temp_allocator)
+        failed:os.Error
+        #partial switch info.type {
+        case .Directory: failed=os.make_directory_all(to)
+        case .Regular:   failed=os.copy_file(to,info.fullpath)
+        }
+        if failed!=nil && failed!=.Exist {problem=fmt.tprintf("could not copy %s to %s (%v)",info.fullpath,to,failed);break}
+    }
+    if problem=="" {
+        if path,walk_error:=os.walker_error(&walker);walk_error!=nil {problem=fmt.tprintf("could not read %s (%v)",path,walk_error)}
+    }
+    if problem!="" {
+        _=os.remove_all(copy)
+        return "",fmt.tprintf("%s; free the disk or close what holds the file, and start again",problem)
+    }
+    return copy,""
+}
+
+// Whether folder is a copy session_copy made.
+session_copied :: proc(folder:string) -> bool {
+    if !strings.has_prefix(os.base(folder),SESSION_COPY_PREFIX) {return false}
+    temporary:=os.dir(folder)
+    generated:=os.dir(temporary)
+    if os.base(temporary)!="tmp" || os.base(generated)!=project.FOLDER_NAMES[.Generated] {return false}
+    return os.is_file(project.path(os.dir(generated),project.PROJECT_FILE,allocator=context.temp_allocator))
+}
+
+// Deletes a copy whose editor ended; false after saying why it could not.
+session_copy_remove :: proc(copy,command:string) -> bool {
+    if error:=os.remove_all(copy);error!=nil {
+        fmt.eprintfln("mirai %s: could not delete the copy %s (%v); delete the folder once no process holds its files",command,copy,error)
+        return false
+    }
+    return true
+}
+
 // Whether path is inside folder, with either slash.
 path_inside :: proc(path,folder:string) -> bool {
     p,_:=strings.replace_all(path,"\\","/",context.temp_allocator)
@@ -385,9 +475,15 @@ session_stop :: proc(root,folder:string,args:[]string) -> int {
         }
     }
     if orphans {return session_stop_orphans(root,folder)}
+    copied:=session_copied(folder)
     file,alive:=session_find(folder)
     if !alive {
         _=os.remove(project.path(folder,".mirai",api.PORT_FILE,allocator=context.temp_allocator))
+        if copied {
+            if !session_copy_remove(folder,"session stop") {return 1}
+            fmt.println("There was no open session; its copy was deleted.")
+            return 0
+        }
         fmt.println("There is no open session.")
         return 0
     }
@@ -395,8 +491,13 @@ session_stop :: proc(root,folder:string,args:[]string) -> int {
         fmt.eprintfln("mirai session stop: the project is open in a windowed editor (pid %d), which is not a session; close it from its window",file.pid)
         return 1
     }
-    closed,discarded:=session_close(folder,file,discard)
+    closed,discarded:=session_close(folder,file,discard || copied)
     if !closed {return 1}
+    if copied {
+        if !session_copy_remove(folder,"session stop") {return 1}
+        fmt.println("Session closed and its copy deleted.")
+        return 0
+    }
     if discarded>0 {fmt.printfln("Session closed; discarded %d unsaved changes of copies in .mirai/tmp/.",discarded)}
     else {fmt.println("Session closed.")}
     return 0

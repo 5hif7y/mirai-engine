@@ -31,6 +31,10 @@ AGENT_LEVEL :: u8(5)
 // What a turn only looked at, after the levels of the colors.
 AI_CONTEXT_LEVEL :: AGENT_LEVEL+u8(len(AGENT_COLORS))
 
+// The figures stand in the scene while it is edited or simulated; a game,
+// played, paused or watched, is seen alone.
+presence_in_scene :: proc "contextless" (s:^Session) -> bool {return !play_shown(s) && s.mode!=.Watch}
+
 agent_color :: proc "contextless" (index:int) -> ui.Color {colors:=AGENT_COLORS;return colors[index%len(colors)]}
 agent_level :: proc "contextless" (index:int) -> u8 {return AGENT_LEVEL+u8(index%len(AGENT_COLORS))}
 

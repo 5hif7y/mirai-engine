@@ -45,7 +45,7 @@ Shape_Piece :: struct {
 
 // Starts an edit: a stamp (stamp_points around 0, in the units of the plane)
 // swept on a plane, cutting or adding. tolerance: as in shape_stroke_begin.
-// made: the depth, material and uv scale of a shape an add makes outside
+// made: the depth, material, uv scale and bevel of a shape an add makes outside
 // every piece. Invalid for a size that is not positive and for a plane that
 // is not finite or has a zero axis.
 shape_edit_begin :: proc(e:^Shape_Edit,plane:mm.Transform,cut:bool,kind:Stamp_Kind,size,angle,tolerance:f32,made:Shape,allocator:=context.allocator) -> Shape_Error {

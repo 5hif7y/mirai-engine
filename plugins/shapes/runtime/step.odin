@@ -422,7 +422,7 @@ BUILD_CODES :: [Shape_Error]string{
 @(private)
 BUILD_MESSAGES :: [Shape_Error]string{
     .None="",
-    .Invalid="the Shape has a value out of range: an Outline needs a positive depth and loops of at least 3 finite points that add up to point_count, a Solid brushes whose Transform has a finite position and a positive scale, and uv_scale is 0 or positive; edit it with the shapes procedures",
+    .Invalid="the Shape has a value out of range: an Outline needs a positive depth and loops of at least 3 finite points that add up to point_count, a Solid brushes whose Transform has a finite position and a positive scale, uv_scale is 0 or positive, and a bevel is 0 or positive with at most 16 Round segments, or Points that go from the cap (1,0) to the side (0,1) without turning back; edit it with the shapes procedures",
     .Empty="the Shape leaves nothing to build: give an Outline at least 3 points, or a Solid a child with a Shape_Brush that adds",
     .Too_Many_Points="the Shape has more points than it holds: simplify the outline",
     .Too_Many_Loops="the Shape has more holes than it holds: merge or remove holes",

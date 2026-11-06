@@ -1,6 +1,8 @@
 package shapes
 
+import "core:math"
 import "core:math/linalg"
+import "core:math/rand"
 import "core:testing"
 import "mirai:std/geom"
 import mm "mirai:std/math"
@@ -98,6 +100,17 @@ a_shape_that_cannot_be_built_says_why :: proc(t:^testing.T) {
     nan.points[0].x=0/flat.depth
     cuts:=[]Brush{brush_at(.Box,{},{2,2,2},true)}
     flat_brush:=[]Brush{brush_at(.Box,{},{2,0,2})}
+    bevels:[7]Shape
+    for &b in bevels {b=SHAPE_DEFAULT;b.bevel=0.1}
+    bevels[0].bevel=-0.1
+    bevels[1].bevel=0/flat.depth
+    bevels[2].bevel_segments=BEVEL_SEGMENTS+1
+    bevels[3].bevel_profile,bevels[3].bevel_point_count=.Points,2
+    bevels[3].bevel_points[0],bevels[3].bevel_points[1]={0.5,0.5},{0.6,0.7}
+    bevels[4].bevel_profile,bevels[4].bevel_point_count=.Points,1
+    bevels[4].bevel_points[0]={0.5,1.5}
+    bevels[5].bevel_profile,bevels[5].bevel_point_count=.Points,BEVEL_POINTS+1
+    bevels[6].bevel_profile=Bevel_Profile(7)
     Case :: struct {name:string,shape:Shape,brushes:[]Brush,error:Shape_Error}
     cases:=[]Case{
         {"crossed",crossed,nil,.Self_Intersecting},
@@ -108,6 +121,13 @@ a_shape_that_cannot_be_built_says_why :: proc(t:^testing.T) {
         {"only subtracts",{kind=.Solid},cuts,.Empty},
         {"no brushes",{kind=.Solid},nil,.Empty},
         {"a brush without volume",{kind=.Solid},flat_brush,.Invalid},
+        {"negative bevel",bevels[0],nil,.Invalid},
+        {"bevel not finite",bevels[1],nil,.Invalid},
+        {"too many segments",bevels[2],nil,.Invalid},
+        {"bevel points that turn back",bevels[3],nil,.Invalid},
+        {"bevel points out of range",bevels[4],nil,.Invalid},
+        {"too many bevel points",bevels[5],nil,.Invalid},
+        {"no such profile",bevels[6],nil,.Invalid},
     }
     g:Shape_Geometry
     shape_geometry_init(&g)
@@ -177,4 +197,162 @@ sides_share_normals_where_the_outline_turns_little :: proc(t:^testing.T) {
         }
         testing.expectf(t,c.smooth?(shared>0 && split==0):(split>0 && shared==0),"smooth %v: %d shared, %d split",c.smooth,shared,split)
     }
+}
+
+// An Outline of one loop, one meter deep.
+@(private="file")
+outline_of :: proc(points:[]geom.Vec2) -> Shape {
+    s:=SHAPE_DEFAULT
+    s.point_count,s.loops[0]=u16(len(points)),u16(len(points))
+    copy(s.points[:],points)
+    return s
+}
+
+// Twice the signed area of the projection on XY of a triangle.
+@(private="file")
+area_xy :: proc(m:geom.Mesh,t:int) -> f64 {
+    a,b,c:=m.positions[m.indices[t]],m.positions[m.indices[t+1]],m.positions[m.indices[t+2]]
+    return f64(b.x-a.x)*f64(c.y-a.y)-f64(b.y-a.y)*f64(c.x-a.x)
+}
+
+@(test)
+bevels_round_the_rims_without_folding :: proc(t:^testing.T) {
+    defer free_all(context.temp_allocator)
+    set:geom.Polygon_Set
+    geom.polygon_set_init(&set)
+    defer geom.polygon_set_destroy(&set)
+    stamp:=make([dynamic]geom.Vec2,context.temp_allocator)
+    holed:=SHAPE_DEFAULT
+    stamp_points(.Square,{-0.22,0},0.12,0,&stamp)
+    testing.expect(t,shape_stamp(&holed,stamp[:],.Difference,&set)==.None)
+    stamp_points(.Circle,{0.22,0.1},0.1,0,&stamp)
+    testing.expect(t,shape_stamp(&holed,stamp[:],.Difference,&set)==.None && holed.loop_count==3)
+    stamp_points(.Triangle,{},0.5,0,&stamp)
+    triangle:=outline_of(stamp[:])
+    stamp_points(.Circle,{},0.5,0,&stamp)
+    circle:=outline_of(stamp[:])
+    l:=outline_of({{0,0},{2,0},{2,1},{1,1},{1,2},{0,2}})
+    thin:=outline_of({{-1,-0.02},{1,-0.02},{1,0.02},{-1,0.02}})
+    // A band 3 cm wide along half a circle: no edge is short, the gap across is.
+    arc:=make([dynamic]geom.Vec2,context.temp_allocator)
+    for i in 0..=16 {
+        a:=f32(i)/16*3.14159
+        append(&arc,geom.Vec2{0.5*linalg.cos(a),0.5*linalg.sin(a)})
+    }
+    for i:=16;i>=0;i-=1 {
+        a:=f32(i)/16*3.14159
+        append(&arc,geom.Vec2{0.47*linalg.cos(a),0.47*linalg.sin(a)})
+    }
+    band:=outline_of(arc[:])
+    shallow:=SHAPE_DEFAULT
+    shallow.depth=0.04
+    Case :: struct {name:string,shape:Shape}
+    shapes:=[]Case{
+        {"square with holes",holed},{"triangle",triangle},{"circle",circle},{"L",l},
+        {"thin",thin},{"thin band",band},{"shallow",shallow},
+    }
+    Profile :: struct {profile:Bevel_Profile,segments:u8,points:[]geom.Vec2}
+    profiles:=[]Profile{{.Round,0,nil},{.Round,1,nil},{.Chamfer,0,nil},{.Points,0,{{0.4,0.1},{0.1,0.6}}}}
+    g:Shape_Geometry
+    shape_geometry_init(&g)
+    defer shape_geometry_destroy(&g)
+    for c in shapes {
+        for p in profiles {
+            s:=c.shape
+            s.bevel,s.bevel_profile,s.bevel_segments=0.1,p.profile,p.segments
+            s.bevel_point_count=u8(len(p.points))
+            copy(s.bevel_points[:],p.points)
+            if !testing.expectf(t,shape_geometry_build(&s,nil,false,&g)==.None,"%s %v",c.name,p.profile) {continue}
+            bevel_holds(t,&s,&g,c.name)
+        }
+    }
+    // Stars of random points, sizes and depths: every corner, gap and depth against the bevel.
+    state:=rand.create(7)
+    context.random_generator=rand.default_random_generator(&state)
+    for round in 0..<300 {
+        n:=3+rand.int_max(45)
+        star:=make([]geom.Vec2,n,context.temp_allocator)
+        for &p,i in star {
+            a:=2*math.PI*(f32(i)+rand.float32_range(0,0.9))/f32(n)
+            r:=rand.float32_range(0.02,1)
+            p={r*math.cos(a),r*math.sin(a)}
+        }
+        s:=outline_of(star)
+        s.depth=rand.float32_range(0.01,2)
+        s.bevel=rand.float32_range(0.001,0.6)
+        s.bevel_profile=Bevel_Profile(rand.int_max(len(Bevel_Profile)))
+        s.bevel_segments=u8(rand.int_max(BEVEL_SEGMENTS+1))
+        if s.bevel_profile==.Points {s.bevel_point_count,s.bevel_points[0]=1,{0.3,0.3}}
+        if error:=shape_geometry_build(&s,nil,false,&g);error!=.None {
+            testing.expectf(t,error==.Self_Intersecting,"star %d: %v",round,error)
+            continue
+        }
+        bevel_holds(t,&s,&g,"star")
+    }
+}
+
+// What a bevel keeps of the mesh it changes: closed, facing its normals, within the prism that collides, and a cap and a band that cover the outline once from the front.
+@(private="file")
+bevel_holds :: proc(t:^testing.T,s:^Shape,g:^Shape_Geometry,name:string) {
+    m:=geom.mesh_buffer_view(&g.mesh)
+    testing.expectf(t,geom.mesh_is_valid(m) && len(m.uvs)==len(m.positions) && len(m.normals)==len(m.positions),"%s %v: streams",name,s.bevel_profile)
+    testing.expectf(t,geom.mesh_is_closed(m.positions,m.indices),"%s %v: closed",name,s.bevel_profile)
+    testing.expectf(t,normals_agree(m),"%s %v: normals",name,s.bevel_profile)
+    for n in m.normals {
+        if !testing.expectf(t,abs(linalg.length(n)-1)<1e-4,"%s %v: unit normals",name,s.bevel_profile) {break}
+    }
+    collision:=geom.mesh_buffer_view(&g.collision)
+    lo,hi:=geom.mesh_bounds(m.positions)
+    clo,chi:=geom.mesh_bounds(collision.positions)
+    testing.expectf(t,linalg.length(lo-clo)<1e-6 && linalg.length(hi-chi)<1e-6,"%s %v: bounds %v %v",name,s.bevel_profile,lo,clo)
+    prism:=volume6(collision)/6
+    volume:=volume6(m)/6
+    testing.expectf(t,volume>0 && volume<prism,"%s %v: volume %v of %v",name,s.bevel_profile,volume,prism)
+    // No front triangle turns over, and none overlaps another.
+    h:=0.5*s.depth
+    front,cap:f64
+    for i:=0;i<len(m.indices);i+=3 {
+        z:=min(m.positions[m.indices[i]].z,m.positions[m.indices[i+1]].z,m.positions[m.indices[i+2]].z)
+        if z<=0 {continue}
+        a:=area_xy(m,i)
+        testing.expectf(t,a>0,"%s %v: a front triangle turns over",name,s.bevel_profile)
+        front+=a
+        if z==h {cap+=a}
+    }
+    outline:=prism/f64(s.depth)*2
+    testing.expectf(t,abs(front-outline)<1e-4*outline,"%s %v: front %v of %v",name,s.bevel_profile,front,outline)
+    testing.expectf(t,cap>0 && cap<outline,"%s %v: cap %v of %v",name,s.bevel_profile,cap,outline)
+}
+
+@(test)
+a_bevel_is_part_of_the_key_and_zero_builds_none :: proc(t:^testing.T) {
+    defer free_all(context.temp_allocator)
+    plain:=SHAPE_DEFAULT
+    unused:=plain
+    unused.bevel_profile,unused.bevel_point_count=.Points,1
+    unused.bevel_points[0]={0.5,0.5}
+    g,h:Shape_Geometry
+    shape_geometry_init(&g)
+    defer shape_geometry_destroy(&g)
+    shape_geometry_init(&h)
+    defer shape_geometry_destroy(&h)
+    testing.expect(t,shape_geometry_build(&plain,nil,false,&g)==.None && shape_geometry_build(&unused,nil,false,&h)==.None)
+    testing.expect(t,slice_equal(g.mesh.positions[:],h.mesh.positions[:]) && slice_equal(g.mesh.indices[:],h.mesh.indices[:]))
+    round:=plain
+    round.bevel=0.1
+    point:=unused
+    point.bevel=0.1
+    moved:=point
+    moved.bevel_points[0].x=0.4
+    keys:=[]u64{shape_key(&plain,nil,false),shape_key(&round,nil,false),shape_key(&point,nil,false),shape_key(&moved,nil,false)}
+    for a,i in keys {
+        for b in keys[i+1:] {testing.expect(t,a!=b)}
+    }
+}
+
+@(private="file")
+slice_equal :: proc(a,b:[]$T) -> bool {
+    if len(a)!=len(b) {return false}
+    for x,i in a {if x!=b[i] {return false}}
+    return true
 }

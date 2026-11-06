@@ -12,11 +12,13 @@ import mm "mirai:std/math"
 // thread. The drawn mesh has one material slot. An Outline has its caps with
 // planar UVs and its sides with UVs that run along the perimeter, flat normals
 // where a loop turns sharply and shared ones where it turns little, so a
-// circle looks round; a Solid has the UVs of a box projection. Both scale
-// their UVs by uv_scale. What collides is, for a static shape, the triangles
-// of the mesh joined by position, with the edges between coplanar triangles
-// disabled so nothing catches on the seams of a flat face; for a body, the
-// convex pieces of shape_pieces_build, each a hull of the collider.
+// circle looks round; the bands of a bevel continue the UVs of its sides. A
+// Solid has the UVs of a box projection. Both scale their UVs by uv_scale.
+// What collides is, for a static shape, the triangles of the mesh joined by
+// position (of an Outline, its caps and sides without the bevel), with the
+// edges between coplanar triangles disabled so nothing catches on the seams
+// of a flat face; for a body, the convex pieces of shape_pieces_build, each a
+// hull of the collider.
 
 // A side shares the normal of a vertex with the next side when the two turn less than this cosine apart.
 @(private) SMOOTH_COS :: 0.82
@@ -141,12 +143,18 @@ shape_pieces_build :: proc(s:^Shape,brushes:[]Brush,g:^Shape_Geometry) -> Shape_
 // What a build depends on: the source, its brushes in order and whether it is a body.
 shape_key :: proc(s:^Shape,brushes:[]Brush,body:bool) -> u64 {
     points,loops:=shape_counts(s)
-    head:=struct {kind:Shape_Kind,body:bool,loops:u8,points:u16,depth,uv_scale:f32,material:base.Asset_Id} {
+    bevel_points:=min(int(s.bevel_point_count),BEVEL_POINTS)
+    head:=struct {
+        kind:Shape_Kind,body:bool,loops:u8,points:u16,depth,uv_scale:f32,material:base.Asset_Id,
+        bevel:f32,profile:Bevel_Profile,segments,bevel_points:u8,
+    } {
         s.kind,body,u8(loops),u16(points),s.depth,s.uv_scale,s.material,
+        s.bevel,s.bevel_profile,s.bevel_segments,u8(bevel_points),
     }
     h:=hash.fnv64a(slice.bytes_from_ptr(&head,size_of(head)))
     h=hash.fnv64a(slice.to_bytes(s.loops[:loops]),h)
     h=hash.fnv64a(slice.to_bytes(s.points[:points]),h)
+    h=hash.fnv64a(slice.to_bytes(s.bevel_points[:bevel_points]),h)
     for b in brushes {
         // Field by field: the padding of a Brush is not part of it.
         values:=[12]f32{
@@ -196,10 +204,30 @@ outline_build :: proc(s:^Shape,g:^Shape_Geometry) -> Shape_Error {
     if !usable {return .Invalid}
     points,sizes,error:=outline_loops(s)
     if error!=.None {return error}
+    rings,bevel_error:=bevel_rings(s)
+    if bevel_error!=.None {return bevel_error}
     triangles:=make([dynamic]u32,context.temp_allocator)
     if geom.polygon_triangulate(points,sizes,&triangles)<=0 {return .Geometry}
     h:=0.5*s.depth
     n:=u32(len(points))
+    // What collides has no bevel: its caps over the points, front i and back
+    // n+i, and a quad per edge between them.
+    c:=&g.collision
+    for p in points {append(&c.positions,geom.Vec3{p.x,p.y,h})}
+    for p in points {append(&c.positions,geom.Vec3{p.x,p.y,-h})}
+    for i:=0;i<len(triangles);i+=3 {
+        a,b,d:=triangles[i],triangles[i+1],triangles[i+2]
+        append(&c.indices,a,b,d,n+a,n+d,n+b)
+    }
+    first:=0
+    for size in sizes {
+        for i in 0..<size {
+            fa,fb:=u32(first+i),u32(first+(i+1)%size)
+            append(&c.indices,n+fa,n+fb,fb,n+fa,fb,fa)
+        }
+        first+=size
+    }
+    if len(rings)>0 && outline_bevel_build(s,points,sizes,rings,k,g) {return .None}
     m:=&g.mesh
     for p in points {
         append(&m.positions,geom.Vec3{p.x,p.y,h});append(&m.normals,geom.Vec3{0,0,1});append(&m.uvs,geom.Vec2{p.x*k,-p.y*k})
@@ -208,13 +236,10 @@ outline_build :: proc(s:^Shape,g:^Shape_Geometry) -> Shape_Error {
         append(&m.positions,geom.Vec3{p.x,p.y,-h});append(&m.normals,geom.Vec3{0,0,-1});append(&m.uvs,geom.Vec2{-p.x*k,-p.y*k})
     }
     for i:=0;i<len(triangles);i+=3 {
-        a,b,c:=triangles[i],triangles[i+1],triangles[i+2]
-        append(&m.indices,a,b,c,n+a,n+c,n+b)
+        a,b,d:=triangles[i],triangles[i+1],triangles[i+2]
+        append(&m.indices,a,b,d,n+a,n+d,n+b)
     }
-    c:=&g.collision
-    append(&c.positions,..m.positions[:])
-    append(&c.indices,..m.indices[:])
-    first:=0
+    first=0
     for size in sizes {
         loop:=points[first:first+size]
         side:=make([]geom.Vec2,size,context.temp_allocator)
@@ -231,9 +256,6 @@ outline_build :: proc(s:^Shape,g:^Shape_Geometry) -> Shape_Error {
             append(&m.normals,geom.Vec3{start.x,start.y,0},geom.Vec3{start.x,start.y,0},geom.Vec3{end.x,end.y,0},geom.Vec3{end.x,end.y,0})
             append(&m.uvs,geom.Vec2{run*k,2*h*k},geom.Vec2{run*k,0},geom.Vec2{(run+length)*k,2*h*k},geom.Vec2{(run+length)*k,0})
             append(&m.indices,base,base+2,base+3,base,base+3,base+1)
-            // The same quad over the points of the caps: front i, back n+i.
-            fa,fb:=u32(first+i),u32(first+j)
-            append(&c.indices,n+fa,n+fb,fb,n+fa,fb,fa)
             run+=length
         }
         first+=size

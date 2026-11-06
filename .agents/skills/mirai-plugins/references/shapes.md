@@ -10,6 +10,15 @@ cut material, drag vertices, and make pieces static or physical.
   polygon with holes in the local XY plane of the entity, its outline first and then its holes,
   extruded along local Z by `depth` and centered on the entity. A **Solid** is made of its
   brushes, each added to what the brushes before it made or cut from it.
+- A **bevel** (`bevel`, `bevel_profile`) rounds or cuts the front and back rims of an Outline:
+  its caps are inset by `bevel` and its rims fall by `bevel` along Z, following a Round
+  (tangent to the cap and the side), Chamfer or Points profile (a polyline from the cap to the side
+  that never turns back). Each loop is inset along the bisectors of its corners, with a miter
+  limit. Where a corner, an edge, a gap across the shape or the depth is smaller than the bevel,
+  the inset there is clamped so the cap keeps part of it; a band that would turn over or cap edges
+  that would meet halve the insets of their points, and a bevel that still does not fit is left
+  out, never drawn crossed. The fall is the same along the whole rim, so where an inset is
+  clamped the profile is steeper. A bevel of 0 builds the shape as without one.
 - A **brush** is an entity with `Shape_Brush` (kind and `subtract`) and `core.Id`, a direct child
   of the Solid: source saved with the scene, so selection, the gizmo, undo, the inspector, the
   outliner, prefabs and the API work on it as on any entity. Its local `Transform` places, turns
@@ -46,6 +55,9 @@ cut material, drag vertices, and make pieces static or physical.
 - Without a `Rigid_Body` on the shape entity the child collides as a `Mesh` collider over the
   generated mesh, joined by position, with the edges between coplanar triangles disabled so a
   character does not catch on the seams of a flat face.
+- The bevel is drawn only: what collides is the unbeveled prism of the Outline, in both cases.
+  Its flat faces keep their seams disabled and its convex pieces stay those of the polygon, and a
+  look of the rims changes nothing in the simulation.
 - With a `Rigid_Body` the child's collider is a `Hull` made of convex pieces, each a shape of that
   body (`Mesh_Generate_Options.hull_points`): the convex partition of an Outline extruded into
   prisms; the brushes of a Solid, each placed, when none subtracts, else an approximate
@@ -148,7 +160,10 @@ points, planes and pieces; edits: an add outside every shape makes one new piece
 outside the area stay, a cut splits into pieces that keep their entities, a covered shape is gone,
 a piece given late is cut by the whole area, a stroke past capacity keeps the last result;
 `bench_stroke_combine` with `--release -define:SHAPES_BENCH=true`), vertex edits that are
-refused, closed meshes that face out with their seams disabled, convex pieces of bodies, and the
+refused, closed meshes that face out with their seams disabled, bevels (a square with holes, a
+triangle, a circle, an L, thin and shallow shapes and random stars: closed, normals that agree,
+within the unbeveled collider, front faces that neither turn over nor overlap; invalid profiles
+refused; bevel 0 ignores the profile; the key follows the bevel), convex pieces of bodies, and the
 step (one child without `Id`, regeneration and release, a copied world, removal; a Solid of brush
 children with a hole that follows a moved, reordered and removed brush; a piece per added brush;
 Outlines that neither build nor allocate while nothing changes).

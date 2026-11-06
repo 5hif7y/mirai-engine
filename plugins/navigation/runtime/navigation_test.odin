@@ -792,7 +792,7 @@ agents_test_step :: proc(f:^Nav_Test,g:^Agents_Test) {
         &g.roamings,&f.disabled,{&f.transforms,core.read(&f.parents),&f.places,&f.jumps},&f.requests,time,&f.problems)
     agents_test_settle(f,g)
     navigation_crossing(core.read(&g.paths),&f.moves,core.read(&f.characters),core.read(&g.walks),core.read(&f.motions),core.read(&g.worlds),core.ref(&f.state),time)
-    phys.locomotion_step(&f.characters,&f.moves,&g.inputs,core.read(&g.walks),core.read(&g.flights),core.read(&g.swims),core.read(&f.character_states),core.read(&f.motions),core.read(&g.worlds),core.read(&g.remotes),core.ref(&f.state),{},{},&g.loco,time,core.CLOCK_DEFAULT,&f.problems)
+    phys.locomotion_step(&f.characters,&f.moves,&g.inputs,core.read(&g.walks),core.read(&g.flights),core.read(&g.swims),core.read(&f.character_states),core.read(&f.motions),core.read(&f.transforms),core.read(&f.parents),core.read(&g.remotes),core.ref(&f.state),{},{},&g.loco,time,core.CLOCK_DEFAULT,&f.problems)
     agents_test_settle(f,g)
     phys.physics_step(
         &f.state,core.ref(&f.physics_settings),&f.requests,&f.events,&f.meshes,&f.app,time,

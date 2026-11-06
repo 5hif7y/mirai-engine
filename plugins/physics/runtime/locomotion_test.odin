@@ -198,7 +198,9 @@ layered_moves_go_on_top_of_the_move_of_a_mode_of_the_game :: proc(t:^testing.T) 
 }
 
 // A mode needs the component of its parameters: flying without a Fly, asked
-// for or started in, is a problem and the character does not fly.
+// for or started in, is a problem and the character does not fly. Its first
+// look is where its Transform turns it, also before a World_Transform is
+// propagated for it, as for a body spawned in this tick.
 @(test)
 a_mode_needs_its_component :: proc(t:^testing.T) {
     es:core.Entities
@@ -206,13 +208,13 @@ a_mode_needs_its_component :: proc(t:^testing.T) {
     defer core.entities_destroy(&es)
     moves:core.Table(Character_Move);inputs:core.Table(input.Move_Input)
     walks:core.Table(Walk);flights:core.Table(Fly);swims:core.Table(Swim);characters:core.Table(Character);found:core.Table(Character_State)
-    motions:core.Table(core.Motion);worlds:core.Table(core.World_Transform);remotes:core.Table(core.Remote)
+    motions:core.Table(core.Motion);locals:core.Table(core.Transform);parents:core.Table(core.Parent);remotes:core.Table(core.Remote)
     core.table_init(&moves,"Character_Move");core.table_init(&inputs,"Move_Input")
     core.table_init(&walks,"Walk");core.table_init(&flights,"Fly");core.table_init(&swims,"Swim");core.table_init(&characters,"Character");core.table_init(&found,"Character_State")
-    core.table_init(&motions,"Motion");core.table_init(&worlds,"World_Transform");core.table_init(&remotes,"Remote")
+    core.table_init(&motions,"Motion");core.table_init(&locals,"Transform");core.table_init(&parents,"Parent");core.table_init(&remotes,"Remote")
     defer {
         core.table_destroy(&moves);core.table_destroy(&inputs);core.table_destroy(&walks);core.table_destroy(&flights);core.table_destroy(&swims);core.table_destroy(&characters)
-        core.table_destroy(&found);core.table_destroy(&motions);core.table_destroy(&worlds);core.table_destroy(&remotes)
+        core.table_destroy(&found);core.table_destroy(&motions);core.table_destroy(&locals);core.table_destroy(&parents);core.table_destroy(&remotes)
     }
     walker,flier:=core.create(&es),core.create(&es)
     starts_flying:=character_default()
@@ -221,24 +223,27 @@ a_mode_needs_its_component :: proc(t:^testing.T) {
     core.add(&characters,flier,character_default())
     core.add(&flights,flier,FLY_DEFAULT)
     for e in ([2]core.Entity{walker,flier}) {core.add(&walks,e,WALK_DEFAULT)}
-    core.table_settle(&walks,&es);core.table_settle(&flights,&es);core.table_settle(&characters,&es)
+    core.add(&locals,walker,core.Transform{{0,0,0},mm.quat_axis_angle({0,1,0},2.5),{1,1,1}})
+    core.table_settle(&walks,&es);core.table_settle(&flights,&es);core.table_settle(&characters,&es);core.table_settle(&locals,&es)
     requests:Locomotion_Requests
     defer delete(requests.queue.items)
     set_mode(&requests,flier,MODE_FLYING)
     physics:Physics_State
     problems:core.Problems
-    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&worlds),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
+    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&locals),core.read(&parents),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
     walking,_:=core.get(core.read(&characters),walker)
     flying,_:=core.get(core.read(&characters),flier)
     testing.expect(t,walking.mode!=MODE_FLYING,"without a Fly it does not fly")
     testing.expect_value(t,flying.mode,MODE_FLYING)
     testing.expect(t,core.problem_find(&problems,walker,"locomotion.mode_component")!=nil)
     set_mode(&requests,walker,MODE_FLYING)
-    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&worlds),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
+    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&locals),core.read(&parents),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
     walking,_=core.get(core.read(&characters),walker)
     testing.expect(t,walking.mode!=MODE_FLYING,"asking for flying without a Fly is refused")
     core.table_settle(&inputs,&es);core.table_settle(&moves,&es)
     testing.expect(t,core.has(&inputs,walker) && core.has(&moves,walker),"playing adds its Move_Input and its Character_Move")
+    looking,_:=core.get(core.read(&inputs),walker)
+    testing.expectf(t,abs(looking.look_yaw-2.5)<1e-4,"it looks where its Transform turns it, not %v",looking.look_yaw)
 }
 
 // Walks in from the shallows, swims on the surface with its head out, dives,

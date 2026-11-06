@@ -78,13 +78,14 @@ rollback_copy_failure_keeps_live_world_and_warm_publication_does_not_allocate ::
     testing.expect(t,!world.time.resimulating && world.time.tick==3 && shared.session==&session)
 }
 
-@(private) Clock_Seen :: struct {time:core.Time,phase:core.Phase}
+@(private) Clock_Seen :: struct {time:core.Time,phase:core.Phase,content:u32}
 @(private) Clock_Test_Shared :: struct {using net:Net_Test_Shared,seen:[dynamic]Clock_Seen}
 
 @(private)
 clock_test_fixed :: proc(world,shared,editor,application:rawptr) {
     w:=cast(^Net_Test_World)world
-    append(&(cast(^Clock_Test_Shared)shared).seen,Clock_Seen{w.time,w.frame.phase})
+    seen:=Clock_Seen{w.time,w.frame.phase,host.content_generation(cast(^host.App)application)}
+    append(&(cast(^Clock_Test_Shared)shared).seen,seen)
     net_test_fixed(world,shared,editor,application)
 }
 
@@ -105,12 +106,17 @@ a_rollback_replays_its_ticks_and_leaves_the_clock_and_the_frame_where_they_were 
     if !testing.expect(t,net_test_session(&session,&world,&info,&app,&network,1,.Client)) {return}
     defer session_destroy(&session)
     shared.session=&session
+    // Each tick ran in a frame that had loaded more content: the ticks run again see what they saw.
+    content:host.Content
+    app.content=&content
     world.time.tick=1
     for _ in 0..<4 {
         world.frame.phase=.Fixed
+        content.generations=u32(world.time.tick)
         clock_test_fixed(&world,&shared,nil,&app)
         core.time_advance(&world.time)
     }
+    content.generations=9
     world.frame={accumulator=0.01,dt=0.02,alpha=0.6,phase=.Input}
     time,frame:=world.time,world.frame
     clear(&shared.seen)
@@ -118,7 +124,11 @@ a_rollback_replays_its_ticks_and_leaves_the_clock_and_the_frame_where_they_were 
     testing.expect_value(t,world.time,time)
     testing.expect_value(t,world.frame,frame)
     testing.expect_value(t,len(shared.seen),3)
-    for seen,i in shared.seen {testing.expect(t,seen.time.resimulating && seen.time.tick==u64(2+i) && seen.phase==.Fixed)}
+    for seen,i in shared.seen {
+        testing.expect(t,seen.time.resimulating && seen.time.tick==u64(2+i) && seen.phase==.Fixed)
+        testing.expect_value(t,seen.content,u32(2+i))
+    }
+    testing.expect_value(t,host.content_generation(&app),u32(9))
     testing.expect_value(t,session.stats.resimulated,u64(3))
 }
 

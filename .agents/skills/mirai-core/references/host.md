@@ -137,9 +137,9 @@ order: [concurrent functions](generator.md#concurrent-functions).
 - It runs `Input` once, `Fixed` per tick (with `Time.tick`, `seconds` and `dt` of the tick) and
   `Frame`, `Late`, `Ui` and `Render` once, with `Frame_Time.alpha` between the last two ticks.
   `Frame_Time.phase` is the phase that is running and `Frame_Time.dt` the `dt` of the frame.
-- `app_tick_replay(app, world)` runs the `Fixed` phase of a world again from the phase that is
-  running and advances its clock as a tick; on return, the phase is still the one from before. The
-  network rollback uses it, which does not touch `Frame_Time`. While it runs it sets
+- `app_tick_replay(app, world, content)` runs the `Fixed` phase of a world again from the phase
+  that is running and advances its clock as a tick; on return, the phase is still the one from
+  before. The network rollback uses it, which does not touch `Frame_Time`. While it runs it sets
   `Problems.resimulating` according to `Time.resimulating`: a problem that the tick repeats does not
   count again.
 - Before `Input` it fills `core.Frame_Input` with the events of the frame, whether or not ticks run.
@@ -490,7 +490,8 @@ row.
 - **What a job loads changes only at the start of a frame**, never on a lookup: a frame sees the
   same content from start to end. `Frame_Record.content` keeps `Content.generations` when the frame
   began, and a frame played again (`app_game_frame` with `replay`) finds pending a first load a job
-  made after that. A reload is not undone in a replay: `content_reloaded_after` says that the
+  made after that; so does a tick run again (`app_tick_replay` with the `content_generation` it
+  saw). A reload is not undone in a replay: `content_reloaded_after` says that the
   frames before it read what it replaced.
 
 ## Shaders at run time

@@ -512,6 +512,14 @@ content_reloaded :: proc(c:^Content,stamp:^Content_Stamp) {
     c.stats.reloads+=1
 }
 
+// The content generation the frame or the tick under way sees: the one it recorded when it plays
+// again, else that of the last load. A frame or tick that plays again with it
+// (Frame_Record.content, app_tick_replay) finds pending a first load a job made after.
+content_generation :: proc "contextless" (app:^App) -> u32 {
+    if app.content==nil {return 0}
+    return app.content.replay.? or_else app.content.generations
+}
+
 // Whether content loaded again after a frame that saw generation (Frame_Record.content): what
 // that frame read is no longer what plays.
 content_reloaded_after :: proc "contextless" (app:^App,generation:u32) -> bool {

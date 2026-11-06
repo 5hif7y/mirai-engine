@@ -245,12 +245,12 @@ app_game_frame :: proc(app:^App,world:rawptr,phases:=ALL_PHASES,step:=false,dt:=
         f.accumulator-=f64(due-app.max_ticks)*f64(app.tick_dt)
         due=app.max_ticks
     }
-    if record!=nil {
-        record.dt,record.accumulator=lasted,f.accumulator
-        record.content=app.content.generations if app.content!=nil else 0
-    }
     if c:=app.content;c!=nil && replay!=nil {c.replay=replay.content}
     defer if c:=app.content;c!=nil {c.replay=nil}
+    if record!=nil {
+        record.dt,record.accumulator=lasted,f.accumulator
+        record.content=content_generation(app)
+    }
     tick_input:core.Input
     devices:=app.script_devices
     app.script_devices=false
@@ -303,8 +303,13 @@ app_game_frame :: proc(app:^App,world:rawptr,phases:=ALL_PHASES,step:=false,dt:=
 
 // A fixed tick of a world that already ran, again, from inside the phase that
 // runs: a correction of the network replays the ticks after an older copy.
+// content is the generation the tick saw when it ran (content_generation): it
+// finds pending a first load a job made after, as a frame played again does.
 // The clock advances as after any tick and the frame goes on in its phase.
-app_tick_replay :: proc(app:^App,world:rawptr) {
+app_tick_replay :: proc(app:^App,world:rawptr,content:u32) {
+    seen:Maybe(u32)
+    if c:=app.content;c!=nil {seen,c.replay=c.replay,content}
+    defer if c:=app.content;c!=nil {c.replay=seen}
     ref:=app_world_ref(app,world)
     f,t:=core.world_storage_of(ref,core.Frame_Time),core.world_storage_of(ref,core.Time)
     // A problem the tick reports again does not count again.

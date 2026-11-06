@@ -24,21 +24,21 @@ a_resimulated_tick_counts_a_known_problem_once_and_keeps_a_new_one :: proc(t:^te
     info.loops[.Game][.Fixed]=replay_world_fixed
     app:=App{info=&info,allocator=context.allocator}
     world:Replay_World
-    for _ in 0..<3 {app_tick_replay(&app,&world)}
+    for _ in 0..<3 {app_tick_replay(&app,&world,0)}
     always:=core.problem_find(&world.problems,core.NONE,"test.always")
     if !testing.expect(t,always!=nil) {return}
     testing.expect_value(t,always.count,u64(3))
     serial:=world.problems.serial
     // A correction runs ticks 1 and 2 again, and the corrected state fails in a new way.
     world.time.tick,world.time.resimulating,world.corrected=1,true,true
-    for _ in 0..<2 {app_tick_replay(&app,&world)}
+    for _ in 0..<2 {app_tick_replay(&app,&world,0)}
     testing.expect_value(t,always.count,u64(3))
     testing.expect_value(t,always.last,serial)
     corrected:=core.problem_find(&world.problems,core.NONE,"test.corrected")
     testing.expect(t,corrected!=nil && corrected.count==1,"a problem only the corrected ticks have is new")
     testing.expect(t,!world.problems.resimulating && world.time.tick==3)
     world.time.resimulating=false
-    app_tick_replay(&app,&world)
+    app_tick_replay(&app,&world,0)
     testing.expect_value(t,always.count,u64(4))
     testing.expect_value(t,corrected.count,u64(2))
 }

@@ -246,6 +246,12 @@ a_frame_played_again_finds_the_content_it_found_when_it_played :: proc(t:^testin
         app_game_frame(app,&w,replay=&record)
         testing.expect_value(t,w.ready,i==2)
     }
+    // A tick a network correction runs again finds what it found the first time too.
+    for &record,i in records {
+        w.ready=i!=2
+        app_tick_replay(app,&w,record.content)
+        testing.expect_value(t,w.ready,i==2)
+    }
     pending=content_animation_pending(app,ANIMATION_ID)
     testing.expect(t,content_animation(app,ANIMATION_ID)!=nil && !pending,"outside a replay it is")
 

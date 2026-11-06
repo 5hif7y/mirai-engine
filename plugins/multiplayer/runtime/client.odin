@@ -121,6 +121,7 @@ Frame :: struct {
     interpolation:f64, // server tick the interpolated replicas were placed at
     delays:[]Delay,    // by object index: ticks each interpolated replica was placed behind that one; -1 for the rest
     input:core.Input,
+    content:u32, // host.content_generation the tick saw: it sees the same when it runs again
 }
 
 @(private)
@@ -784,6 +785,7 @@ client_head :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App,tick:u32,resim
         if frame_copy(w,frame) {
             frame.tick,frame.valid=tick,true
             if input!=nil {frame.input=input^}
+            frame.content=host.content_generation(app)
         } else {snapshot_problem(s,tick)}
         s.stats.snapshot_seconds+=time.duration_seconds(time.tick_since(started))
         drifts_apply(s,w,app.tick_dt)
@@ -1389,8 +1391,9 @@ client_rollback :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App,target:u32
     replicas_relink(s,w,app)
     authoritative_apply(s,w,target,true)
     for tick:=start;i32(c.newest-tick)>=0;tick+=1 {
-        if input!=nil {input^=c.frames[int(tick)%len(c.frames)].input}
-        host.app_tick_replay(app,w.data)
+        frame:=&c.frames[int(tick)%len(c.frames)]
+        if input!=nil {input^=frame.input}
+        host.app_tick_replay(app,w.data,frame.content)
         // SyncTest runs the tick again from the copy this correction made, without the states of the server.
         if c.sync_hashes!=nil {
             core.world_settle(w)
@@ -1459,7 +1462,7 @@ client_sync_test :: proc(s:^Net_Session,w:core.World_Ref,app:^host.App) {
         if !host.app_world_replace(app,w.data,frame.world) {break}
         clock.resimulating=true
         if input!=nil {input^=frame.input}
-        host.app_tick_replay(app,w.data)
+        host.app_tick_replay(app,w.data,frame.content)
         clock.resimulating=false
         s.stats.sync_tested+=1
         // The network gave the tick something else: a state of the server that came after it ran.

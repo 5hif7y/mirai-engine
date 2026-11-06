@@ -5,7 +5,7 @@ import "core:hash/xxhash"
 import "mirai:std/spatial"
 
 @(private) SNAPSHOT_MAGIC :: u32(0x5048594d)
-@(private) SNAPSHOT_VERSION :: u32(12)
+@(private) SNAPSHOT_VERSION :: u32(13)
 @(private) SNAPSHOT_BLOCKS :: 9
 
 @(private)

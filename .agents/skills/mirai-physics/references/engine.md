@@ -49,8 +49,9 @@ own the `Transform` (`locks="core.Transform"`): the game moves through requests.
   character stays where it is.
 - `Character_State` and `core.Motion`: what the last step left. `Character_State` says whether it is
   supported and the ground that the end of the step found (walkable, distance, normal, velocity and
-  `ground_turn`), which is the one the next step will use, and how much it is in a fluid (`fluid`,
-  `submersion`, `head_depth`, `depth` and the current). Only the simulation writes them; a save
+  `ground_turn`), which is the one the next step will use, the normal of the wall it leans on
+  (`wall_normal`, zero without one), and how much it is in a fluid (`fluid`, `submersion`,
+  `head_depth`, `depth` and the current). Only the simulation writes them; a save
   restores them. Whoever writes the `Character_Move` adds `ground_turn` (how much the ground turned
   the character) to the yaw every step.
 - `core.Vertical`: the vertical frame of each character, for whoever reads it outside physics (the

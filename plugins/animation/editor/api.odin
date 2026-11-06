@@ -44,6 +44,7 @@ Play_Params :: struct {
     mode:anim.Layer_Mode `mirai:"optional"`,
     reference:f32 `mirai:"optional,min=0,unit=s"`,
     curves:anim.Curve_Blend `mirai:"optional"`,
+    mesh_space:bool `mirai:"optional,label=Override layer: its rotations blend in the space of the rig, keeping the turn of its clip whatever the base turns above it"`,
 }
 
 Entity_Params :: struct {
@@ -167,7 +168,7 @@ play :: proc(s:^editor.Session,call:^api.Call) {
     name:=base.text_get(p.clip[:])
     if source!=value.asset && p.layer==0 && name!="" {authoring_failure(call,"clip","Program_Source","a clip on a layer over a .match or .agraph","base clip supplied","A base clip requires an .anim asset",fix="Pass layer 1 to 3 to play it over, or ask the .match for it with animation.request plays");return}
     if name!="" && lib.clip_find(&content.lib,base.name_hash(name))==0 {authoring_failure(call,"clip","Missing_Clip","a clip name in the source",name,"The clip does not exist in this animation asset");return}
-    if !anim.animation_play(&value,name,p.fade,p.loop,int(p.layer),base.text_get(p.over[:]),p.sync,p.weight,p.speed,p.mode,p.reference,p.curves) {authoring_failure(call,"layer","Invalid_Value","a valid layer and supported playback policies",fmt.tprintf("%d",p.layer),"The animation layer or its policies are invalid");return}
+    if !anim.animation_play(&value,name,p.fade,p.loop,int(p.layer),base.text_get(p.over[:]),p.sync,p.weight,p.speed,p.mode,p.reference,p.curves,p.mesh_space) {authoring_failure(call,"layer","Invalid_Value","a valid layer and supported playback policies",fmt.tprintf("%d",p.layer),"The animation layer or its policies are invalid");return}
     if !edit_begin(s,call,"Play animation") {return}
     core.add(table,e,value)
     if !edit_end(s,call,w,true) {return}

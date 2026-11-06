@@ -118,6 +118,8 @@ mirai_avatar_walk :: proc(t:^testing.T,app:^host.App,skeletons:^Skeleton_Assets,
         if tick==0 {metrics.load=f64(time.duration_nanoseconds(time.tick_since(start)))} else {metrics.nanoseconds+=f64(time.duration_nanoseconds(time.tick_since(start)))}
         walked:=state.program.match.speed*state.program.match.rate
         mirai_avatar_body_step(&body,wish,jump,dt)
+        // The root of the pose where the spring of matching leaves it from the body.
+        match_lag_apply(&state,{position=body.position,rotation=mm.quat_axis_angle({0,1,0},body.yaw),scale={1,1,1}})
         // Where the pose puts the toes in the world, and how much the pose itself jumped.
         state.local[0]={body.position,mm.quat_axis_angle({0,1,0},body.yaw),{1,1,1}}
         lib.pose_world(state.parents[:],state.local[:],world)
@@ -188,8 +190,7 @@ matching_walks_mirai_avatar_with_its_feet_planted_without_pose_jumps_and_follows
     search:f64
     for &content in graphs.matches {for &built in content.databases {if built.error==.None {
         database,rows=lib.match_database_size(built.database),built.database.rows
-        request:=lib.Match_Request{query=lib.match_features(&built.database,0),modes=~u32(0),min_rate=.5,max_rate=1}
-        request.positions,request.directions=lib.match_row_trajectory(&built.database,0)
+        request:=lib.Match_Request{query=lib.match_features(&built.database,0),trajectory=lib.match_row_trajectory(&built.database,0),modes=~u32(0),min_rate=.5,max_rate=1}
         start:=time.tick_now();sink:=0
         for _ in 0..<1000 {best,_,_:=lib.match_search(&built.database,request);sink+=best}
         search=f64(time.duration_nanoseconds(time.tick_since(start)))/1000
@@ -288,11 +289,12 @@ match_fixture_free :: proc(f:^Match_Fixture) {
     delete(f.events.items);delete(f.events.plays.items);delete(f.requests.match_plays.items)
     core.table_destroy(&f.transforms);core.entities_destroy(&f.entities)
 }
-// A tick of the rig with the body standing in mode.
+// A tick of the rig with the body in mode: standing, or going at velocity, asked for desired,
+// against a wall of that normal.
 @(private="file")
-match_step :: proc(f:^Match_Fixture,dt:f32,mode:u16,plays:[]Match_Play={}) -> bool {
+match_step :: proc(f:^Match_Fixture,dt:f32,mode:u16,plays:[]Match_Play={},velocity:=mm.Vec3{},desired:=mm.Vec3{},wall:=mm.Vec3{}) -> bool {
     clear(&f.events.items);clear(&f.events.plays.items)
-    goals:=[1]Match_Goal{{rig=f.rig,mode=mode,facing={0,0,1},acceleration=20,braking=20}}
+    goals:=[1]Match_Goal{{rig=f.rig,mode=mode,velocity=velocity,desired=desired,facing={0,0,1},wall=wall,acceleration=20,braking=20}}
     copy(f.state.local[:],f.state.rest[:])
     output,programmed,ok:=program_resolve(f.state,f.animation,&f.app,nil,&f.graphs,dt,&f.events,&f.playback,&f.content,&f.problems,goals[:],plays)
     return ok && programmed && program_players(f.state,output,&f.content,f.animation,&f.events,&f.playback,dt,-1,nil) && program_pose(&f.playback,f.state,&f.content,f.animation,output,{})
@@ -457,4 +459,75 @@ match_assets_roundtrip_refuse_no_memory_or_looping_entries_and_report_a_database
     testing.expect(t,!match_check(changed) && match_document(&invalid,&types,MATCH_TEST_ID,changed)==.Invalid,"an entry clip does not loop")
     testing.expect(t,match_step(&f,.1,GROUND))
     testing.expect(t,core.problem_find(&f.problems,f.rig,"animation.match_memory")!=nil,"a database past the memory of its .match is reported")
+}
+
+@(test)
+a_jump_nothing_forces_waits_the_hold_after_the_one_before :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    info:=&f.graphs.matches[0].profile.info;info.lag=0
+    dt:=f32(1.0/60)
+    // The body walks and stands on alternate ticks: every search would rather jump.
+    last,gap,jumps:=-1,max(int),u32(0)
+    for tick in 0..<120 {
+        speed:=f32(1.5) if tick%2==0 else 0
+        testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,speed},desired={0,0,speed}))
+        value,_:=animation_match(&f.playback,f.rig)
+        if value.jumps>jumps && tick>=10 {if last>=0 {gap=min(gap,tick-last)};last=tick}
+        jumps=value.jumps
+    }
+    testing.expectf(t,last>=0 && gap!=max(int) && f32(gap)*dt>=info.hold-1e-4,"jumps come at least %.2f s apart, not %d ticks",info.hold,gap)
+}
+
+@(test)
+matching_starts_and_stops_by_dead_blending_as_its_transition_says :: proc(t:^testing.T) {
+    for transition in Match_Transition {
+        f:Match_Fixture;defer match_fixture_free(&f)
+        if !testing.expect(t,match_fixture(t,&f)) {continue}
+        info:=&f.graphs.matches[0].profile.info;info.transition,info.stationary_speed=transition,.15
+        dt:=f32(1.0/60)
+        for _ in 0..<20 {testing.expect(t,match_step(&f,dt,GROUND))}
+        value,_:=animation_match(&f.playback,f.rig)
+        testing.expect_value(t,value.clip,base.name_hash("idle"))
+        started,dead:=false,false
+        for _ in 0..<60 {
+            jumps:=value.jumps
+            testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,1.5},desired={0,0,1.5}))
+            value,_=animation_match(&f.playback,f.rig)
+            if value.jumps>jumps && value.clip==base.name_hash("walk") {started,dead=true,f.state.program.dead;break}
+        }
+        testing.expectf(t,started && dead==(transition!=.Inertial),"%v starts the walk by dead blending: %v",transition,dead)
+    }
+}
+
+@(test)
+the_root_of_the_pose_follows_a_body_that_stops_at_once_within_its_lag_and_out_of_a_wall :: proc(t:^testing.T) {
+    for blocked in ([2]bool{false,true}) {
+        f:Match_Fixture;defer match_fixture_free(&f)
+        if !testing.expect(t,match_fixture(t,&f)) {continue}
+        f.graphs.matches[0].profile.info.lag=.15
+        info:=f.graphs.matches[0].profile.info
+        hips:=bone_resolve(f.state,bone_ref("hips"))
+        dt:=f32(1.0/60)
+        for _ in 0..<60 {testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,1.5},desired={0,0,1.5}))}
+        value,_:=animation_match(&f.playback,f.rig)
+        testing.expectf(t,linalg.length(value.lag)<.01 && abs(value.velocity.z-1.5)<.01,"a steady walk keeps the root on the body: %v",value)
+        wall:=mm.Vec3{0,0,-1} if blocked else {}
+        ahead,change:=f32(0),f32(0);velocity:=value.velocity
+        for _ in 0..<60 {
+            testing.expect(t,match_step(&f,dt,GROUND,wall=wall))
+            value,_=animation_match(&f.playback,f.rig)
+            testing.expectf(t,linalg.length(value.lag)<=info.lag+1e-5,"the root strays %.3f m, past its lag",linalg.length(value.lag))
+            ahead=max(ahead,value.lag.z);change=max(change,linalg.length(value.velocity-velocity));velocity=value.velocity
+            rest:=f.state.local[hips].position
+            match_lag_apply(f.state,mm.TRANSFORM_IDENTITY)
+            testing.expect(t,linalg.length(f.state.local[hips].position-rest-value.lag)<1e-5,"the root of the pose moves by the lag")
+        }
+        testing.expectf(t,linalg.length(value.lag)<.01 && linalg.length(value.velocity)<.01,"the root settles on the body: %v",value)
+        if blocked {
+            testing.expectf(t,ahead<=1e-5,"a wall keeps the root out of it: %.4f m in",ahead)
+        } else {
+            testing.expectf(t,ahead>.02 && change<.5,"the root goes on %.3f m past the stop and slows by %.2f m/s a tick at most",ahead,change)
+        }
+    }
 }

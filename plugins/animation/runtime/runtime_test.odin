@@ -186,6 +186,43 @@ layers_play_over_the_clip_inside_their_branch_by_weight_and_fade_out :: proc(t:^
 }
 
 @(test)
+a_layer_in_the_space_of_the_rig_keeps_the_turn_of_its_clip_whatever_the_base_turns_above :: proc(t:^testing.T) {
+    content:host.Content_Animation;content.id={1,3}
+    testing.expect(t,lib.library_init(&content.lib,{max_keys=16,max_tracks=8,max_clips=4,max_markers=0}))
+    defer lib.library_destroy(&content.lib)
+    hip,arm:=base.name_hash("hip"),base.name_hash("arm")
+    side:=mm.quat_axis_angle({0,1,0},mm.PI/2)
+    turned:=[1]lib.Keyframe{{value={imag(side),jmag(side),kmag(side),real(side)}}}
+    straight:=[1]lib.Keyframe{{value={0,0,0,1}}}
+    // The base turns the hip sideways; the layer holds hip and arm straight, over the arm alone.
+    clips:=[2]lib.Clip_Desc{
+        {name=base.name_hash("turn"),tracks={{target=hip,property=.Rotation,keys=turned[:]}}},
+        {name=base.name_hash("pose"),tracks={{target=hip,property=.Rotation,keys=straight[:]},{target=arm,property=.Rotation,keys=straight[:]}}},
+    }
+    for clip in clips {added,_:=lib.clip_add(&content.lib,clip);testing.expect(t,added!=0)}
+    for i in 0..<2 {content.lib.clips[2+i]=content.lib.clips[i];content.lib.clips[2+i].loop=.Loop}
+    content.lib.clip_count=4;content.clip_count=2
+    state:=Playing{entity=core.entity_make(1,1),clip=-1};defer playing_free(&state)
+    targets:=[3]u64{0,hip,arm};parents:=[3]i32{-1,0,1}
+    for target,i in targets {
+        append(&state.bindings,Binding{target=target,entity=core.NONE,driven={.Position,.Rotation},rest=mm.TRANSFORM_IDENTITY,parent=parents[i]})
+        append(&state.parents,parents[i]);append(&state.targets,target);append(&state.rest,mm.TRANSFORM_IDENTITY)
+    }
+    resize(&state.local,3);resize(&state.world,3)
+    playback:Playback;defer playback_free(&playback)
+    testing.expect(t,lib.pose_init(&playback.pose,64))
+    events:Animation_Events;defer delete(events.items)
+    turns:[2]f32
+    for mesh,i in ([2]bool{false,true}) {
+        animation:=ANIMATION_DEFAULT
+        testing.expect(t,animation_play(&animation,"turn",fade=0) && animation_play(&animation,"pose",fade=0,layer=1,over="arm",mesh_space=mesh))
+        layer_step(&playback,&state,&content,animation,&events,0)
+        turns[i]=mm.quat_angle(state.local[1].rotation*state.local[2].rotation,1)
+    }
+    testing.expectf(t,abs(turns[0]-mm.PI/2)<1e-4 && turns[1]<1e-4 && mm.quat_angle(state.local[1].rotation,side)<1e-4,"in its own space the arm turns with the hip, in the space of the rig it stays straight: %v",turns)
+}
+
+@(test)
 animation_play_sets_the_clip_of_the_component_on_layer_zero :: proc(t:^testing.T) {
     animation:=ANIMATION_DEFAULT
     animation.playing=false

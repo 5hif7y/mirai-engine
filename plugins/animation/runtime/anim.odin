@@ -2,6 +2,7 @@ package anim
 
 import "core:slice"
 import "core:mem"
+import "core:math/linalg"
 import "mirai:asset"
 import "mirai:core"
 import erender "mirai:engine/render"
@@ -67,6 +68,7 @@ Animation_Layer :: struct {
     mode:Layer_Mode,
     reference:f32,
     curves:Curve_Blend,
+    mesh_space:bool, // Override: the rotations of its branch blend in the space of the rig, so it keeps the turn its clip gives them whatever the base turns above it
 }
 
 @(component,description="An imported rigid animation target identified by its canonical path.")
@@ -210,6 +212,7 @@ Playback :: struct {
     rigs_inputs:[5]u64,
     pose:lib.Pose,
     mask:[dynamic]f32, // of the layer being sampled, by binding
+    rig_rotations:[dynamic]mm.Quat, // of a layer blended in the space of the rig: the base, the layer and the blend, by binding
     final_rows:[dynamic]i32,
     frame,binding_revision:u64,
     stats:Stats,
@@ -267,8 +270,8 @@ animation_tick :: proc(
         }
         first_event:=len(events.items)
         defer source_markers_resolve(sources,state,events.items[first_event:])
-        facing:=mm.Vec3{0,0,1}
-        if state.program.kind==MATCH_KIND {if placed,ok:=constraint_world(core.read(transforms),parents,{},e);ok {facing=mm.quat_rotate(placed.rotation,facing)}}
+        facing:=mm.Vec3{0,0,1};placed:=mm.TRANSFORM_IDENTITY
+        if state.program.kind==MATCH_KIND {if world,ok:=constraint_world(core.read(transforms),parents,{},e);ok {placed=world;facing=mm.quat_rotate(world.rotation,facing)}}
         program,programmed,program_valid:=program_resolve(state,animation,app,blends,graphs,dt,events,playback,content,problems,match_goals,match_plays,facing)
         if !program_valid {program_problem(problems,e,app,animation,state.program.error);continue}
         if !programmed && animation.library!={} {
@@ -411,6 +414,7 @@ animation_tick :: proc(
                 if instance:=motion_instance(motion,e);instance!=nil {motion_problem(problems,e,instance.error,app,motion_assets,animation.motion)}
             }
         }
+        if programmed && state.program.kind==MATCH_KIND {match_lag_apply(state,placed)}
         copy(state.sampled[:],state.local[:])
         if distance_error!=.None {state.program.error=.Invalid_Parameter;distance_problem(problems,e,distance_error)}
         state.seen=playback.frame
@@ -687,6 +691,26 @@ pose_layer_transform :: proc(pose:^lib.Pose,target:u64,out:mm.Transform,share:f3
     return out
 }
 
+// The rotation of bone b after an Override layer blended in the space of the rig, written to its
+// local pose: rotations holds by binding that of the base, of the layer and of the blend in that
+// space (the bone under none is its origin). A bone the layer leaves out follows its parent as in
+// the base. False when its parent comes after it.
+@(private)
+pose_layer_mesh_rotation :: proc(rotations:[]mm.Quat,state:^Playing,pose:^lib.Pose,target:u64,b:int,share:f32) -> bool {
+    n:=len(state.bindings)
+    base,layered,blended:=rotations[:n],rotations[n:2*n],rotations[2*n:3*n]
+    parent:=int(state.parents[b])
+    if parent<0 {base[b],layered[b],blended[b]=1,1,1;return true}
+    if parent>=b {return false}
+    own:=state.local[b].rotation;theirs:=own
+    if value,w,ok:=lib.pose_rotation(pose,target);ok {theirs=mm.quat_slerp(own,value,mm.saturate(w))}
+    base[b]=base[parent]*own;layered[b]=layered[parent]*theirs
+    if share<=0 {blended[b]=blended[parent]*own;return true}
+    blended[b]=mm.quat_slerp(base[b],layered[b],mm.saturate(share))
+    state.local[b].rotation=linalg.normalize0(mm.quat_inverse(blended[parent])*blended[b])
+    return true
+}
+
 @(private)
 pose_layers :: proc(playback:^Playback,state:^Playing,library:^lib.Library,animation:Animation,problems:^core.Problems,transforms:core.Read(core.Transform)={}) {
     pose:=&playback.pose
@@ -721,10 +745,16 @@ pose_layers :: proc(playback:^Playback,state:^Playing,library:^lib.Library,anima
                 lib.pose_blend_additive(pose,library,player,animation.layers[i].reference)
             }
         } else {lib.fader_blend(pose,library,layer.fader)}
+        n:=len(state.bindings)
+        mesh:=!additive && animation.layers[i].mesh_space && len(state.parents)==n
+        if mesh && len(playback.rig_rotations)<3*n && resize(&playback.rig_rotations,3*n)!=nil {memory_problem(problems,state.entity,"the rotations of a layer in the space of the rig");mesh=false}
         for binding,b in state.bindings {
             share:=layer.weight*mm.saturate(animation.weight)*(mask[b] if mask!=nil else 1)
+            if mesh && !pose_layer_mesh_rotation(playback.rig_rotations[:3*n],state,pose,binding.target,b,share) {continue}
             if share<=0 {continue}
+            turned:=state.local[b].rotation
             state.local[b]=pose_layer_transform(pose,binding.target,state.local[b],share,additive)
+            if mesh && state.parents[b]>=0 {state.local[b].rotation=turned}
             if b==root_bone {root:^Root_Motion;if state.action_root_mask&(u8(1)<<u8(i))!=0 {root=&state.action_roots[i]};retired=pose_layer_transform(pose,binding.target,retired,share,additive,root,reference)}
         }
     }
@@ -845,10 +875,11 @@ animation_seek :: proc(requests:^Animation_Requests,entity:core.Entity,time:f32)
 // component: it cross-fades into the new one from its start. Layers 1 to
 // ANIMATION_LAYERS play over it with their weight, over the branch of the
 // bone named by over (the whole pose when empty); with sync, the phase of the
-// layer follows the clip of the component. fade below zero keeps the fade of
-// the component. False, with nothing changed, for a layer that does not exist,
-// a name that does not fit, or numbers that are not finite.
-animation_play :: proc(animation:^Animation,clip:string,fade:f32=-1,loop:Maybe(bool)=nil,layer:=0,over:="",sync:=false,weight:f32=1,speed:f32=1,mode:Layer_Mode=.Override,reference:f32=0,curves:Curve_Blend=.Override) -> bool {
+// layer follows the clip of the component; with mesh_space, an Override layer
+// blends its rotations in the space of the rig. fade below zero keeps the fade
+// of the component. False, with nothing changed, for a layer that does not
+// exist, a name that does not fit, or numbers that are not finite.
+animation_play :: proc(animation:^Animation,clip:string,fade:f32=-1,loop:Maybe(bool)=nil,layer:=0,over:="",sync:=false,weight:f32=1,speed:f32=1,mode:Layer_Mode=.Override,reference:f32=0,curves:Curve_Blend=.Override,mesh_space:=false) -> bool {
     if animation==nil || layer<0 || layer>ANIMATION_LAYERS || !finite(fade) || !finite(weight) || !finite(speed) || !finite(reference) || reference<0 || mode>max(Layer_Mode) || curves>max(Curve_Blend) || len(clip)>=CLIP_CAPACITY {return false}
     if layer==0 {
         base.text_set(animation.clip[:],clip)
@@ -860,7 +891,7 @@ animation_play :: proc(animation:^Animation,clip:string,fade:f32=-1,loop:Maybe(b
     if clip=="" {return false}
     animation.layers[layer-1]={
         clip=base.name_hash(clip),over=base.name_hash(over) if over!="" else 0,
-        weight=mm.saturate(weight),speed=speed,fade=max(fade if fade>=0 else animation.fade,0),loop=loop.? or_else true,sync=sync,mode=mode,reference=reference,curves=curves,
+        weight=mm.saturate(weight),speed=speed,fade=max(fade if fade>=0 else animation.fade,0),loop=loop.? or_else true,sync=sync,mode=mode,reference=reference,curves=curves,mesh_space=mesh_space,
     }
     return true
 }
@@ -884,7 +915,7 @@ animation_stop :: proc(animation:^Animation,layer:int,fade:f32=-1) -> bool {
 
 playback_free :: proc(playback:^Playback) {
     for &state in playback.states {playing_free(&state)}
-    delete(playback.states);delete(playback.rows);delete(playback.rigs);delete(playback.mask);delete(playback.final_rows)
+    delete(playback.states);delete(playback.rows);delete(playback.rigs);delete(playback.mask);delete(playback.rig_rotations);delete(playback.final_rows)
     lib.pose_destroy(&playback.pose)
     playback^={}
 }

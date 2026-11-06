@@ -31,7 +31,9 @@ The same `world_step` serves the server, the predicting client and resimulation.
   `Stale`), body, point, normal, velocity (`ground_velocity`, including that of its surface),
   `ground_surface`, `ground_distance` (feet above the ground; negative if sunk), `ground_turn` and
   the pending instant effect; how much it is in a fluid: `submersion`, `head_depth`, `depth` (above
-  the feet), the current and the flags `In_Fluid` and `Underwater`; and `up_frame`, the frame of its
+  the feet), the current and the flags `In_Fluid` and `Underwater`; the wall it leans on
+  (`wall_normal`, across its up and out of the wall, and `wall_push`, how fast its drive heads into
+  it), found with the ground among what it touches and cannot push; and `up_frame`, the frame of its
   [vertical](#the-vertical).
 - `Character` (private) gathers the three with the handles of the body and the shape, without
   padding or pointers.

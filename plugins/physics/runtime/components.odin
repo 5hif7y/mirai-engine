@@ -201,6 +201,7 @@ Character_State :: struct {
     ground_normal:[3]f32 `mirai:"transient,readonly,hidden"`,
     ground_velocity:[3]f32 `mirai:"transient,readonly,hidden,unit=m/s"`,
     ground_turn:f32 `mirai:"transient,readonly,hidden"`, // radians the ground turned the character in the last step
+    wall_normal:[3]f32 `mirai:"transient,readonly,hidden"`, // of the wall it leans on, across its up and out of the wall; zero without one
     fluid:Fluid_Flags `mirai:"transient,readonly"`,
     submersion:f32 `mirai:"transient,readonly,min=0,max=1"`, // share of the body, from the feet to the head, under the surface
     head_depth:f32 `mirai:"transient,readonly,unit=m"`,       // of the top of the head under the surface; negative above it
@@ -211,7 +212,7 @@ Character_State :: struct {
 character_state_of :: proc "contextless" (found:sim.Character_State) -> Character_State {
     return {
         standing=.Standing in found.ground,walkable=.Walkable in found.ground,ground_distance=found.ground_distance,
-        ground_normal=found.ground_normal,ground_velocity=found.ground_velocity,ground_turn=found.ground_turn,
+        ground_normal=found.ground_normal,ground_velocity=found.ground_velocity,ground_turn=found.ground_turn,wall_normal=found.wall_normal,
         fluid=found.fluid,submersion=found.submersion,head_depth=found.head_depth,depth=found.depth,fluid_velocity=found.fluid_velocity,
     }
 }

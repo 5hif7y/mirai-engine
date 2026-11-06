@@ -7,22 +7,30 @@ import "core:simd"
 import math "mirai:std/math"
 
 // Motion matching: every frame of a set of clips is a row of features (where
-// the feet are and how they move, how the hips move and where the body goes
-// in the next second), normalized per feature so that each kind weighs what
-// its weight says. A query with the same features finds the row closest to
-// what the body does and is asked to do. The features are in the frame of
-// the character: its position on the ground and its facing, +Z forward and Y
-// up, so a row does not depend on where or toward where the clip was made.
+// the feet are and how they move, how the hips and the body move, where the body
+// was a moment ago and where it goes in the next second), normalized per feature
+// so that each kind weighs what its weight says. A query with the same features
+// finds the row closest to what the body does and is asked to do. The features
+// are in the frame of the character: its position on the ground and its facing,
+// +Z forward and Y up, so a row does not depend on where or toward where the clip
+// was made.
 
-MATCH_LANES :: 7 // f32x4 per row: 27 features and one of padding
+MATCH_LANES :: 8 // f32x4 per row: 31 features and one of padding
 MATCH_TRAJECTORY :: 3
 MATCH_HORIZON :: [MATCH_TRAJECTORY]f32{1.0/3,2.0/3,1} // seconds ahead of each trajectory point
+MATCH_PAST :: f32(1.0/3)                               // seconds behind of the past point
 
-Match_Feature :: enum u8 {Foot_Position,Foot_Velocity,Hip_Velocity,Trajectory_Position,Trajectory_Direction}
+Match_Feature :: enum u8 {Foot_Position,Foot_Velocity,Hip_Velocity,Body_Velocity,Trajectory_Position,Trajectory_Direction}
 Match_Weights :: [Match_Feature]f32
-MATCH_WEIGHTS_DEFAULT :: Match_Weights{.Foot_Position=.75,.Foot_Velocity=1,.Hip_Velocity=1,.Trajectory_Position=1,.Trajectory_Direction=1.5}
-// First and end feature of each kind in a row.
-MATCH_FEATURES :: [Match_Feature][2]int{.Foot_Position={0,6},.Foot_Velocity={6,12},.Hip_Velocity={12,15},.Trajectory_Position={15,21},.Trajectory_Direction={21,27}}
+MATCH_WEIGHTS_DEFAULT :: Match_Weights{.Foot_Position=.75,.Foot_Velocity=1,.Hip_Velocity=1,.Body_Velocity=1,.Trajectory_Position=1,.Trajectory_Direction=1.5}
+// First and end feature of each kind in a row. The trajectory positions are the past point and
+// then those of MATCH_HORIZON, x and z each; the body velocity is x and z.
+MATCH_FEATURES :: [Match_Feature][2]int{.Foot_Position={0,6},.Foot_Velocity={6,12},.Hip_Velocity={12,15},.Body_Velocity={15,17},.Trajectory_Position={17,25},.Trajectory_Direction={25,31}}
+@(private) MATCH_AT_VELOCITY :: 15
+@(private) MATCH_AT_PAST :: 17
+@(private) MATCH_AT_POINTS :: 19
+@(private) MATCH_AT_DIRECTIONS :: 25
+#assert(MATCH_AT_DIRECTIONS+2*MATCH_TRAJECTORY<=MATCH_LANES*4)
 // Smallest spread of a kind of feature: a kind every row shares (the facing of clips in place)
 // does not turn a small difference of the query into a huge cost.
 MATCH_SPREAD_MIN :: .1
@@ -33,6 +41,15 @@ MATCH_BOUND_SMALL :: 16
 MATCH_BOUND_LARGE :: 64
 // Seconds from its start in which an entry clip can be entered.
 MATCH_ENTRY_SPAN :: .1
+// Seconds of its end that a clip which does not loop, shorter than the trajectory, keeps out of
+// the search.
+MATCH_TAIL_MIN :: .3
+// m/s at or below which a clip stands still.
+MATCH_STILL :: .05
+// Rows a rig left that a search remembers.
+MATCH_RECENT :: 8
+// Ticks of the velocity of a body its trail keeps.
+MATCH_TRAIL :: 64
 
 Match_Query :: [MATCH_LANES]simd.f32x4
 
@@ -57,6 +74,17 @@ Match_Build_Error :: enum u8 {None,Invalid,Memory_Limit,Out_Of_Memory}
 // What the features read of a skeleton: bones of the feet and the hips, the
 // body its clips are measured with, and its forward in the space of the rig.
 Match_Rig :: struct {skeleton:Skeleton,body:Body_Map,left_foot,right_foot,hips:i32,forward:math.Vec3}
+
+// Where the body goes and went, raw, in the frame of its facing: its velocity now (m/s), where it
+// was MATCH_PAST seconds before, and where it is and faces at each MATCH_HORIZON.
+Match_Trajectory :: struct {velocity,past:math.Vec2,positions,directions:[MATCH_TRAJECTORY]math.Vec2}
+
+// Rows a rig jumped away from, oldest first, and the seconds since it left each.
+Match_Recent :: struct {rows:[MATCH_RECENT]i32,ages:[MATCH_RECENT]f32,count:i32}
+
+// The horizontal velocities of a body in its last ticks and their seconds, in a ring: next is
+// where the next one goes.
+Match_Trail :: struct {velocities:[MATCH_TRAIL]math.Vec3,steps:[MATCH_TRAIL]f32,next,count:i32}
 
 match_database_free :: proc(db:^Match_Database) {
     if db.allocator.procedure!=nil {delete(db.features,db.allocator);delete(db.ranges,db.allocator);delete(db.small,db.allocator);delete(db.large,db.allocator)}
@@ -134,12 +162,16 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
             }
             hips:=math.quat_rotate(inverse,match_motion_velocity(motion,int(rig.hips),frame))
             for axis in 0..<3 {values[12+axis]=hips[axis]}
+            velocity:=math.quat_rotate(inverse,match_motion_body_velocity(motion,frame))
+            past:=math.quat_rotate(inverse,match_motion_body(motion,at-MATCH_PAST*exact)-here)
+            values[MATCH_AT_VELOCITY],values[MATCH_AT_VELOCITY+1]=velocity.x,velocity.z
+            values[MATCH_AT_PAST],values[MATCH_AT_PAST+1]=past.x,past.z
             for horizon,k in MATCH_HORIZON {
                 ahead:=at+horizon*exact
                 position:=math.quat_rotate(inverse,match_motion_body(motion,ahead)-here)
                 direction:=math.quat_rotate(inverse,match_motion_facing(motion,ahead))
-                values[15+k*2],values[16+k*2]=position.x,position.z
-                values[21+k*2],values[22+k*2]=direction.x,direction.z
+                values[MATCH_AT_POINTS+k*2],values[MATCH_AT_POINTS+k*2+1]=position.x,position.z
+                values[MATCH_AT_DIRECTIONS+k*2],values[MATCH_AT_DIRECTIONS+k*2+1]=direction.x,direction.z
             }
         }
         row+=count
@@ -206,39 +238,42 @@ match_cost :: #force_inline proc "contextless" (db:^Match_Database,row:int,query
 }
 
 // The raw trajectory of a row.
-match_row_trajectory :: proc "contextless" (db:^Match_Database,row:int) -> (positions,directions:[MATCH_TRAJECTORY]math.Vec2) {
+match_row_trajectory :: proc "contextless" (db:^Match_Database,row:int) -> (trajectory:Match_Trajectory) {
     values:[MATCH_LANES*4]f32
     for lane in 0..<MATCH_LANES {lanes:=simd.to_array(db.features[row*MATCH_LANES+lane]);copy(values[lane*4:][:4],lanes[:])}
+    raw :: proc "contextless" (db:^Match_Database,values:[]f32,at:int) -> math.Vec2 {
+        return {values[at]*db.scale[at]+db.mean[at],values[at+1]*db.scale[at+1]+db.mean[at+1]}
+    }
+    trajectory.velocity,trajectory.past=raw(db,values[:],MATCH_AT_VELOCITY),raw(db,values[:],MATCH_AT_PAST)
     for k in 0..<MATCH_TRAJECTORY {
-        for axis in 0..<2 {
-            i,j:=15+k*2+axis,21+k*2+axis
-            positions[k][axis]=values[i]*db.scale[i]+db.mean[i]
-            directions[k][axis]=values[j]*db.scale[j]+db.mean[j]
-        }
+        trajectory.positions[k]=raw(db,values[:],MATCH_AT_POINTS+k*2)
+        trajectory.directions[k]=raw(db,values[:],MATCH_AT_DIRECTIONS+k*2)
     }
     return
 }
 
-// Writes the trajectory of the query, raw values in the frame of the character, normalized.
-match_query_trajectory :: proc "contextless" (db:^Match_Database,query:^Match_Query,positions,directions:[MATCH_TRAJECTORY]math.Vec2) {
+// Writes a trajectory, raw values in the frame of the character, into a query, normalized.
+match_query_trajectory :: proc "contextless" (db:^Match_Database,query:^Match_Query,trajectory:Match_Trajectory) {
     values:[MATCH_LANES*4]f32
     for lane in 0..<MATCH_LANES {lanes:=simd.to_array(query[lane]);copy(values[lane*4:][:4],lanes[:])}
+    put :: proc "contextless" (db:^Match_Database,values:[]f32,at:int,value:math.Vec2) {
+        values[at]=(value.x-db.mean[at])/db.scale[at];values[at+1]=(value.y-db.mean[at+1])/db.scale[at+1]
+    }
+    put(db,values[:],MATCH_AT_VELOCITY,trajectory.velocity);put(db,values[:],MATCH_AT_PAST,trajectory.past)
     for k in 0..<MATCH_TRAJECTORY {
-        for axis in 0..<2 {
-            i,j:=15+k*2+axis,21+k*2+axis
-            values[i]=(positions[k][axis]-db.mean[i])/db.scale[i]
-            values[j]=(directions[k][axis]-db.mean[j])/db.scale[j]
-        }
+        put(db,values[:],MATCH_AT_POINTS+k*2,trajectory.positions[k])
+        put(db,values[:],MATCH_AT_DIRECTIONS+k*2,trajectory.directions[k])
     }
     for lane in 0..<MATCH_LANES {query[lane]=match_lane(values[lane*4:][:4])}
 }
 
 // What a search looks for: the pose part of query (the trajectory lanes are written per clip),
-// the trajectory in the frame of the character, the modes whose clips it searches and the rates
-// a clip that travels may play at (1 and 1: as it was made) and the rate the pose of query plays
-// at (0: 1). entry searches the starts of the entry clips of the modes alone; otherwise they are
-// left out.
-Match_Request :: struct {query:Match_Query,positions,directions:[MATCH_TRAJECTORY]math.Vec2,modes:u32,min_rate,max_rate,rate:f32,entry:bool,filter_stationary,moving:bool}
+// the trajectory, the modes whose clips it searches and the rates a clip that travels may play at
+// (1 and 1: as it was made) and the rate the pose of query plays at (0: 1). entry searches the
+// starts of the entry clips of the modes alone; otherwise they are left out. With
+// filter_stationary, a clip that is not an entry is searched only if it stands (MATCH_STILL) when
+// the body does not move, and moves when the body does.
+Match_Request :: struct {query:Match_Query,trajectory:Match_Trajectory,modes:u32,min_rate,max_rate,rate:f32,entry:bool,filter_stationary,moving:bool}
 
 // The query against the rows of a range, its weights and the rate the range plays at to go where
 // the trajectory goes: a few clips cover the speeds between theirs by their rate, whose trajectory
@@ -251,11 +286,12 @@ match_query :: proc "contextless" (db:^Match_Database,request:Match_Request,rang
     for &lane in weights {lane={1,1,1,1}}
     r:=db.ranges[range]
     if r.speed>1e-3 && request.min_rate>0 && request.min_rate<=request.max_rate {
-        rate=clamp(linalg.length(request.positions[MATCH_TRAJECTORY-1])/(MATCH_HORIZON[MATCH_TRAJECTORY-1]*r.speed),request.min_rate,request.max_rate)
+        rate=clamp(linalg.length(request.trajectory.positions[MATCH_TRAJECTORY-1])/(MATCH_HORIZON[MATCH_TRAJECTORY-1]*r.speed),request.min_rate,request.max_rate)
     }
-    positions:=request.positions
-    for &p in positions {p/=rate}
-    match_query_trajectory(db,&query,positions,request.directions)
+    trajectory:=request.trajectory
+    trajectory.velocity/=rate;trajectory.past/=rate
+    for &p in trajectory.positions {p/=rate}
+    match_query_trajectory(db,&query,trajectory)
     if scale:=(request.rate if request.rate>0 else 1)/rate;scale!=1 {
         values:[MATCH_LANES*4]f32
         for lane in 0..<MATCH_LANES {lanes:=simd.to_array(query[lane]);copy(values[lane*4:][:4],lanes[:])}
@@ -285,22 +321,77 @@ match_serves :: proc "contextless" (db:^Match_Database,modes:u32,entry:bool) -> 
     return false
 }
 
-// The row of least cost among the clips that serve one of the modes of request, and the rate its
-// clip plays at. A clip that does not loop keeps out its last horizon, from which playing on would
-// end the clip before the trajectory. Rows of range skip within reach rows of its row near are
-// left out: a jump that short is a stutter. With bounds, runs that cannot hold a better row are
-// skipped whole.
-match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,skip:int=-1,near:int=-1,reach:int=0) -> (best:int,cost,rate:f32) {
-    best,cost,rate=-1,max(f32),1
+// Rows at the end of a range that a search leaves out: a clip that does not loop keeps out its
+// last horizon, from which playing on would end it before the trajectory; one shorter than that,
+// MATCH_TAIL_MIN seconds, keeping its first row.
+match_tail :: proc "contextless" (db:^Match_Database,range:int) -> int {
+    r:=db.ranges[range]
+    if r.loop {return 0}
     tail:=int(cmath.ceil(MATCH_HORIZON[MATCH_TRAJECTORY-1]*db.rate))
+    if int(r.count)>tail+1 {return tail}
+    return clamp(int(cmath.ceil(MATCH_TAIL_MIN*db.rate)),0,int(r.count)-1)
+}
+
+// Ages the rows a rig left by dt and forgets those it left span seconds ago or more.
+match_recent_advance :: proc "contextless" (recent:^Match_Recent,dt,span:f32) {
+    step:=dt if anim_finite(dt) && dt>0 else 0
+    kept:i32
+    for i in 0..<clamp(recent.count,0,MATCH_RECENT) {
+        age:=recent.ages[i]+step
+        if !(age<span) {continue}
+        recent.rows[kept],recent.ages[kept]=recent.rows[i],age;kept+=1
+    }
+    recent.count=kept
+}
+// Notes that a rig left row; with no room, the oldest is forgotten.
+match_recent_leave :: proc "contextless" (recent:^Match_Recent,row:int) {
+    recent.count=clamp(recent.count,0,MATCH_RECENT)
+    if recent.count==MATCH_RECENT {
+        copy(recent.rows[:MATCH_RECENT-1],recent.rows[1:]);copy(recent.ages[:MATCH_RECENT-1],recent.ages[1:])
+        recent.count-=1
+    }
+    recent.rows[recent.count],recent.ages[recent.count]=i32(row),0;recent.count+=1
+}
+
+// Whether row lies at most reach rows behind from in their range; in a loop, around its seam.
+@(private)
+match_behind :: #force_inline proc "contextless" (r:Match_Range,row,from,reach:int) -> bool {
+    back:=from-row
+    if r.loop && r.count>1 {period:=int(r.count-1);back%=period;if back<0 {back+=period}}
+    return back>=0 && back<=reach
+}
+
+// The row of least cost among the clips that serve one of the modes of request, and the rate its
+// clip plays at. A clip that does not loop keeps out its tail (match_tail). current is the row that
+// plays (-1: none): rows of its clip within span seconds of it are left out, a jump that short is
+// a stutter, and all of them with whole. recent are rows the rig left: those it played in the span
+// seconds before it left them are left out too. With bounds, runs that cannot hold a better row
+// are skipped whole.
+match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,current:=-1,whole:=false,span:f32=0,recent:^Match_Recent=nil) -> (best:int,cost,rate:f32) {
+    best,cost,rate=-1,max(f32),1
     entry_rows:=int(cmath.ceil(MATCH_ENTRY_SPAN*db.rate))+1
     bounded:=len(db.small)>0
+    seconds:=span if anim_finite(span) && span>0 else 0
+    rows_in :: proc "contextless" (db:^Match_Database,seconds:f32) -> int {return int(min(cmath.ceil(seconds*db.rate),f32(db.rows)))}
+    near:=current if current>=0 && current<db.rows else -1
+    near_range:=match_range_of(db,near) if near>=0 else -1
+    reach:=rows_in(db,seconds)
+    Left :: struct {range,row,reach:int}
+    left:[MATCH_RECENT]Left;left_count:=0
+    if recent!=nil {
+        for i in 0..<clamp(int(recent.count),0,MATCH_RECENT) {
+            at:=int(recent.rows[i]);age:=recent.ages[i]
+            if at<0 || at>=db.rows || !anim_finite(age) || !(age<seconds) {continue}
+            left[left_count]={match_range_of(db,at),at,rows_in(db,seconds-max(age,0))};left_count+=1
+        }
+    }
     for r,range in db.ranges {
         if r.modes&request.modes==0 || r.entry!=request.entry {continue}
-        if request.filter_stationary && r.loop && (r.speed>.05)!=request.moving {continue}
+        if request.filter_stationary && !r.entry && (r.speed>MATCH_STILL)!=request.moving {continue}
         query,weights,scaled:=match_query(db,request,range)
-        last:=int(r.count) if r.loop || int(r.count)<=tail+1 else int(r.count)-tail
+        last:=int(r.count)-match_tail(db,range)
         if request.entry {last=min(int(r.count),entry_rows)}
+        playing:=range==near_range
         row,end:=int(r.first),int(r.first)+last
         for row<end {
             large_end:=min((row/MATCH_BOUND_LARGE+1)*MATCH_BOUND_LARGE,end)
@@ -309,8 +400,12 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,ski
                 small_end:=min((row/MATCH_BOUND_SMALL+1)*MATCH_BOUND_SMALL,large_end)
                 if bounded && match_bound(db.small,row/MATCH_BOUND_SMALL,query,weights)>=cost {row=small_end;continue}
                 for ;row<small_end;row+=1 {
-                    if range==skip && abs(row-near)<=reach {continue}
-                    if value:=match_cost(db,row,query,weights);value<cost {best,cost,rate=row,value,scaled}
+                    value:=match_cost(db,row,query,weights)
+                    if value>=cost {continue}
+                    if playing && (whole || match_behind(r,row,near,reach) || match_behind(r,near,row,reach)) {continue}
+                    excluded:=false
+                    for l in left[:left_count] {if l.range==range && match_behind(r,row,l.row,l.reach) {excluded=true;break}}
+                    if !excluded {best,cost,rate=row,value,scaled}
                 }
             }
         }
@@ -328,13 +423,41 @@ match_range_of :: proc "contextless" (db:^Match_Database,row:int) -> int {
     return -1
 }
 
-// Where the body goes in the next MATCH_HORIZON seconds, in the frame of its facing: its
-// horizontal velocity heads toward desired at acceleration m/s² (braking with desired zero),
-// as a walk drives it, and its facing turns toward desired_facing at turn_rate rad/s (0: at once;
-// a zero desired_facing keeps it). Vectors are in the world, Y up.
-match_trajectory :: proc "contextless" (velocity,desired:math.Vec3,acceleration,braking:f32,facing,desired_facing:math.Vec3,turn_rate:f32) -> (positions,directions:[MATCH_TRAJECTORY]math.Vec2) {
+// Notes the horizontal velocity of a body in a tick of dt seconds; a value that is not finite or
+// a tick without time is left out.
+match_trail_add :: proc "contextless" (trail:^Match_Trail,velocity:math.Vec3,dt:f32) {
+    if !anim_vec3_valid(velocity) || !anim_finite(dt) || dt<=0 {return}
+    next:=clamp(trail.next,0,MATCH_TRAIL-1)
+    trail.velocities[next],trail.steps[next]={velocity.x,0,velocity.z},dt
+    trail.next=(next+1)%MATCH_TRAIL;trail.count=clamp(trail.count+1,1,MATCH_TRAIL)
+}
+// How far a body went in its last seconds: the time its trail does not hold went at the oldest
+// velocity it holds, or at velocity with an empty trail.
+match_trail_moved :: proc "contextless" (trail:Match_Trail,seconds:f32,velocity:math.Vec3) -> (moved:math.Vec3) {
+    left:=seconds if anim_finite(seconds) && seconds>0 else 0
+    oldest:=math.Vec3{velocity.x,0,velocity.z}
+    for i in 0..<clamp(int(trail.count),0,MATCH_TRAIL) {
+        if left<=0 {return}
+        k:=(int(trail.next)-1-i)%%MATCH_TRAIL
+        step:=min(trail.steps[k],left)
+        moved+=trail.velocities[k]*step;left-=step;oldest=trail.velocities[k]
+    }
+    return moved+oldest*left
+}
+
+// Where the body goes in the next MATCH_HORIZON seconds and went in the last MATCH_PAST, in the
+// frame of its facing: its horizontal velocity heads toward desired at acceleration m/s² (braking
+// with desired zero), as a walk drives it, and its facing turns toward desired_facing at turn_rate
+// rad/s (0: at once; a zero desired_facing keeps it). wall, when not zero, is the normal of what
+// blocks the body, out of it: neither the velocity nor the desired one go into it. trail says how
+// the body went (nil: at its velocity). Vectors are in the world, Y up.
+match_trajectory :: proc "contextless" (velocity,desired:math.Vec3,acceleration,braking:f32,facing,desired_facing:math.Vec3,turn_rate:f32,wall:=math.Vec3{},trail:^Match_Trail=nil) -> (trajectory:Match_Trajectory) {
     flat :: proc "contextless" (v:math.Vec3) -> math.Vec3 {return {v.x,0,v.z}}
     v,goal:=flat(velocity),flat(desired)
+    if normal,blocked:=anim_unit(flat(wall));blocked {
+        if into:=linalg.dot(v,normal);into<0 {v-=normal*into}
+        if into:=linalg.dot(goal,normal);into<0 {goal-=normal*into}
+    }
     heading,known:=anim_unit(flat(facing));if !known {heading={0,0,1}}
     rate:=braking if goal=={} else acceleration
     change:=goal-v;distance:=linalg.length(change)
@@ -343,13 +466,17 @@ match_trajectory :: proc "contextless" (velocity,desired:math.Vec3,acceleration,
     turn:f32
     if wanted,ok:=anim_unit(flat(desired_facing));ok {turn=cmath.atan2(linalg.dot(linalg.cross(heading,wanted),math.Vec3{0,1,0}),linalg.dot(heading,wanted))}
     inverse:=math.quat_inverse(match_yaw(heading))
+    now:=math.quat_rotate(inverse,v)
+    moved:=match_trail_moved(trail^,MATCH_PAST,v) if trail!=nil else v*MATCH_PAST
+    behind:=math.quat_rotate(inverse,-moved)
+    trajectory.velocity,trajectory.past={now.x,now.z},{behind.x,behind.z}
     for horizon,k in MATCH_HORIZON {
         position:math.Vec3
         if horizon<=reach {position=v*horizon+along*(.5*rate*horizon*horizon)} else {position=v*reach+along*(.5*rate*reach*reach)+goal*(horizon-reach)}
         angle:=turn if turn_rate<=0 else clamp(turn,-turn_rate*horizon,turn_rate*horizon)
         direction:=math.quat_rotate(math.quat_axis_angle({0,1,0},angle),heading)
         local,toward:=math.quat_rotate(inverse,position),math.quat_rotate(inverse,direction)
-        positions[k],directions[k]={local.x,local.z},{toward.x,toward.z}
+        trajectory.positions[k],trajectory.directions[k]={local.x,local.z},{toward.x,toward.z}
     }
     return
 }
@@ -412,6 +539,13 @@ match_motion_body :: proc "contextless" (m:Match_Motion,frame:f32) -> math.Vec3 
     }
     p:=match_motion_point(m,m.root,frame)
     return {p.x,0,p.z}
+}
+@(private)
+match_motion_body_velocity :: proc "contextless" (m:Match_Motion,frame:int) -> math.Vec3 {
+    a,b:=frame-1,frame+1
+    if !m.frames.loop {a,b=max(a,0),min(b,frames_count(m.frames)-1)}
+    if b<=a {return {}}
+    return (match_motion_body(m,f32(b))-match_motion_body(m,f32(a)))*(m.frames.rate/f32(b-a))
 }
 @(private)
 match_motion_facing :: proc "contextless" (m:Match_Motion,frame:f32) -> math.Vec3 {

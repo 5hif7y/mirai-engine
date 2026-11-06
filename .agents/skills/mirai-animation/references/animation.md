@@ -105,10 +105,11 @@ locomotion blend space.
   modes it serves (bit `m` for mode `m`: the values of physics' `Locomotion_Mode`) and, if it starts
   a mode (jump, landing), the `entry` mark. An entry clip does not loop. `speed`, when positive, is
   the one the clip travels at instead of the one measured from its feet.
-- The feature database (`std/anim/matching.odin`: feet, hips and trajectory at 1/3, 2/3 and 1 s in
-  the frame of the character, normalized per type) is built at load, the first time a rig of that
-  skeleton asks for it, per library and skeleton, and lives in `Graph_Assets`. `memory` is its cap:
-  a larger database is not built and is the problem `animation.match_memory`.
+- The feature database (`std/anim/matching.odin`: feet, hips, the velocity of the body, where it
+  was 1/3 s before and the trajectory at 1/3, 2/3 and 1 s in the frame of the character, normalized
+  per type) is built at load, the first time a rig of that skeleton asks for it, per library and
+  skeleton, and lives in `Graph_Assets`. `memory` is its cap: a larger database is not built and is
+  the problem `animation.match_memory`.
 - The search is linear and SIMD on a small database; past `MATCH_LINEAR_ROWS` rows the database
   stores bounds per runs of rows and the search skips those that cannot improve. It chooses by
   itself.
@@ -116,25 +117,44 @@ locomotion blend space.
 Per tick:
 
 - `match_goal` says the mode, the velocity of the body, the desired one with its acceleration and
-  braking and where it turns. With physics, the automatic plugin `animation_physics` says it for
-  each `Character` with `Animation` (the `Character` is the only writer of the mode; animation keeps
-  no copy) and asks for the warping of `Animation.motion` while it walks: the game writes no
-  locomotion code. The model on the `Character`'s entity faces its +Z, as the body does
-  ([facing](../../mirai-physics/SKILL.md#library-invariants)): it is not turned by hand. Without physics, the game calls `match_goal` with what moves its rig.
+  braking, where it turns and the wall it leans on. With physics, the automatic plugin
+  `animation_physics` says it for each `Character` with `Animation` (the `Character` is the only
+  writer of the mode, and its `Character_State` of the wall; animation keeps no copy) and asks for
+  the warping of `Animation.motion` while it walks: the game writes no locomotion code. The model
+  on the `Character`'s entity faces its +Z, as the body does
+  ([facing](../../mirai-physics/SKILL.md#library-invariants)): it is not turned by hand. Without
+  physics, the game calls `match_goal` with what moves its rig.
+- With `lag` (for a body that stops or starts harder than its clips; `animation.character.setup`
+  sets it), the root of the pose follows the body by a critically damped spring of
+  `lag_half_life`: a change of velocity the body makes at once the root takes in over the
+  half-life, never farther than `lag` from the body nor into the wall of the goal, and returns onto
+  the body. The bones right under the rig move by that offset after layers and warping. Matching,
+  the rate of a loop and the stride warping follow the velocity of that root. With `lag` 0 the root
+  stays on the body.
 - Every `interval` (0: every tick) it searches the lowest-cost row among the clips of the mode; a
   clip that travels is compared with the trajectory scaled by the rate at which it would play
-  (`min_rate`..`max_rate`), so a few clips cover the velocities between theirs. It jumps only if it
-  saves `bias` over continuing; a clip without a loop that ends, or that enters its last trajectory
-  window, is left whole, because its still pose, or its tail again, would win all the searches. With
-  `stationary_speed`, a body that starts or stops while its loop does not move as it does searches
-  in that tick, without waiting for the interval or the bias. Only a loop follows the speed of the
-  body with its rate; a clip that plays once (a jump, a landing) keeps its own.
+  (`min_rate`..`max_rate`), so a few clips cover the velocities between theirs. The trajectory does
+  not go into the wall of the goal. It jumps only if it saves `bias` over continuing, and not
+  sooner than `hold` after the last jump unless something forces it. It does not jump to rows of
+  the clip that plays within `reselect` seconds of its row (around the seam of a loop), nor to
+  those played in the `reselect` seconds before the rig left them; with `keep_loop_phase`, to no
+  row of the loop that plays. A clip without a loop that ends, or that enters its last trajectory
+  window, is left whole, because its still pose, or its tail again, would win all the searches.
+- With `stationary_speed`, a root slower than it plays only the clips that stand and a faster one
+  those that travel, loops or not (entry clips are not filtered); a loop that does not move as the
+  root does searches in that tick, without waiting for the interval, the hold or the bias, while a
+  clip that plays once goes on until it ends or a search leaves it. Only a loop follows the speed
+  of the root with its rate; a clip that plays once (a jump, a landing) keeps its own.
 - Entering a mode that has entry clips searches only among their starts; without them, among the
   clips of the mode. An entry clip does not take part in the continuous search, except to keep
   playing it.
-- Every jump enters through inertialization of `blend` seconds: pose and velocity are captured and
-  only the target is evaluated, with decaying offsets. The capture is of the boundary before the new
-  advance, before the component layers; a tick with zero dt leaves it pending.
+- Every jump enters through a transition of `blend` seconds, chosen by `transition`: `Inertial`
+  captures pose and velocity and evaluates only the target with decaying offsets; `Dead` goes on
+  with the outgoing pose at its velocities, decaying, and fades into the target; `Auto` blends dead
+  a jump between a clip that stands and one that travels (a start or a stop, where the velocities
+  differ most) and inertializes the rest. `match_play` always inertializes. The capture is of the
+  boundary before the new advance, before the component layers; a tick with zero dt leaves it
+  pending.
 - `animation_match` says which clip plays, its rate, its mode, whether `match_play` forced it and
   how many searches and jumps it made.
 
@@ -234,6 +254,9 @@ What used to be a state or a transition has its owner:
 - Over `.anim`, an empty clip chooses the first. The defaults are `ANIMATION_DEFAULT`.
 - Layer 0 is the base; layers 1–3 are blended on top (Override/Additive, with their own reference
   and curves), also over programs. `over` limits a branch and `sync` follows the phase of the base.
+  With `mesh_space`, an Override layer blends the rotations of its branch in the space of the rig:
+  the branch keeps the turn its clip gives it whatever the base turns above it (a torso emote over
+  a walk whose pelvis turns).
 - Layers and parameters are fields of the player: there are no components per source or per action.
 
 ### Multiple sources

@@ -7,9 +7,11 @@ temporal state. The world integration and the authoring are in
 ## Motion matching (`matching.odin`)
 
 - `Match_Database` is a shared definition: one row of features per frame of each clip at `rate` rows
-  per second (position and velocity of the feet, velocity of the hips, position and direction of the
-  trajectory at `MATCH_HORIZON`), in the frame of the character (its place on the ground and its
-  facing, +Z forward), normalized per type so that each type weighs what its weight says.
+  per second (position and velocity of the feet, velocity of the hips, velocity of the body, where
+  it was `MATCH_PAST` seconds before, position and direction of the trajectory at `MATCH_HORIZON`),
+  in the frame of the character (its place on the ground and its facing, +Z forward), normalized per
+  type so that each type weighs what its weight says. The present and the past say what the body
+  did, the future what it is asked for: a body held still that is asked to walk is not a walk.
   `match_database_build` is a load transaction: it rejects with `Memory_Limit` a database larger
   than its cap (`match_database_bytes` estimates it before allocating) and leaves the database empty
   on any error.
@@ -17,15 +19,23 @@ temporal state. The world integration and the authoring are in
   root. `Match_Clip.speed`, when positive, replaces that speed (an in-place clip keeps its
   direction). A loop continues in its following passes and one without a loop retains its ends.
 - `match_trajectory` predicts the trajectory with the acceleration and braking of the locomotion and
-  the turn at its rate: the same numbers that move the body.
+  the turn at its rate: the same numbers that move the body. A wall normal takes out of the
+  velocity and of the desired one what goes into the wall, so a body pushing against it stands and
+  one along it slides. The past point comes from a `Match_Trail` of the last velocities (the time it
+  does not hold went at the oldest one); without a trail the body went at its velocity.
 - `match_search` gives the lowest-cost row among the clips of the requested modes and the rate at
   which its clip plays (the trajectory is scaled per clip, so a few clips cover the velocities
   between theirs). The query is taken to the rate of each clip (the velocities of its pose, by the
   rate at which it sounds over that of the clip) and velocities and trajectory positions weigh the
   square of the rate: the cost is of what the body does, and a slow clip does not pay more than one
-  at its own rate. It leaves out the last window of a clip without a loop and the rows near the one
-  that is playing. The entry clips (`entry`) are searched only in their first `MATCH_ENTRY_SPAN`
-  seconds and only with `Match_Request.entry`; the continuous search leaves them out.
+  at its own rate. It leaves out the tail of a clip without a loop (`match_tail`: its last horizon,
+  or `MATCH_TAIL_MIN` seconds of one shorter than that, keeping its first row), the rows of the
+  clip that plays within `span` seconds of its row (around the seam of a loop; all of them with
+  `whole`), and those of `Match_Recent` the rig played in the `span` seconds before it left them.
+  With `filter_stationary`, a clip that is not an entry plays only if it stands (`MATCH_STILL`)
+  when the body does and travels when it moves. The entry clips (`entry`) are searched only in their
+  first `MATCH_ENTRY_SPAN` seconds and only with `Match_Request.entry`; the continuous search leaves
+  them out.
 - A database of more than `MATCH_LINEAR_ROWS` rows stores the minimum and maximum of its features
   per runs of rows, small and large; the search skips a run whose bound does not improve the best
   row found and gives the same row as the full walk. Without bounds, the walk is linear with
@@ -44,13 +54,34 @@ temporal state. The world integration and the authoring are in
     and target turn on different axes or cross 180°.
   - Without a previous target, the target is still; with an almost-zero `dt` the velocities are
     zero, and with zero duration the target is taken.
-- `inertial_pose_apply` adds to the target offsets that decay with a fifth-degree polynomial: it
-  starts with the offset and its velocity and ends with offset, velocity and acceleration zero.
-  Rotations use the logarithm of the short arc; a mask of weights regulates each bone (zero leaves
+- Each channel of a bone (position, the logarithm of the short arc of the rotation, scale) keeps the
+  direction of its offset; only its length closes. The capture keeps of the residual velocity its
+  part along the offset, drops it when it heads away from the target, and ends a fast approach
+  before the duration, at five times the length over the speed: the offset never overshoots.
+- `inertial_pose_apply` adds to the target offsets whose length follows a fifth-degree polynomial
+  from the length and its speed to zero length, speed and acceleration, with the least initial
+  acceleration that keeps it from crossing zero. A mask of weights regulates each bone (zero leaves
   the target exact). `inertial_curves_apply` does the same with floats and `filtered` leaves a curve
   at the target.
+- A capture that interrupts an unfinished transition keeps what that one left undone as its
+  deficit; when that one had interrupted another too, the new duration gives the deficit up, so
+  transitions that follow each other tick after tick do not pile up offsets. Finishing a transition
+  clears the deficit.
 - Applying before advancing keeps the capture pose exactly, and the target is evaluated on each tick
   without continuing to evaluate the outgoing clip.
+
+## Dead blending
+
+- `dead_capture` shares `Inertial_State`, its deficit and `Inertial_Input` with inertialization:
+  `[]Dead_Bone` and `[]Dead_Curve` keep the captured pose and its velocities (from `previous` and
+  `current`).
+- `dead_pose_apply` goes on with the captured pose at its velocities, each decaying with a
+  half-life of its own, and fades it into the target with a smoothstep over the duration. The
+  half-life of a channel is the time its velocity would take to cover the gap to the target, by
+  `DEAD_HALF_LIFE`, within `DEAD_HALF_LIFE_MIN` and `DEAD_HALF_LIFE_MAX`: a velocity that heads away
+  from the target dies at the least. `dead_curves_apply` does the same with floats.
+- It starts exactly at the captured pose and ends exactly at the target; a mask weight of zero
+  leaves the target.
 - Each output may coincide exactly with its target, not partially overlap. NaN, infinities,
   incompatible sizes, invalid states or overflows return `false`; the output may be left partly
   written, but the capture state is published only after validating and computing.
@@ -99,8 +130,12 @@ rig; `fraction` is the part of the remaining time that this step consumes.
 - `mirai test std/anim` with the affected cases of `inertial_test.odin`, `warp_test.odin` and
   `matching_test.odin`:
   `match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_for`,
-  `match_search_skips_runs_by_their_bounds_and_enters_a_mode_by_its_entry_clips` and
-  `match_trajectory_follows_a_walk_that_accelerates_brakes_and_turns_at_its_rates`.
+  `match_search_skips_runs_by_their_bounds_and_enters_a_mode_by_its_entry_clips`,
+  `match_search_leaves_out_rows_near_the_playing_one_across_a_loop_seam_and_those_just_left`,
+  `match_trajectory_follows_a_walk_that_accelerates_brakes_and_turns_at_its_rates`,
+  `inertial_offsets_never_overshoot_and_drop_a_velocity_that_heads_away_from_the_target`,
+  `transitions_that_interrupt_each_other_give_up_the_time_the_one_before_left_undone` and
+  `dead_blends_go_on_with_the_velocity_of_the_pose_and_end_at_the_target`.
 - The hostile cases accept `ANIM_INERTIAL_HOSTILE_ROUNDS` and `ANIM_WARP_HOSTILE_ROUNDS`; when
   changing validations or state, repeat them with `--release` and 20000 rounds.
 - Pose and stride warp are run with null allocators: e.g.

@@ -100,11 +100,16 @@ Character_State :: struct {
     head_depth:f32,         // m of the top of the head under the surface; negative above it, -max(f32) without a fluid in its column
     fluid_velocity:Vec3,    // of the fluid it is in: its current
     depth:f32,              // m of fluid over the feet: head_depth plus the height
+    // The wall the capsule leans on, found with the ground: of what it touches and cannot push (a
+    // static or kinematic body), the normal across its up and out of the wall that its drive heads
+    // into the most, and how fast the drive heads into it, m/s; zero without one.
+    wall_normal:Vec3,
+    wall_push:f32,
     // The frame of its vertical: its +Y is the up of the character, about which the yaw of the move turns. The
     // step turns it toward the opposite of the gravity it feels, without twisting it about the up.
     up_frame:Quat,
 }
-#assert(size_of(Character_State)==128)
+#assert(size_of(Character_State)==144)
 
 @(private)
 Character :: struct {
@@ -116,7 +121,7 @@ Character :: struct {
     generation:u32, // odd while the slot is in use
     next_free:i32,
 }
-#assert(size_of(Character)==296)
+#assert(size_of(Character)==312)
 
 @(private)
 Ground :: struct {
@@ -625,6 +630,7 @@ characters_ground_task :: proc(data:rawptr,first,last,worker:int) {
         body:=&w.bodies[cs.body]
         ground,_:=character_probe(w,ch,body,cs.up,max(-dot(body.linear_velocity,cs.up)*st.dt,0))
         character_ground_keep(&ch.state,ground)
+        ch.state.wall_normal,ch.state.wall_push=character_wall(w,body,cs.up,cs.drive.velocity)
         character_fluid_keep(w,ch,body)
     }
 }
@@ -719,6 +725,35 @@ character_flatten_contacts :: proc(w:^World,body:^Body,up:Vec3,floor,step:f32) #
             for &point in manifold.points[:manifold.count] {point.separation/=max(scale,FLATTEN_MIN_SCALE)}
         }
     }
+}
+
+// The wall of Character_State: of the touching contacts of the capsule with bodies it does not
+// push, the normal across up and out of the wall that drive heads into the most; one that lifts the
+// capsule is ground.
+@(private)
+character_wall :: proc(w:^World,body:^Body,up,drive:Vec3) -> (normal:Vec3,push:f32) #no_bounds_check {
+    least:=max(f32)
+    for key:=body.contact_list;key>=0; {
+        index:=key>>1
+        contact:=&w.contacts[index]
+        side:=key&1
+        key=contact.edges[side].next
+        if contact.flags&{.Touching,.Overlap}!={.Touching} || w.bodies[side==0?contact.body_b:contact.body_a].type==.Dynamic {continue}
+        for i in 0..<contact.manifold_count {
+            manifold:=i==0?&w.manifolds[index]:&w.extra_manifolds[contact.extra][i-1]
+            touching:=false
+            for point in manifold.points[:manifold.count] {touching=touching || point.separation<=LINEAR_SLOP}
+            if !touching {continue}
+            out:=side==0?-manifold.normal:manifold.normal
+            if dot(out,up)>FLATTEN_MIN {continue}
+            flat:=out-up*dot(out,up)
+            if length2(flat)<1e-6 {continue}
+            flat=normalize(flat)
+            if along:=dot(drive,flat);along<least {least,normal=along,flat}
+        }
+    }
+    if normal!={} {push=max(-least,0)}
+    return
 }
 
 // The directions in which the capsule leans on dynamic bodies, in the plane of the drive (all of space when

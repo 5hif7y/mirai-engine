@@ -139,11 +139,15 @@ a_wall_stops_a_walking_character :: proc(t:^testing.T) {
     test_static_box(&w,{5,2,0.5},{0,2,-3.5})
     ch:=test_character(&w,{0,0,0})
     test_steps(&w,30)
-    test_walk(&w,ch,{0,0,-1},150)
+    test_walk(&w,ch,{0,0,-1},20)
+    testing.expect(t,character_state(&w,ch).wall_normal=={},"in the open it leans on no wall")
+    test_walk(&w,ch,{0,0,-1},130)
     p:=character_position(&w,ch)
     testing.expectf(t,near(p.z,-2.7,0.02) && near(p.y,0,0.01),"position %v",p)
     testing.expect(t,length(character_velocity(&w,ch))<0.05)
     testing.expect(t,test_standing(&w,ch))
+    state:=character_state(&w,ch)
+    testing.expectf(t,length(state.wall_normal-{0,0,1})<1e-3 && near(state.wall_push,5,.05),"it leans on the wall, whose normal faces it, pushing at 5 m/s: %v %v",state.wall_normal,state.wall_push)
 }
 
 @(test)

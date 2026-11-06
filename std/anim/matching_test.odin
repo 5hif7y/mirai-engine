@@ -46,9 +46,15 @@ match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_f
     weights:=MATCH_WEIGHTS_DEFAULT;weights[.Trajectory_Position]=3
     if !testing.expect(t,match_database_build(&db,&library,rig,clips[:],30,weights)==.None) {return}
     testing.expect(t,len(db.ranges)==3 && db.ranges[0].speed<.05 && abs(db.ranges[1].speed-1.5)<.1 && db.ranges[1].travel.z>0,"the walk in place travels forward at the speed its feet push")
+    // Each row says how fast the body goes and where it was MATCH_PAST seconds before.
+    for r in db.ranges[:2] {
+        for row in int(r.first)..<int(r.first+r.count) {
+            path:=match_row_trajectory(&db,row)
+            testing.expectf(t,linalg.length(path.velocity-r.travel.xz)<.05 && linalg.length(path.past+r.travel.xz*MATCH_PAST)<.05,"a row of a clip that goes %v says %v",r.travel,path)
+        }
+    }
     for row in 0..<db.rows {
-        request:=Match_Request{query=match_features(&db,row),modes=~u32(0)}
-        request.positions,request.directions=match_row_trajectory(&db,row)
+        request:=Match_Request{query=match_features(&db,row),trajectory=match_row_trajectory(&db,row),modes=~u32(0)}
         best,cost,_:=match_search(&db,request)
         query,weights,_:=match_query(&db,request,match_range_of(&db,row))
         testing.expect(t,cost<1e-6 && match_cost(&db,best,query,weights)<1e-6,"every row is its own best match")
@@ -58,31 +64,26 @@ match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_f
     for speed in ([3]f32{1.5,.75,.5}) {
         for facing in ([2]math.Vec3{{0,0,1},{1,0,0}}) {
             request:=Match_Request{query=match_features(&db,int(db.ranges[0].first)),modes=1<<1,min_rate=.3,max_rate=1}
-            request.positions,request.directions=match_trajectory(facing*speed,facing*speed,20,20,facing,facing,0)
-            testing.expect(t,abs(request.positions[2].y-speed)<1e-4 && abs(request.positions[2].x)<1e-4 && abs(request.directions[0].y-1)<1e-4,"the trajectory is in the frame of the facing")
+            request.trajectory=match_trajectory(facing*speed,facing*speed,20,20,facing,facing,0)
+            path:=request.trajectory
+            testing.expect(t,abs(path.positions[2].y-speed)<1e-4 && abs(path.positions[2].x)<1e-4 && abs(path.directions[0].y-1)<1e-4,"the trajectory is in the frame of the facing")
             best,_,rate:=match_search(&db,request)
             testing.expect(t,match_range_of(&db,best)==1 && abs(rate*db.ranges[1].speed-speed)<.05,"the walk plays at the rate that covers the speed")
         }
     }
     standing:=Match_Request{query=match_features(&db,int(db.ranges[1].first)+7),modes=1<<1,min_rate=.5,max_rate=1}
-    standing.positions,standing.directions=match_trajectory({},{},20,20,{0,0,1},{},0)
+    standing.trajectory=match_trajectory({},{},20,20,{0,0,1},{},0)
     best,_,_:=match_search(&db,standing)
     testing.expect_value(t,match_range_of(&db,best),0)
     standing.modes=1<<0
     best,_,_=match_search(&db,standing)
     testing.expect_value(t,match_range_of(&db,best),2)
-    near:=int(db.ranges[0].first)+5
-    request:=Match_Request{query=match_features(&db,near),modes=1<<1}
-    request.positions,request.directions=match_row_trajectory(&db,near)
-    best,_,_=match_search(&db,request,0,near,3)
-    testing.expect(t,abs(best-near)>3,"rows near the one playing are left out")
     // A pose that plays at half its rate moves its feet at half their speed: the walk at its own
     // rate, with the trajectory of that frame, is no longer the same frame.
     walking:=int(db.ranges[1].first)+7
     costs:[2]f32
     for rate,i in ([2]f32{1,.5}) {
-        request:=Match_Request{query=match_features(&db,walking),modes=1<<1,min_rate=.5,max_rate=1,rate=rate}
-        request.positions,request.directions=match_row_trajectory(&db,walking)
+        request:=Match_Request{query=match_features(&db,walking),trajectory=match_row_trajectory(&db,walking),modes=1<<1,min_rate=.5,max_rate=1,rate=rate}
         query,weights,scaled:=match_query(&db,request,1)
         costs[i]=match_cost(&db,walking,query,weights)
         testing.expect(t,abs(scaled-1)<.05)
@@ -112,15 +113,20 @@ match_search_skips_runs_by_their_bounds_and_enters_a_mode_by_its_entry_clips :: 
     if !testing.expect(t,match_database_build(&db,&library,rig,many[:],120)==.None) || !testing.expect(t,db.rows>MATCH_LINEAR_ROWS && len(db.small)>0 && len(db.large)>0) {return}
     for row in 0..<db.rows {
         if db.ranges[match_range_of(&db,row)].entry {continue}
-        request:=Match_Request{query=match_features(&db,(row*7919)%db.rows),modes=~u32(0),min_rate=.5,max_rate=1}
-        request.positions,request.directions=match_row_trajectory(&db,row)
-        best,cost,_:=match_search(&db,request,1,row,5)
+        request:=Match_Request{query=match_features(&db,(row*7919)%db.rows),trajectory=match_row_trajectory(&db,row),modes=~u32(0),min_rate=.5,max_rate=1}
+        span:=f32(5)/db.rate
+        best,cost,_:=match_search(&db,request,row,false,span)
+        reach:=int(cmath.ceil(span*db.rate))
+        playing:=match_range_of(&db,row)
         least:=max(f32)
         for r,range in db.ranges {
             if r.entry {continue}
             query,weights,_:=match_query(&db,request,range)
-            last:=int(r.count) if r.loop else int(r.count)-int(cmath.ceil(MATCH_HORIZON[MATCH_TRAJECTORY-1]*db.rate))
-            for frame in 0..<last {if candidate:=int(r.first)+frame;range!=1 || abs(candidate-row)>5 {least=min(least,match_cost(&db,candidate,query,weights))}}
+            for frame in 0..<int(r.count)-match_tail(&db,range) {
+                candidate:=int(r.first)+frame
+                if range==playing && (match_behind(r,candidate,row,reach) || match_behind(r,row,candidate,reach)) {continue}
+                least=min(least,match_cost(&db,candidate,query,weights))
+            }
         }
         testing.expect(t,best>=0 && cost==least,"the bounded search finds the row the whole scan finds")
     }
@@ -143,7 +149,8 @@ match_trajectory_follows_a_walk_that_accelerates_brakes_and_turns_at_its_rates :
         {velocity={1,5,0},desired={1,0,0},facing={0,0,1},wanted={1,0,0},acceleration=0,braking=0},
     }
     for c in cases {
-        positions,directions:=match_trajectory(c.velocity,c.desired,c.acceleration,c.braking,c.facing,c.wanted,c.turn)
+        path:=match_trajectory(c.velocity,c.desired,c.acceleration,c.braking,c.facing,c.wanted,c.turn)
+        positions,directions:=path.positions,path.directions
         STEPS :: 600
         velocity:=math.Vec3{c.velocity.x,0,c.velocity.z};position,facing:math.Vec3
         rate:=c.braking if c.desired=={} else c.acceleration
@@ -167,4 +174,83 @@ match_trajectory_follows_a_walk_that_accelerates_brakes_and_turns_at_its_rates :
             testing.expect(t,linalg.length(math.Vec2{toward.x,toward.z}-directions[k])<1e-4,"the facing turns at its rate")
         }
     }
+    // A wall ahead keeps the body and what it is asked for out of it: along the wall, it slides.
+    blocked:=match_trajectory({0,0,.5},{3,0,3},20,20,{0,0,1},{0,0,1},0,wall={0,0,-1})
+    testing.expectf(t,abs(blocked.positions[2].y)<1e-4 && blocked.positions[2].x>2 && blocked.velocity=={},"a wall ahead stops what goes into it, not %v",blocked)
+    // The past point is where the trail of the body says it was: half a second standing, then a sixth walking.
+    trail:Match_Trail
+    for _ in 0..<30 {match_trail_add(&trail,{},1.0/60)}
+    for _ in 0..<10 {match_trail_add(&trail,{0,0,3},1.0/60)}
+    walked:=match_trajectory({0,0,3},{0,0,3},20,20,{0,0,1},{0,0,1},0,trail=&trail)
+    steady:=match_trajectory({0,0,3},{0,0,3},20,20,{0,0,1},{0,0,1},0)
+    testing.expectf(t,linalg.length(walked.past-{0,-.5})<1e-4 && linalg.length(walked.velocity-{0,3})<1e-4,"a body that stood until a sixth of a second ago was half a metre back, not %v",walked.past)
+    testing.expectf(t,linalg.length(steady.past-{0,-1})<1e-4,"without a trail it went at its velocity, not %v",steady.past)
+}
+
+// The walk and the clips of match_test_rig, with a step: half a second of walk that does not loop.
+@(private="file")
+match_test_steps :: proc(t:^testing.T,library:^Library,db:^Match_Database) -> bool {
+    rig,clips,ok:=match_test_rig(library)
+    if !ok {return false}
+    left:=[3]Keyframe{{time=0,value={.1,-.95,.375,0}},{time=.25,value={.1,-.95,0,0}},{time=.5,value={.1,-.95,-.375,0}}}
+    right:=[3]Keyframe{{time=0,value={-.1,-.95,-.375,0}},{time=.25,value={-.1,-.8,0,0}},{time=.5,value={-.1,-.95,.375,0}}}
+    step,error:=clip_add(library,{name=base.name_hash("step"),tracks={{target=rig.skeleton.names[2],property=.Position,keys=left[:]},{target=rig.skeleton.names[3],property=.Position,keys=right[:]}}})
+    if error!=.None {return false}
+    all:=[4]Match_Clip{clips[0],clips[1],clips[2],{clip=step,modes=1<<1}}
+    return match_database_build(db,library,rig,all[:],30)==.None && testing.expect(t,!db.ranges[3].loop && db.ranges[3].speed>MATCH_STILL)
+}
+
+@(test)
+match_search_leaves_out_rows_near_the_playing_one_across_a_loop_seam_and_those_just_left :: proc(t:^testing.T) {
+    library:Library;defer library_destroy(&library)
+    db:Match_Database;defer match_database_free(&db)
+    if !testing.expect(t,match_test_steps(t,&library,&db)) {return}
+    walk:=db.ranges[1];period:=int(walk.count-1)
+    span:=f32(.1) // three rows
+    playing:=int(walk.first)+1
+    seam:=int(walk.first)+period-2
+    request:=Match_Request{query=match_features(&db,seam),trajectory=match_row_trajectory(&db,seam),modes=1<<1}
+    best,_,_:=match_search(&db,request)
+    testing.expect_value(t,best,seam)
+    best,_,_=match_search(&db,request,playing,false,span)
+    gap:=abs(best-playing);if match_range_of(&db,best)==1 {gap=min(gap,period-gap)}
+    testing.expectf(t,gap>3,"a row two behind the one playing, across the seam of its loop, is left out, not %d",best)
+    // A rig that left a row a tick ago does not jump back to what it played just before.
+    recent:Match_Recent
+    left:=int(walk.first)+12
+    match_recent_leave(&recent,left)
+    match_recent_advance(&recent,1.0/30,span)
+    request.query,request.trajectory=match_features(&db,left-2),match_row_trajectory(&db,left-2)
+    best,_,_=match_search(&db,request,-1,false,span,&recent)
+    testing.expectf(t,best<left-2 || best>left,"the rows played just before leaving are left out, not %d",best-int(walk.first))
+    match_recent_advance(&recent,span,span)
+    best,_,_=match_search(&db,request,-1,false,span,&recent)
+    testing.expect(t,recent.count==0 && best==left-2,"a row left span seconds ago is searched again")
+}
+
+@(test)
+a_clip_shorter_than_the_trajectory_keeps_its_last_rows_out_of_the_search :: proc(t:^testing.T) {
+    library:Library;defer library_destroy(&library)
+    db:Match_Database;defer match_database_free(&db)
+    if !testing.expect(t,match_test_steps(t,&library,&db)) {return}
+    r:=db.ranges[3];tail:=match_tail(&db,3)
+    testing.expectf(t,tail==int(cmath.ceil(MATCH_TAIL_MIN*db.rate)) && tail<int(r.count),"a short clip keeps %d of its %d rows out",tail,r.count)
+    last:=int(r.first+r.count)-1
+    request:=Match_Request{query=match_features(&db,last),trajectory=match_row_trajectory(&db,last),modes=1<<1}
+    best,_,_:=match_search(&db,request)
+    testing.expectf(t,best<int(r.first+r.count)-tail,"its last rows are not entered, not row %d of %d",best-int(r.first),r.count)
+}
+
+@(test)
+a_body_that_stands_leaves_out_every_clip_that_moves_and_one_that_moves_every_clip_that_stands :: proc(t:^testing.T) {
+    library:Library;defer library_destroy(&library)
+    db:Match_Database;defer match_database_free(&db)
+    if !testing.expect(t,match_test_steps(t,&library,&db)) {return}
+    row:=int(db.ranges[3].first)+2
+    request:=Match_Request{query=match_features(&db,row),trajectory=match_row_trajectory(&db,row),modes=1<<1,filter_stationary=true,moving=true}
+    best,_,_:=match_search(&db,request)
+    testing.expect_value(t,best,row)
+    request.moving=false
+    best,_,_=match_search(&db,request)
+    testing.expectf(t,match_range_of(&db,best)==0,"a body that stands plays the clip that stands, not one that walks once (range %d)",match_range_of(&db,best))
 }

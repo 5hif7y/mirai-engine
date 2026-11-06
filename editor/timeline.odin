@@ -28,6 +28,7 @@ Timeline :: struct {
     grab:f32,                // frames from what is dragged to the pointer when it was taken
     mark:[2]int,             // lane and index plus one of the mark chosen; index 0: none
     dragged:f32,             // the frame the mark being dragged is at
+    pointed:f32,             // the frame the right button went down on in the ruler
 }
 Timeline_Drag :: enum u8 {None,Head,In,Out,View,View_Start,View_End,Mark}
 
@@ -39,6 +40,7 @@ Timeline_Clock :: struct {
     playing,loop:bool,
     speed:f32,  // 0: the document has no speed to choose
     here:bool,  // it can play on from the head, without what comes after it
+    ask:bool,   // a button asks the agent about the range while there is one
 }
 
 // A row of marks on the time: markers of a clip, keys of a track.
@@ -64,7 +66,9 @@ Timeline_Result :: struct {
     to:f32,
     add:bool,           // the button of lane adds a mark at the head
     menu:bool,          // the right button went down on lane at to, on index
+    ruler:bool,         // the right button went down on the ruler at Timeline.pointed
     anchor:ui.Rect,     // where the menu opens
+    ask:bool,           // the button asks the agent about the range
 }
 
 TIMELINE_SPEED_LABELS :: [4]string{"0.25×","0.5×","1×","2×"}
@@ -86,6 +90,27 @@ timeline_range :: proc(t:^Timeline,frames:f32) -> (lo,hi:f32) {
     lo=clamp(t.range_in,0,frames)
     hi=clamp(t.range_out,lo,frames)
     return
+}
+
+// Sets the start or the end of the range at a frame, the range on. The
+// other end stays while it keeps start before end; otherwise, or with no
+// range, it goes to the head when the head is on its side, else to the
+// start or the end of the duration.
+timeline_range_set :: proc(t:^Timeline,frames,frame,head:f32,end:bool) {
+    if frames<1 {return}
+    head:=clamp(math.round(head),0,frames)
+    had:=t.range && t.range_out>t.range_in
+    lo,hi:=timeline_range(t,frames)
+    if end {
+        at:=clamp(math.round(frame),1,frames)
+        if !had || lo>=at {lo=head<at?head:0}
+        t.range_in,t.range_out=lo,at
+    } else {
+        at:=clamp(math.round(frame),0,frames-1)
+        if !had || hi<=at {hi=head>at?head:frames}
+        t.range_in,t.range_out=at,hi
+    }
+    t.range=true
 }
 
 // Where what plays starts and ends: the range while it is on.
@@ -148,6 +173,9 @@ timeline_strip :: proc(s:^Session,t:^Timeline,c:Timeline_Clock,lanes:[]Timeline_
                 if ui.button(ctx,ui.id(ctx,"here"),{label="Play from here",icon=.Play,icon_color=th.text_muted,style=.Field,height=th.control}).clicked {r.here=true}
             }
             ui.spacer(ctx)
+            if c.ask && t.range && t.range_out>t.range_in {
+                if transport(ctx,"ask",.Sparkle,"Ask agent about the range") {r.ask=true}
+            }
             if transport(ctx,"range",timeline_icon(.Range),"Range",.Tab,t.range) {
                 t.range=!t.range
                 if t.range && t.range_out<=t.range_in {t.range_in,t.range_out=0,c.frames}
@@ -246,6 +274,10 @@ timeline_area :: proc(s:^Session,t:^Timeline,c:Timeline_Clock,lanes:[]Timeline_L
         }
     }
     if it.released {t.drag=.None}
+    if it.right {
+        t.pointed=clamp(math.round(at(ctx,origin,start,scale)),0,c.frames)
+        r.ruler,r.anchor=true,{ctx.input.pointer.x,ctx.input.pointer.y,1,1}
+    }
     // The wheel with Ctrl zooms on the pointer.
     if it.hot && .Primary in ctx.input.modifiers && ctx.input.wheel.y!=0 && c.frames>0 {
         pivot:=at(ctx,origin,start,scale)

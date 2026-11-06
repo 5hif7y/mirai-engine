@@ -105,6 +105,39 @@ ai_chat_agent_icons_select_tasks_finish_review_and_keep_new_chat_available :: pr
 }
 
 @(test)
+asking_the_agent_about_a_range_of_the_play_attaches_it_to_the_next_message :: proc(t:^testing.T) {
+    ctx:ui.Context
+    testing.expect(t,ui.context_init(&ctx,{draw_user=draw_user}));defer ui.context_destroy(&ctx)
+    g:=Editor_Ui{ctx=&ctx}
+    m:=new(Ai);defer free(m);ai_connections_reset(m)
+    s:=Session{gui=&g,ai=m,has_project=true}
+    frame :: proc(s:^Session) {
+        ui.frame_begin(s.gui.ctx,{size={800,600},pointer_absent=true})
+        ai_chat_content_build(s,280,560)
+        ui.frame_end(s.gui.ctx)
+    }
+    play_range_ask(&s,{from=130,to=190,from_seconds=2.5,to_seconds=3.5})
+    opened:=m.chat_open && m.focus && g.layout.left_open
+    testing.expect(t,opened,"The chat opens with its composer focused")
+    attached:=m.play_range.from==130 && m.play_range.to==190
+    testing.expect(t,attached,"The range goes with the next message")
+    frame(&s);frame(&s)
+    chip:=ai_chat_test_paint(&ctx,"Ticks 130 to 190")
+    testing.expect(t,chip!=nil,"The range is a chip over the composer")
+    task:Ai_Task
+    task.play_range=m.play_range
+    b:=strings.builder_make(context.temp_allocator)
+    ai_play_range_prompt(&task,&b)
+    line:=strings.to_string(b)
+    testing.expect(t,strings.contains(line,"ticks 130 to 190 (2.50 s to 3.50 s)"),line)
+    testing.expect(t,strings.contains(line,"`play.history` with `from` 130 and `to` 190"),line)
+    ai_chat_new(&s)
+    testing.expect(t,m.play_range=={},"A new chat takes no range")
+    play_range_ask(&s,{from=10,to=10})
+    testing.expect(t,m.play_range=={},"An empty range is not attached")
+}
+
+@(test)
 ai_chat_draws_the_first_prompt_and_does_not_reuse_another_conversations_scroll :: proc(t:^testing.T) {
     ctx:ui.Context
     testing.expect(t,ui.context_init(&ctx,{}));defer ui.context_destroy(&ctx)

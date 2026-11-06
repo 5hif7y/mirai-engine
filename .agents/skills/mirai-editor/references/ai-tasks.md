@@ -279,6 +279,8 @@ and what it asks to do outside reaches Mirai, which rejects it.
 - On sending it passes to the turn (`Ai_Task.attachments`); `context.json` lists them by path in
   `assets` and `prompt.md` says their paths and types: the agent reads and changes them through the
   API. One that is no longer in the registry is not named.
+- Ticks of the paused Play chosen on its strip go the same way: a chip, `Ai_Task.play_range`,
+  `ticks` in `context.json` and a line of `prompt.md` that reads them with `play.history`.
 
 ### Reference images
 

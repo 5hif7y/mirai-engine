@@ -159,6 +159,11 @@ History and recording:
   discards what was edited in the past; **Play from here**, among the strip controls when it went
   back (`play.pause` with `here`), continues from the frame it is at, edited or not, and discards
   the later ones.
+- The right button on the ruler of the strip sets an end of its range at that tick (the other end
+  stays while start stays before end; otherwise, or without a range, it goes to the head or to the
+  edge) and Copy range puts the project, the run, the ticks and the `play.history` and `play.seek`
+  calls that read them on the clipboard; with a range, the AI button of the strip attaches it to
+  the next message of the chat ([ticks of a message](ai-tasks.md#assets-of-a-message)).
 - While paused, what the mouse and keys do belongs to the editor: `play_input_update` discards
   each frame the window's per-tick input, and the game that continues does not receive it all
   together in its first tick (the look and the body's turn would jump).

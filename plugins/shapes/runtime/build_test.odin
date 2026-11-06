@@ -199,6 +199,40 @@ sides_share_normals_where_the_outline_turns_little :: proc(t:^testing.T) {
     }
 }
 
+@(test)
+a_side_keeps_its_texture_when_the_outline_grows_elsewhere :: proc(t:^testing.T) {
+    defer free_all(context.temp_allocator)
+    square:=[4]geom.Vec2{{-1,-1},{1,-1},{1,1},{-1,1}}
+    grown:=[4]geom.Vec2{{-3,-1},{1,-1},{1,1},{-3,1}}
+    g:Shape_Geometry
+    shape_geometry_init(&g)
+    defer shape_geometry_destroy(&g)
+    Vertex :: struct {position,normal:geom.Vec3,uv:geom.Vec2}
+    for bevel in ([2]f32{0,0.2}) {
+        before:=make([dynamic]Vertex,context.temp_allocator)
+        for points,pass in ([2][4]geom.Vec2{square,grown}) {
+            points:=points
+            s:=outline_of(points[:])
+            s.bevel,s.bevel_profile=bevel,.Round
+            if !testing.expect(t,shape_geometry_build(&s,nil,false,&g)==.None) {break}
+            m:=&g.mesh
+            if pass==0 {
+                for p,i in m.positions {if p.x>0.5 {append(&before,Vertex{p,m.normals[i],m.uvs[i]})}}
+                continue
+            }
+            // Every vertex of the right side the edit did not move keeps where its texture is.
+            for v in before {
+                kept:=false
+                for p,i in m.positions {
+                    if linalg.length(p-v.position)<1e-5 && linalg.length(m.normals[i]-v.normal)<1e-5 && linalg.length(m.uvs[i]-v.uv)<1e-5 {kept=true;break}
+                }
+                testing.expectf(t,kept,"bevel %.1f: the vertex at %v with normal %v lost its texture place %v",bevel,v.position,v.normal,v.uv)
+                if !kept {break}
+            }
+        }
+    }
+}
+
 // An Outline of one loop, one meter deep.
 @(private="file")
 outline_of :: proc(points:[]geom.Vec2) -> Shape {

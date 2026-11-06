@@ -244,19 +244,17 @@ outline_build :: proc(s:^Shape,g:^Shape_Geometry) -> Shape_Error {
         loop:=points[first:first+size]
         side:=make([]geom.Vec2,size,context.temp_allocator)
         for i in 0..<size {side[i]=edge_normal(loop[i],loop[(i+1)%size])}
-        run:f32
         for i in 0..<size {
             j:=(i+1)%size
             a,b:=loop[i],loop[j]
             start:=side_normal(side[(i+size-1)%size],side[i])
             end:=side_normal(side[j],side[i])
-            length:=linalg.length(b-a)
+            u:=side_u(a,b)*k
             base:=u32(len(m.positions))
             append(&m.positions,geom.Vec3{a.x,a.y,-h},geom.Vec3{a.x,a.y,h},geom.Vec3{b.x,b.y,-h},geom.Vec3{b.x,b.y,h})
             append(&m.normals,geom.Vec3{start.x,start.y,0},geom.Vec3{start.x,start.y,0},geom.Vec3{end.x,end.y,0},geom.Vec3{end.x,end.y,0})
-            append(&m.uvs,geom.Vec2{run*k,2*h*k},geom.Vec2{run*k,0},geom.Vec2{(run+length)*k,2*h*k},geom.Vec2{(run+length)*k,0})
+            append(&m.uvs,geom.Vec2{u[0],2*h*k},geom.Vec2{u[0],0},geom.Vec2{u[1],2*h*k},geom.Vec2{u[1],0})
             append(&m.indices,base,base+2,base+3,base,base+3,base+1)
-            run+=length
         }
         first+=size
     }
@@ -269,6 +267,14 @@ edge_normal :: proc "contextless" (a,b:geom.Vec2) -> geom.Vec2 {
     d:=b-a
     length:=linalg.length(d)
     return length>0?geom.Vec2{d.y,-d.x}/length:geom.Vec2{}
+}
+
+// The texture coordinate along a side, from a to b: where each end lies along the side's own
+// direction in the plane, so that what an edit adds elsewhere on the outline does not slide it.
+@(private)
+side_u :: proc "contextless" (a,b:geom.Vec2) -> [2]f32 {
+    d:=linalg.normalize0(b-a)
+    return {linalg.dot(a,d),linalg.dot(b,d)}
 }
 
 // The normal of side at a vertex it shares with other: shared where they turn little.

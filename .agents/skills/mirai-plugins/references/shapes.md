@@ -10,6 +10,8 @@ cut material, drag vertices, and make pieces static or physical.
   polygon with holes in the local XY plane of the entity, its outline first and then its holes,
   extruded along local Z by `depth` and centered on the entity. A **Solid** is made of its
   brushes, each added to what the brushes before it made or cut from it.
+- The texture is anchored in the local plane: caps by position, and each side and bevel band
+  along its own direction, so an edit elsewhere on the outline does not slide what it kept.
 - A **bevel** (`bevel`, `bevel_profile`) rounds or cuts the front and back rims of an Outline:
   its caps are inset by `bevel` and its rims fall by `bevel` along Z, following a Round
   (tangent to the cap and the side), Chamfer or Points profile (a polyline from the cap to the side

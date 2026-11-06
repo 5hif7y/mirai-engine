@@ -271,13 +271,11 @@ outline_bevel_build :: proc(s:^Shape,points:[]geom.Vec2,sizes:[]int,rings:[]Beve
         loop:=points[first:first+size]
         side:=make([]geom.Vec2,size,context.temp_allocator)
         for i in 0..<size {side[i]=edge_normal(loop[i],loop[(i+1)%size])}
-        run:f32
         for i in 0..<size {
             j:=(i+1)%size
             ends:=[2]int{first+i,first+j}
             across:=[2]geom.Vec2{side_normal(side[(i+size-1)%size],side[i]),side_normal(side[j],side[i])}
-            length:=linalg.length(loop[j]-loop[i])
-            u:=[2]f32{run*k,(run+length)*k}
+            u:=side_u(loop[i],loop[j])*k
             base:=u32(len(m.positions))
             for e in 0..<2 {
                 p:=points[ends[e]]
@@ -311,7 +309,6 @@ outline_bevel_build :: proc(s:^Shape,points:[]geom.Vec2,sizes:[]int,rings:[]Beve
                     append(&m.indices,lo,lo+1,hi+1,lo,hi+1,hi)
                 }
             }
-            run+=length
         }
         first+=size
     }

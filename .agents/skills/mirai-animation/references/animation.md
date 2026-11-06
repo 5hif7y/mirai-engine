@@ -103,7 +103,8 @@ locomotion blend space.
 
 - Clips of an `.anim` library ([multiple sources](#multiple-sources)), each with the locomotion
   modes it serves (bit `m` for mode `m`: the values of physics' `Locomotion_Mode`) and, if it starts
-  a mode (jump, landing), the `entry` mark. An entry clip does not loop.
+  a mode (jump, landing), the `entry` mark. An entry clip does not loop. `speed`, when positive, is
+  the one the clip travels at instead of the one measured from its feet.
 - The feature database (`std/anim/matching.odin`: feet, hips and trajectory at 1/3, 2/3 and 1 s in
   the frame of the character, normalized per type) is built at load, the first time a rig of that
   skeleton asks for it, per library and skeleton, and lives in `Graph_Assets`. `memory` is its cap:

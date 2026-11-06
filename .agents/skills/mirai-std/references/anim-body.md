@@ -37,7 +37,11 @@ API; the format that stores the map is the
 - **Ground.** With root motion, `travel` is the velocity of the root. An in-place clip moves the
   ground under the feet that rest, and `travel` is the velocity at which the game must move the
   body. As a swinging foot also passes under, and faster, the ground is the velocity that more low
-  frames of ankles and toes share (a vote in cells of `GROUND_CELL`).
+  frames of ankles and toes share (a vote in cells of `GROUND_CELL`). When no foot rests on that
+  ground (a bouncy gait that barely touches the floor, or feet in the air) the vote is not to be
+  trusted: `travel` is the path the feet sweep relative to the pelvis along their main axis over
+  the duration, backwards while they are low (a foot that rests half of the cycle moves back as
+  far as the body advances).
 - The support height is estimated from the frames of the clip, independent of the rest pose;
   penetration is measured against the rest. An absolute height or a clip in the air without contact
   metadata do not make it possible by themselves to know where the ground of the world is.
@@ -72,6 +76,10 @@ its comment what it does and its durations. A zero `Time_Range` is the whole cli
   The hip lowers or rises the minimum for the feet to reach; a distant target (or beyond
   `EDIT_SOFT_REACH` of the leg) is approached softly, without locking the knee.
 - `Mirror` applies `pose_mirror` per frame and also reflects the roots from their rest.
+- `Face_Rest` takes out the turn about up of the joint that turns the body away from its rest
+  facing: the highest of the pelvis and its ancestors turned more than `FACE_REST_TURN` in some
+  frame (the `Dummy01` with which a 2.5D game faces sideways inside its clips). The rest of the
+  pose keeps its locals, sways included; without such a joint the clip stays as it was.
 - The two-bone IK of the verbs admits intermediate bones between root, joint and end (Rigify).
 
 ## Verification

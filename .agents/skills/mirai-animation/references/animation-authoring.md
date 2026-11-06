@@ -58,32 +58,47 @@ libraries.
   ([metrics](../../mirai-std/references/anim-body.md#metrics-metricsodin)).
 - `animation.clip.edit` applies verbs in order
   ([contracts](../../mirai-std/references/anim-body.md#editing-verbs-editodin-edit_bodyodin))
-  and writes a new clip, in the same `.anim` or in another, with the metrics before and after. It
-  resamples to `rate` and keeps curves, root and markers, which the time verbs move; `loop` `Auto`
-  decides by the seam whether it is a cycle.
+  and writes a new clip with the metrics before and after. It resamples to `rate` and keeps curves,
+  root and markers, which the time verbs move; `loop` `Auto` decides by the seam whether it is a
+  cycle. Without edits it copies the clip with its keys as they are.
+- The clip goes into `asset` (named with ` edited`), or into the `.anim` at `path`: a new one, or
+  an existing one whose bone tracks name bones of the same skeleton (`Other_Skeleton` otherwise),
+  keeping its name; `replace` overwrites a clip of the same name. That is how a library is built
+  from clips chosen from another, without importing the source again.
 - A verb without what it needs fails with the path of the field (`edits[0].direction`) and its
   `fix`.
 
 ## Character
 
 `animation.character.setup` builds a character from the saved body of the skeleton of its rig (or a
-detected unsaved one) and a clip library (by default, the one it plays):
+detected unsaved one) and a clip library (by default, the one it plays). With `skeleton` instead of
+`id` it needs `library`, only writes the assets and returns them, and changes no entity.
 
 - It classifies the clips by the words of their name: idle, stand, walk, jog, run and sprint serve
   the walking mode (with start, stop, turn or pivot they do not loop); fall, air or a looping jump,
   falling; jump or takeoff are the entry of falling and land that of walking; swim and fly or hover
   serve swimming and flying. The number of each mode comes from the project's `Locomotion_Mode`
-  type with names: without the physics plugin it fails with `Missing_Plugin`. In-place clips that
-  are neither locomotion nor jumps are gestures.
+  type with names: without the physics plugin it fails with `Missing_Plugin`; a clip whose mode the
+  project lacks is named in the detail. In-place clips that are neither locomotion nor jumps are
+  gestures.
+- `clips` limits the classification to the clips it names. More locomotion clips than a `.match`
+  takes, or more gestures than an `.action` takes, fail with `Capacity`, their counts and a `fix`:
+  no clip is left out silently.
+- A clip travels at the speed measured from its feet
+  ([metrics](../../mirai-std/references/anim-body.md#metrics-metricsodin)); `speeds` sets that of a
+  locomotion clip by hand and the `.match` keeps it.
 - Capabilities (`want`): locomotion (a `.match` with those clips and a warping `.motion`; the
   `Animation` stays `In_Place` and `animation_physics` moves it), look-at and hands (off until
   requested), feet (grounding: needs physics) and gestures (`.action` on the upper body and per arm,
   in layers 1 to 3). The IK pole of each arm is a fixed point of the world: with the character
   turned the elbows do not follow it. Idle and walk are enough: the locomotion is `Ready`, and
   beyond the walk velocity the warping stretches the stride.
-- It writes the assets and assigns `Animation` and `Pose_Modifiers`; existing files ask for
-  `replace`, which keeps their ids. With locomotion, `Animation` is left without a clip or previous
-  parameters.
+- It writes the assets and assigns `Animation` and `Pose_Modifiers` of the rig; existing files ask
+  for `replace`, which keeps their ids. With locomotion, `Animation` is left without a clip or
+  previous parameters.
+- A clip turned sideways inside (a root joint rotated about up, as a 2.5D game does) travels to the
+  side; `animation.clip.edit` with `Face_Rest` turns it back to the rest facing of the body, which
+  the `Character` then turns.
 - With the body saved in the `.skeleton`, the assets name
   [parts and regions](animation.md#components-and-shared-data) (`@head`, `@upper_body`) and
   serve another skeleton with a body; with a detected unsaved one they name bones. The warping spine

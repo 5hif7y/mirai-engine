@@ -34,3 +34,7 @@ catalog](../../mirai-agent-api/references/methods.md); flows and contracts:
   key at a time.
 - Testing blindly: `dry_run` validates every `create`, `set`, `patch`, bake and edit without
   writing.
+- `animation.character.setup` over a large library: past the clips a `.match` or an `.action`
+  takes it fails with `Capacity`; `clips` names the ones to classify.
+- Importing a source again to get a library of chosen clips: `animation.clip.edit` with the `path`
+  of an existing `.anim` of the same skeleton and no `edits` copies a clip there.

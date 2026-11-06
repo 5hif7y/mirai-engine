@@ -14,7 +14,8 @@ temporal state. The world integration and the authoring are in
   than its cap (`match_database_bytes` estimates it before allocating) and leaves the database empty
   on any error.
 - An in-place clip travels at the velocity with which its feet push; one with a root, at that of its
-  root. A loop continues in its following passes and one without a loop retains its ends.
+  root. `Match_Clip.speed`, when positive, replaces that speed (an in-place clip keeps its
+  direction). A loop continues in its following passes and one without a loop retains its ends.
 - `match_trajectory` predicts the trajectory with the acceleration and braking of the locomotion and
   the turn at its rate: the same numbers that move the body.
 - `match_search` gives the lowest-cost row among the clips of the requested modes and the rate at

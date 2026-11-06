@@ -24,6 +24,10 @@ same with the weights of its mesh and its animation.
   or the nearest animated ancestor, as `morph_source` resolves); `path`, that of its curves (empty,
   that of its `Animation_Target`). The prefab writes `path` only on an entity without
   `Animation_Target`, the mesh that a rig shows.
+- Without either path (a rig built by code that shows its own mesh) each target takes the first
+  curve of the animation whose name ends in `/@morph/<target>`, whatever its path: the content of
+  an animation lists its morph curves by name. Two meshes of one animation with the same target
+  names need a path to tell their curves apart.
 - It stores up to `asset.MORPH_WEIGHTS` entries by name with value and mode: a small row that is
   copied in each snapshot; the curves move the other targets. `morph_weight_set` and
   `morph_weight_clear` write them.

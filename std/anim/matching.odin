@@ -61,8 +61,9 @@ MATCH_CANDIDATES :: 16
 // not while entering; Stationary: it travels while the body stands, or stands while it moves;
 // Reselect: its rows are near the one playing or among those just left; Event: none of its rows
 // has the marker of the event ahead; Rate: its marker misses the event by more than MATCH_EVENT_SLACK
-// at every rate of the event.
-Match_Reject :: enum u8 {None,Cost,Mode,Entry,Stationary,Reselect,Event,Rate}
+// at every rate of the event; Arc: its rows toward the event are all further from its marker than
+// the row that plays, which an arc in the air does not go back to.
+Match_Reject :: enum u8 {None,Cost,Mode,Entry,Stationary,Reselect,Event,Rate,Arc}
 // The best row of a clip in a search, the rate it plays at, its cost split by kind of feature
 // (cost is their sum) and why the search did not give it.
 Match_Candidate :: struct {row:i32,cost,rate:f32,costs:[Match_Feature]f32,reason:Match_Reject}
@@ -359,10 +360,12 @@ match_query_trajectory :: proc "contextless" (db:^Match_Database,query:^Match_Qu
 // filter_stationary, a clip that is not an entry is searched only if it stands (MATCH_STILL) when
 // the body does not move, and moves when the body does. event, when positive with the events of
 // the database, is the seconds to the event (a landing): only rows whose next marker of it plays
-// then at a rate of event_rates (least and most) are searched, and give that rate; entry searches
-// the starts of the entry clips alone, and otherwise every row of the clips of the modes, with no
-// tail or stationary filter.
-Match_Request :: struct {query:Match_Query,trajectory:Match_Trajectory,modes:u32,min_rate,max_rate,rate:f32,entry:bool,filter_stationary,moving:bool,event:f32,event_rates:[2]f32}
+// then at a rate of event_rates (least and most), or misses it by up to MATCH_EVENT_SLACK at the
+// nearest one, are searched, and give that rate; entry searches the starts of the entry clips
+// alone, and otherwise every row of the clips of the modes, with no tail or stationary filter.
+// event_from, when positive, is the seconds to its marker of the row that plays: rows further from
+// theirs are left out, as an arc in the air only goes on.
+Match_Request :: struct {query:Match_Query,trajectory:Match_Trajectory,modes:u32,min_rate,max_rate,rate:f32,entry:bool,filter_stationary,moving:bool,event:f32,event_rates:[2]f32,event_from:f32}
 
 // The query against the rows of a range, its weights and the rate the range plays at to go where
 // the trajectory goes: a few clips cover the speeds between theirs by their rate, whose trajectory
@@ -507,6 +510,7 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
             continue
         }
         playing:=range==near_range
+        arc:=false
         found,least,found_rate:=-1,max(f32),scaled
         skipped,skipped_cost:=-1,max(f32)
         row,end:=int(r.first),int(r.first)+last
@@ -522,6 +526,7 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
                     at_rate:=scaled
                     if event {
                         if db.events[row]<0 {continue}
+                        if request.event_from>0 && db.events[row]>request.event_from+1/db.rate {arc=true;continue}
                         miss:f32
                         at_rate,miss=match_event_rate(db,row,request)
                         if miss>MATCH_EVENT_SLACK {continue}
@@ -547,7 +552,7 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
         } else if event {
             reached:=false
             for ahead in db.events[r.first:][:last] {if ahead>=0 {reached=true;break}}
-            match_candidates_reject(db,candidates,int(r.first),int(r.first)+last,query,weights,scaled,.Rate if reached else .Event)
+            match_candidates_reject(db,candidates,int(r.first),int(r.first)+last,query,weights,scaled,.Arc if arc else .Rate if reached else .Event)
         }
     }
     if candidates!=nil {

@@ -580,6 +580,8 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
                 // their marker.
                 toward:=request
                 toward.min_rate,toward.max_rate,toward.event,toward.event_rates=0,0,time_to_land,info.landing_rates
+                // In the air the arc goes on: another clip toward the landing joins it where it is.
+                if m.landing && current>=0 && !entering {toward.event_from=max(lib.match_event_ahead(db,current,state.time),0)}
                 if m.landing && !lost && row>=0 && !entering {
                     query,weights,_:=lib.match_query(db,toward,current)
                     _,miss:=lib.match_event_rate(db,row,toward)

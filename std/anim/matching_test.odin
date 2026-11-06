@@ -373,6 +373,17 @@ an_event_searches_the_rows_that_reach_its_marker_in_time_at_the_rate_that_does :
     best,_,rate=match_search(&db,request)
     ahead:=db.events[best] if best>=0 else -1
     testing.expectf(t,match_range_of(&db,best)==3 && ahead>=.125 && ahead<=.5 && abs(rate*.25-ahead)<1e-4,"a row of the jump .125 to .5 s from its marker, not %.3f s at rate %.3f",ahead,rate)
+    // In the air the arc goes on: with a row .3 s from its marker playing, no row further from its
+    // own is taken, the start of the jump least of all.
+    noted:Match_Candidates
+    request.event,request.event_from,request.entry=.3,.3,false
+    best,_,_=match_search(&db,request,candidates=&noted)
+    testing.expectf(t,best>=0 && db.events[best]<=.3+1/db.rate,"a row at most .3 s from its marker, not %.3f s",db.events[best] if best>=0 else -1)
+    request.event,request.event_from=.6,.1
+    best,_,_=match_search(&db,request,candidates=&noted)
+    reasons:=match_test_reasons(&db,noted)
+    testing.expectf(t,best<0 && reasons[3]==.Arc,"rows .6 s away go back in the arc: %v",reasons)
+    request.event_from=0
     // A jump whose marker comes a little early even at the slowest rate still plays, at that rate:
     // a frame off the landing is not worth a clip that fits the body worse.
     request.event,request.entry=.8/.5+MATCH_EVENT_SLACK*.5,true
@@ -381,10 +392,9 @@ an_event_searches_the_rows_that_reach_its_marker_in_time_at_the_rate_that_does :
     request.entry=false
     // Ten seconds before it lands no row reaches it: the jump lands too soon (Rate), the fall loop
     // has no marker (Event) and the ground serves another mode.
-    noted:Match_Candidates
     request.event=10
     best,_,_=match_search(&db,request,candidates=&noted)
-    reasons:=match_test_reasons(&db,noted)
+    reasons=match_test_reasons(&db,noted)
     testing.expectf(t,best<0 && reasons=={.Mode,.Mode,.Event,.Rate},"nothing lands in 10 s: %v",reasons)
     // Without an event the entry jump is left out of the steady search of the air.
     request.event=0

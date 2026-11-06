@@ -185,7 +185,7 @@ Instance_Match_Candidate :: struct {
     rate:f32 `mirai:"label=It plays at to follow the trajectory, or to reach its landing marker"`,
     cost:f32,
     costs:Instance_Match_Costs,
-    reason:lib.Match_Reject `mirai:"label=None: the one it chose; Cost: it cost more; Mode, Entry, Stationary, Reselect, Event (no landing marker ahead) and Rate (its marker is not reached at a landing rate): why it was left out"`,
+    reason:lib.Match_Reject `mirai:"label=None: the one it chose; Cost: it cost more; Mode, Entry, Stationary, Reselect, Event (no landing marker ahead), Rate (its marker is not reached at a landing rate) and Arc (its rows go back in the arc in the air): why it was left out"`,
 }
 Instance_Match_Costs :: struct {foot_position,foot_velocity,hip_velocity,body_velocity,trajectory_position,trajectory_direction:f32}
 Instance_Pose :: struct {

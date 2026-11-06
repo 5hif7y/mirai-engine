@@ -858,7 +858,15 @@ tree_build_node :: proc(ctx:^Context,b:^Tree_Build,index:int,values:rawptr,copy:
         return next
     }
     content:=tree_node_text(ctx,b,node,index,slot,values)
+    // A node that holds none floats in a box of its size that hangs as its float says.
+    holder:Box
+    if node.float.to!=.None {
+        holder={id=id(ctx,"floating",int(u32(node_id))),float=node.float}
+        holder.float.layer=i16(clamp(b.floor+int(node.float.layer),int(min(i16)),int(max(i16))))
+        box_begin(ctx,holder)
+    }
     tree_build_leaf(ctx,b,node,index,slot,node_id,values,item,&base_style,style,variant,image_ref,content,selected,disabled,&value if playing else nil)
+    if node.float.to!=.None {box_end(ctx,holder)}
     tree_focus_links(ctx,node,node_id)
     // Only containers hold nodes: what hangs from any other kind is not built.
     return next
@@ -895,7 +903,9 @@ tree_build_container :: proc(ctx:^Context,b:^Tree_Build,node:^Node,index,next,sl
 tree_build_box :: proc(ctx:^Context,b:^Tree_Build,node:^Node,index,next,slot:int,node_id:Id,values:rawptr,copy:int,item:i32,box:^Box) {
     tree,instance:=b.tree,b.instance
     if node.kind==.Tooltip {
+        // Under the node, or where its float puts it against the node.
         box.float={to=.Parent,anchor=.Bottom_Center,pivot=.Top_Center,offset={0,6},layer=LAYER_TOOLTIP}
+        if node.float.to!=.None {box.float.anchor,box.float.pivot,box.float.offset=node.float.anchor,node.float.pivot,node.float.offset}
         box.block,box.contain=false,true
     }
     if node.kind==.Tabs {box.direction=.Column}

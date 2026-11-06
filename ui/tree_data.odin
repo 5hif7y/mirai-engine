@@ -388,7 +388,7 @@ tree_programs_set :: proc(tree:^Widget_Tree,programs:[]u32) {
 // from the layer it is built in: 0 and 0 when none floats.
 tree_layers :: proc "contextless" (tree:^Widget_Tree) -> (low,high:i16) {
     for node in tree.nodes[:tree.node_count] {
-        if node_kind_holds(node.kind) && node.float.to!=.None {low,high=min(low,node.float.layer),max(high,node.float.layer)}
+        if node.float.to!=.None {low,high=min(low,node.float.layer),max(high,node.float.layer)}
     }
     return
 }

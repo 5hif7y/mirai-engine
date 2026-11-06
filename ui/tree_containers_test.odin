@@ -468,6 +468,13 @@ a_tooltip_waits_its_delay_and_stays_inside_the_surface :: proc(t:^testing.T) {
     for _ in 0..<3 {test_frame(&ctx,&input,test_containers_build,&s)}
     // No room under its node nor right of it: over the node, inside the surface.
     testing.expect_value(t,test_rect(t,&ctx,tree_element_id(&ctx,"tip")),Rect{700,570-6-20,100,20})
+    // With a float of its own it hangs where that says: left of its node, a label beside an icon.
+    s.tree.nodes[tip].float={to=.Parent,anchor=.Center_Left,pivot=.Center_Right,offset={-8,0}}
+    s.tree.nodes[holder].float.offset={300,300}
+    for _ in 0..<2 {test_frame(&ctx,&input,test_containers_build,&s)}
+    input.pointer={320,310}
+    for _ in 0..<6 {test_frame(&ctx,&input,test_containers_build,&s)}
+    testing.expect_value(t,test_rect(t,&ctx,tree_element_id(&ctx,"tip")),Rect{300-8-100,315-10,100,20})
 }
 
 @(test)

@@ -34,6 +34,33 @@ curve_queries_mix_missing_tracks_with_the_callers_default_and_retire_stale_outpu
     _,present:=animation_root_delta(&playback,state.entity);testing.expect(t,!present)
 }
 
+// The curves of an additive layer change by what its clip differs from its reference clip, as its
+// bones: a face whose own first frame already smiles adds its smile over a neutral reference.
+@(test)
+additive_layer_curves_subtract_their_reference_clip :: proc(t:^testing.T) {
+    content:=host.Content_Animation{clip_count=2}
+    testing.expect(t,lib.library_init(&content.lib,{max_clips=2,max_tracks=2,max_keys=4}))
+    defer lib.library_destroy(&content.lib)
+    smile:=base.name_hash("smile")
+    neutral:=[1]lib.Keyframe{{value={0.2,0,0,0}}}
+    grin:=[2]lib.Keyframe{{time=0,value={1,0,0,0}},{time=1,value={0.8,0,0,0}}}
+    stand,_:=lib.clip_add(&content.lib,{name=base.name_hash("stand"),tracks={{target=smile,property=.Float,keys=neutral[:]}}})
+    happy,_:=lib.clip_add(&content.lib,{name=base.name_hash("happy"),tracks={{target=smile,property=.Float,keys=grin[:]}}})
+    playback:Playback;defer playback_free(&playback)
+    state:=state_get(&playback,core.Entity(1));state.seen=1;playback.frame=1
+    lib.fader_play(&state.fader,stand,1,0)
+    lib.fader_play(&state.layers[0].fader,happy,1,0);state.layers[0].fader.current.time=1
+    state.layers[0].clip,state.layers[0].weight=base.name_hash("happy"),1
+    cases:=[?]struct {reference:string,want:f32}{{"stand",0.2+0.8-0.2},{"",0.2+0.8-1}}
+    for c in cases {
+        animation:=ANIMATION_DEFAULT
+        testing.expect(t,animation_play(&animation,"happy",fade=0,layer=1,mode=.Additive,reference_clip=c.reference))
+        sample_curves(state,&content,1,animation)
+        got:=animation_curve(&playback,state.entity,"smile")
+        testing.expectf(t,abs(got-c.want)<1e-5,"over reference %q the smile is %v, not %v",c.reference,got,c.want)
+    }
+}
+
 @(test)
 direct_clip_weights_preserve_zero_full_and_partial_trs_without_allocations :: proc(t:^testing.T) {
     content:=host.Content_Animation{clip_count=1}

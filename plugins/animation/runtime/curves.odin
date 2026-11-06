@@ -55,10 +55,17 @@ sample_layer_curves :: proc(state:^Playing,content:^host.Content_Animation,anima
             if overlay.weight<=0 || sum<=0 {continue}
             alpha:=layer.weight*mm.saturate(animation.weight)*overlay.weight/sum
             if asked.mode==.Additive || asked.curves==.Additive {
-                reference:=layer.fader.current;reference.time=asked.reference
+                // From the reference clip when it has the curve, as the bones; else from its own.
                 rest:=Curve_Output{target=result.target,property=result.property,slot=result.slot}
-                curve_accumulate(&rest,&content.lib,reference,share)
-                for outgoing in layer.fader.outgoing[:layer.fader.outgoing_count] {reference=outgoing.player;reference.time=asked.reference;curve_accumulate(&rest,&content.lib,reference,lib.fade_out_weight(outgoing))}
+                if from:=lib.clip_find(&content.lib,asked.reference_clip);asked.reference_clip!=0 && from!=0 {
+                    reference:=lib.player_make(from);reference.time=asked.reference
+                    curve_accumulate(&rest,&content.lib,reference,1)
+                }
+                if rest.weight<=0 {
+                    reference:=layer.fader.current;reference.time=asked.reference
+                    curve_accumulate(&rest,&content.lib,reference,share)
+                    for outgoing in layer.fader.outgoing[:layer.fader.outgoing_count] {reference=outgoing.player;reference.time=asked.reference;curve_accumulate(&rest,&content.lib,reference,lib.fade_out_weight(outgoing))}
+                }
                 if rest.weight>0 {rest.value/=rest.weight}
                 result.value+=(overlay.value/overlay.weight-rest.value)*alpha
             } else {

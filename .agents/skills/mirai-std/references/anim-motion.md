@@ -16,8 +16,10 @@ temporal state. The world integration and the authoring are in
   than its cap (`match_database_bytes` estimates it before allocating) and leaves the database empty
   on any error.
 - An in-place clip travels at the velocity with which its feet push; one with a root, at that of its
-  root. `Match_Clip.speed`, when positive, replaces that speed (an in-place clip keeps its
-  direction). A loop continues in its following passes and one without a loop retains its ends.
+  root. `Match_Clip.speed`, when positive, replaces that speed: an in-place clip keeps the direction
+  its feet push, or, when they do not push (a jump), goes where its body faces at its first frame,
+  never along the noise of its supports. A loop continues in its following passes and one without a
+  loop retains its ends.
 - A `Match_Clip` is one clip or a blended sample of up to `MATCH_BLEND`: the clips with a weight
   (`match_clip_duration` refuses those that do not loop, last more than a row apart, or weights out
   of 0..1) are sampled at the same share of their durations and mixed as the program mixes the

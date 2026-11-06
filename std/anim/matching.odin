@@ -168,7 +168,12 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
         root:=int(ground.root)
         travel,speed:=ground.travel,linalg.length(ground.travel)
         if c.speed>0 {
-            if ground.in_place {direction,moving:=anim_unit(travel);travel=(direction if moving else forward)*c.speed}
+            // Along the push of its feet; feet that do not push (a jump) leave where its body faces.
+            if ground.in_place {
+                direction,moving:=anim_unit(travel)
+                if !moving || speed<=MATCH_STILL {direction=match_motion_facing({frames=frames,world=world[:count*n],rest=rest_world,root=root,forward=forward},0)}
+                travel=direction*c.speed
+            }
             speed=c.speed
         }
         motion:=Match_Motion{frames=frames,world=world[:count*n],rest=rest_world,root=root,in_place=ground.in_place,travel=travel,forward=forward}

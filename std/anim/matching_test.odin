@@ -98,6 +98,16 @@ match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_f
         testing.expectf(t,db.ranges[1].speed==3 && abs(db.ranges[1].travel.z-3)<1e-4,"walk told to go 3 m/s: %v",db.ranges[1])
         testing.expect(t,abs(db.ranges[0].speed-0)<.05)
     }
+    // Feet that do not push (a jump in place) go where the body faces: idle turned a quarter to the
+    // right, told 2 m/s, goes right, whatever its supports measure.
+    quarter:=math.quat_axis_angle({0,1,0},cmath.PI/2)
+    turned_keys:=[1]Keyframe{{value={imag(quarter),jmag(quarter),kmag(quarter),real(quarter)}}}
+    turned_feet:=[2]Keyframe{{time=0,value={.1,-.95,0,0}},{time=1,value={.1,-.95,.001,0}}}
+    turned,turned_error:=clip_add(&library,{name=base.name_hash("turned"),tracks={{target=rig.skeleton.names[1],property=.Rotation,keys=turned_keys[:]},{target=rig.skeleton.names[2],property=.Position,keys=turned_feet[:]}}})
+    jumps:=[2]Match_Clip{told[0],{clips={0=turned},modes=1<<0,entry=true,speed=2}}
+    if testing.expect(t,turned_error==.None && match_database_build(&db,&library,rig,jumps[:],30,weights)==.None) {
+        testing.expectf(t,linalg.length(db.ranges[1].travel-{2,0,0})<1e-3,"a turned clip in place told 2 m/s goes %v",db.ranges[1].travel)
+    }
     told[1].speed=-1
     testing.expect_value(t,match_database_build(&db,&library,rig,told[:],30,weights),Match_Build_Error.Invalid)
 

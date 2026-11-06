@@ -43,7 +43,8 @@ temporal state. The world integration and the authoring are in
   With `filter_stationary`, a clip that is not an entry plays only if it stands (`MATCH_STILL`)
   when the body does and travels when it moves. The entry clips (`entry`) are searched only in their
   first `MATCH_ENTRY_SPAN` seconds and only with `Match_Request.entry`; the continuous search leaves
-  them out.
+  them out. With `Match_Candidates` it also notes the best row of each clip, least cost first, with
+  its cost per kind of feature, and gives the same row: each clip is bounded by its own best row.
 - A database of more than `MATCH_LINEAR_ROWS` rows stores the minimum and maximum of its features
   per runs of rows, small and large; the search skips a run whose bound does not improve the best
   row found and gives the same row as the full walk. Without bounds, the walk is linear with

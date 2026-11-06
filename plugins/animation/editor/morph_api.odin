@@ -10,7 +10,7 @@ import "mirai:std/base"
 import "mirai:std/serial"
 import anim "plugins:animation/runtime"
 
-Morph_Inspect_Params :: struct {id:base.Entity_Id,offset:u32 `mirai:"optional"`,limit:u32 `mirai:"optional,min=1,max=256"`,diagnostics:bool `mirai:"optional"`}
+Morph_Inspect_Params :: struct {id:base.Entity_Id,entity:core.Entity `mirai:"transient"`,offset:u32 `mirai:"optional"`,limit:u32 `mirai:"optional,min=1,max=256"`,diagnostics:bool `mirai:"optional"`}
 Morph_Set_Params :: struct {
     id:base.Entity_Id,
     name:[64]u8 `mirai:"text,label=A target of the mesh; an instance weights up to 16"`,
@@ -64,7 +64,7 @@ morph_instance_source :: proc(w:core.World_Ref,e:core.Entity,config:anim.Morph_W
 @(private)
 morph_inspect :: proc(s:^editor.Session,call:^api.Call) {
     p:=api.call_params(call,Morph_Inspect_Params)
-    w,e,okay:=subject(s,call,p.id);if !okay {return}
+    w,e,okay:=subject(s,call,p.id,p.entity);if !okay {return}
     file:asset.Asset;defer asset.asset_close(&file)
     view,id,loaded:=morph_mesh_open(s,call,w,e,&file);if !loaded {return}
     config,_:=editor.entity_get(w,e,anim.Morph_Weights)

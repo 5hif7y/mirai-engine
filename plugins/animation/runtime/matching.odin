@@ -282,17 +282,39 @@ Match_Playing :: struct {
     body:mm.Vec3,            // horizontal velocity of the body in the last tick
     lag,lag_velocity:mm.Vec3, // of the root of the pose from the body, world axes
     told:bool,               // body holds a velocity
+    searched:Match_Searched,
 }
+// The last search matching had to make (a mode it enters, a start or a stop, a clip that ends or
+// none playing): its candidates, the mode it searched, whether it searched entry clips, and which
+// of searches it was.
+Match_Searched :: struct {candidates:lib.Match_Candidates,search:u32,mode:u16,entry:bool}
 MATCH_PLAYING_DEFAULT :: Match_Playing{range=-1,rate=1,since=max(f32)}
+
+@(private)
+match_database_key :: proc(library:^host.Content_Animation,state:^Playing,source:base.Asset_Id) -> [7]u64 {
+    shape:=state.skeleton
+    if shape=={} {for target in state.targets {shape[0]=base.hash_combine(shape[0],target)}}
+    return {library.id[0],library.id[1],u64(library.generation),shape[0],shape[1],state.skeleton_revision,source[0]~source[1]}
+}
+
+// The database the matching of a rig searches, of library, what it plays: nil for a rig that
+// plays no .match, before its first tick or when its database could not be built.
+animation_match_database :: proc(graphs:^Graph_Assets,library:^host.Content_Animation,state:^Playing) -> ^lib.Match_Database {
+    if graphs==nil || library==nil || state==nil || state.program.kind!=MATCH_KIND || !state.program.ready {return nil}
+    key:=match_database_key(library,state,state.program.library)
+    for &content in graphs.matches {
+        if content.id!=state.program.asset || content.revision!=state.program.revision || !content.valid {continue}
+        for &built in content.databases {if built.key==key && built.error==.None {return &built.database}}
+    }
+    return nil
+}
 
 // The database of a library for the skeleton of a rig, built the first time a rig of that
 // skeleton loads it.
 @(private)
 match_database :: proc(content:^Match_Content,library:^host.Content_Animation,state:^Playing,source:base.Asset_Id,allocator:mem.Allocator) -> (^lib.Match_Database,lib.Match_Build_Error,Match_Blend_Fault) {
     if library==nil || len(state.parents)<2 || len(state.rest)!=len(state.parents) {return nil,.Invalid,{}}
-    shape:=state.skeleton
-    if shape=={} {for target in state.targets {shape[0]=base.hash_combine(shape[0],target)}}
-    key:=[7]u64{library.id[0],library.id[1],u64(library.generation),shape[0],shape[1],state.skeleton_revision,source[0]~source[1]}
+    key:=match_database_key(library,state,source)
     for &built in content.databases {if built.key==key {return &built.database if built.error==.None else nil,built.error,built.fault}}
     context.allocator=allocator
     info:=content.profile.info
@@ -515,8 +537,9 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
             // A clip that ends is left whole: a row of it a little earlier would play its tail
             // again.
             whole:=ending || info.keep_loop_phase && current>=0 && db.ranges[current].loop
-            best,cost,_:=lib.match_search(db,request,row,whole,info.reselect,&m.recent)
+            best,cost,_:=lib.match_search(db,request,row,whole,info.reselect,&m.recent,&m.searched.candidates if forced else nil)
             m.searches+=1;m.cost=min(cost,playing_on)
+            if forced {m.searched.search,m.searched.mode,m.searched.entry=m.searches,mode,entering}
             if best>=0 && (forced || playing_on==max(f32) || cost<playing_on-info.bias) {
                 range:=lib.match_range_of(db,best)
                 if row>=0 {lib.match_recent_leave(&m.recent,row)}

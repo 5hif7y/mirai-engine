@@ -154,7 +154,7 @@ authoring_motion_distance :: proc(s:^editor.Session,call:^api.Call) {
 
 @(private)
 authoring_motion_inspect :: proc(s:^editor.Session,call:^api.Call) {
-    p:=api.call_params(call,Entity_Params);world,entity,ok:=subject(s,call,p.id);if !ok {return}
+    p:=api.call_params(call,Entity_Params);world,entity,ok:=subject(s,call,p.id,p.entity);if !ok {return}
     instance,ready:=anim.motion_inspect(core.world_storage_of(world,anim.Motion_Runtime),entity)
     serial.text_write_raw(call.out,"{");api.write_key(call.out,"id",true);api.write_id(call.out,p.id)
     api.write_key(call.out,"profile");serial.write_u8(call.out,'"');serial.text_write_asset_id(call.out,instance.profile);serial.write_u8(call.out,'"')

@@ -59,7 +59,7 @@ Graph_Write_Params :: struct {
     mask_bones:[512]Program_Graph_Mask_Bone `mirai:"optional"`,
     dry_run:bool `mirai:"optional,label=Validates the definition with its references and sources without writing"`,
 }
-Modifier_Inspect_Params :: struct {id:base.Entity_Id,offset:u32 `mirai:"optional"`,limit:u32 `mirai:"optional,min=1,max=256"`,diagnostics:bool `mirai:"optional"`}
+Modifier_Inspect_Params :: struct {id:base.Entity_Id,entity:core.Entity `mirai:"transient"`,offset:u32 `mirai:"optional"`,limit:u32 `mirai:"optional,min=1,max=256"`,diagnostics:bool `mirai:"optional"`}
 Modifier_Goal_Kind :: enum u8 {IK,Look,Contact,Grounding,Chain_IK,Spring,Multi_IK,Spline_IK,Follow}
 MODIFIER_GOAL_KINDS :: [Modifier_Goal_Kind]anim.Modifier_Kind{.IK=.IK,.Look=.Look,.Contact=.Contact,.Grounding=.Grounding,.Chain_IK=.Chain_IK,.Spring=.Spring,.Multi_IK=.Multi_IK,.Spline_IK=.Spline_IK,.Follow=.Follow}
 @(private)
@@ -365,7 +365,7 @@ program_grounding_diagnostic :: proc(world:core.World_Ref,entity:core.Entity,slo
 @(private)
 program_modifier_inspect :: proc(s:^editor.Session,call:^api.Call) {
     p:=api.call_params(call,Modifier_Inspect_Params)
-    world,entity,ok:=subject(s,call,p.id);if !ok {return}
+    world,entity,ok:=subject(s,call,p.id,p.entity);if !ok {return}
     config,present:=editor.entity_get(world,entity,anim.Pose_Modifiers)
     file:Authoring_File;defer asset.asset_close(&file.file)
     retarget_file:Authoring_File;defer asset.asset_close(&retarget_file.file)

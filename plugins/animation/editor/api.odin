@@ -20,6 +20,7 @@ ANIMATION_API_DEFAULT :: Animation_Api{provider={register=register}}
 
 Describe_Params :: struct {
     id:base.Entity_Id `mirai:"optional"`,
+    entity:core.Entity `mirai:"transient"`,
     asset:base.Asset_Id `mirai:"optional"`,
     mesh:base.Asset_Id `mirai:"optional"`,
     skeleton:base.Asset_Id `mirai:"optional"`,
@@ -48,8 +49,10 @@ Play_Params :: struct {
     mesh_space:bool `mirai:"optional,label=Override layer: its rotations blend in the space of the rig, keeping the turn of its clip whatever the base turns above it"`,
 }
 
+// entity: the one animation.inspect resolved, which subject takes over id.
 Entity_Params :: struct {
     id:base.Entity_Id,
+    entity:core.Entity `mirai:"transient"`,
 }
 
 
@@ -112,11 +115,16 @@ within :: proc(w:core.World_Ref,entity,root:core.Entity) -> bool {
     return false
 }
 
+// The entity a call names by id in the world the editor shows, or entity when it is alive there.
 @(private)
-subject :: proc(s:^editor.Session,call:^api.Call,id:base.Entity_Id) -> (w:core.World_Ref,e:core.Entity,ok:bool) {
+subject :: proc(s:^editor.Session,call:^api.Call,id:base.Entity_Id,entity:=core.NONE) -> (w:core.World_Ref,e:core.Entity,ok:bool) {
     w=editor.shown_world(s)
+    if entity!=core.NONE && core.alive(core.world_entities(w),entity) {return w,entity,true}
     e=find_entity(w,id)
-    if e==core.NONE {authoring_failure(call,"id","Missing_Entity","an entity in the shown world",fmt.tprintf("%x",id),"The animation entity does not exist");return}
+    if e==core.NONE {
+        fix:="Use an id from scene.inspect" if s.mode==.Edit else "Use an id from play.inspect; the entities the game made have no id: animation.inspect takes their handle in entity"
+        authoring_failure(call,"id","Missing_Entity","an entity in the shown world",fmt.tprintf("%x",id),"The animation entity does not exist",fix=fix);return
+    }
     return w,e,true
 }
 
@@ -197,8 +205,8 @@ asset_open :: proc(s:^editor.Session,call:^api.Call,id:base.Asset_Id,file:^asset
 describe :: proc(s:^editor.Session,call:^api.Call) {
     p:=api.call_params(call,Describe_Params)
     animation_id,mesh_id,skeleton_id:=p.asset,p.mesh,p.skeleton
-    if p.id!=0 {
-        w,e,ok:=subject(s,call,p.id);if !ok {return}
+    if p.id!=0 || p.entity!=core.NONE {
+        w,e,ok:=subject(s,call,p.id,p.entity);if !ok {return}
         if a,has:=editor.entity_get(w,e,anim.Animation);has && animation_id=={} {animation_id=a.library if a.library!={} else a.asset}
         if skeleton_id=={} {skeleton_id=rig_skeleton(s,w,e)}
         if m,has:=editor.entity_get(w,e,erender.Mesh_Renderer);has && mesh_id=={} {mesh_id=m.mesh}

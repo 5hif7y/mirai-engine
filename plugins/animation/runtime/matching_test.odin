@@ -429,9 +429,34 @@ a_new_mode_of_the_match_goal_enters_by_its_entry_clip :: proc(t:^testing.T) {
     for _ in 0..<10 {testing.expect(t,match_step(&f,dt,GROUND))}
     value,_:=animation_match(&f.playback,f.rig)
     testing.expect(t,value.mode==GROUND && (value.clip==base.name_hash("idle") || value.clip==base.name_hash("walk")))
+    // The first search, with no clip playing, notes the best row of each clip of the ground: the
+    // one it jumped to first, the costs in order and each the sum of its kinds of feature.
+    db:=animation_match_database(&f.graphs,&f.content,f.state)
+    searched:=f.state.program.match.searched
+    if testing.expect(t,db!=nil) {
+        candidates:=searched.candidates.items[:searched.candidates.count]
+        testing.expectf(t,searched.search==1 && searched.mode==GROUND && !searched.entry && len(candidates)==2,"the first search weighs idle and walk, not %v",searched)
+        for candidate,i in candidates {
+            sum:f32;for part in candidate.costs {sum+=part}
+            testing.expectf(t,abs(sum-candidate.cost)<=1e-3*max(1,candidate.cost),"the kinds of feature sum %.4f, not its cost %.4f",sum,candidate.cost)
+            if i>0 {testing.expect(t,candidates[i-1].cost<=candidate.cost,"candidates go from the least cost")}
+        }
+        if len(candidates)>0 {
+            range:=lib.match_range_of(db,int(candidates[0].row))
+            testing.expectf(t,range>=0 && lib.clip_data(&f.content.lib,db.ranges[range].clips[0]).name==value.clip,"the first candidate is the clip it plays")
+        }
+        // Noting candidates bounds each clip by its own best row and gives the same row.
+        request:=lib.Match_Request{query=lib.match_features(db,0),trajectory=lib.match_row_trajectory(db,int(db.ranges[1].first)),modes=~u32(0),min_rate=.5,max_rate=1}
+        noted:lib.Match_Candidates
+        best,cost,_:=lib.match_search(db,request)
+        same,same_cost,_:=lib.match_search(db,request,candidates=&noted)
+        testing.expect(t,best==same && cost==same_cost && noted.count>=2 && int(noted.items[0].row)==best)
+    }
     testing.expect(t,match_step(&f,dt,AIR))
     value,_=animation_match(&f.playback,f.rig)
     testing.expectf(t,value.mode==AIR && value.clip==base.name_hash("jump") && value.time<=lib.MATCH_ENTRY_SPAN+dt+1e-4 && !value.forced,"entering the air starts its entry clip near its start, not %v",value)
+    searched=f.state.program.match.searched
+    testing.expectf(t,searched.entry && searched.mode==AIR && searched.candidates.count==1 && searched.search==value.searches,"entering the air notes its entry search, not %v",searched)
     testing.expectf(t,value.rate==1,"an entry clip plays at its own rate whatever the body moves, not %.2f",value.rate)
     for _ in 0..<120 {testing.expect(t,match_step(&f,dt,AIR))}
     value,_=animation_match(&f.playback,f.rig)

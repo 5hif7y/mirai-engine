@@ -50,6 +50,15 @@ MATCH_STILL :: .05
 MATCH_RECENT :: 8
 // Ticks of the velocity of a body its trail keeps.
 MATCH_TRAIL :: 64
+// Clips a search notes the best row of.
+MATCH_CANDIDATES :: 8
+
+// The best row of a clip in a search, the rate it plays at, and its cost split by kind of feature
+// (cost is their sum).
+Match_Candidate :: struct {row:i32,cost,rate:f32,costs:[Match_Feature]f32}
+// The clips a search weighed, one per range by its best row, least cost first: the first is the
+// row the search gives.
+Match_Candidates :: struct {items:[MATCH_CANDIDATES]Match_Candidate,count:i32}
 
 Match_Query :: [MATCH_LANES]simd.f32x4
 
@@ -264,6 +273,16 @@ match_cost :: #force_inline proc "contextless" (db:^Match_Database,row:int,query
     #unroll for lane in 0..<MATCH_LANES {d:=features[lane]-query[lane];sum+=d*d*weights[lane]}
     return simd.reduce_add_pairs(sum)
 }
+// The cost of a row against a query split by kind of feature.
+match_cost_split :: proc "contextless" (db:^Match_Database,row:int,query,weights:Match_Query) -> (costs:[Match_Feature]f32) {
+    terms:[MATCH_LANES*4]f32
+    for lane in 0..<MATCH_LANES {
+        d:=db.features[row*MATCH_LANES+lane]-query[lane]
+        values:=simd.to_array(d*d*weights[lane]);copy(terms[lane*4:][:4],values[:])
+    }
+    for span,kind in MATCH_FEATURES {for i in span[0]..<span[1] {costs[kind]+=terms[i]}}
+    return
+}
 
 // The raw trajectory of a row.
 match_row_trajectory :: proc "contextless" (db:^Match_Database,row:int) -> (trajectory:Match_Trajectory) {
@@ -394,9 +413,11 @@ match_behind :: #force_inline proc "contextless" (r:Match_Range,row,from,reach:i
 // plays (-1: none): rows of its clip within span seconds of it are left out, a jump that short is
 // a stutter, and all of them with whole. recent are rows the rig left: those it played in the span
 // seconds before it left them are left out too. With bounds, runs that cannot hold a better row
-// are skipped whole.
-match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,current:=-1,whole:=false,span:f32=0,recent:^Match_Recent=nil) -> (best:int,cost,rate:f32) {
+// are skipped whole. With candidates, it notes the best row of each clip, which bounds each clip
+// by its own best row instead of the best of all.
+match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,current:=-1,whole:=false,span:f32=0,recent:^Match_Recent=nil,candidates:^Match_Candidates=nil) -> (best:int,cost,rate:f32) {
     best,cost,rate=-1,max(f32),1
+    if candidates!=nil {candidates^={}}
     entry_rows:=int(cmath.ceil(MATCH_ENTRY_SPAN*db.rate))+1
     bounded:=len(db.small)>0
     seconds:=span if anim_finite(span) && span>0 else 0
@@ -420,25 +441,41 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
         last:=int(r.count)-match_tail(db,range)
         if request.entry {last=min(int(r.count),entry_rows)}
         playing:=range==near_range
+        found,least:=-1,max(f32)
         row,end:=int(r.first),int(r.first)+last
         for row<end {
             large_end:=min((row/MATCH_BOUND_LARGE+1)*MATCH_BOUND_LARGE,end)
-            if bounded && match_bound(db.large,row/MATCH_BOUND_LARGE,query,weights)>=cost {row=large_end;continue}
+            if bounded && match_bound(db.large,row/MATCH_BOUND_LARGE,query,weights)>=(least if candidates!=nil else cost) {row=large_end;continue}
             for row<large_end {
                 small_end:=min((row/MATCH_BOUND_SMALL+1)*MATCH_BOUND_SMALL,large_end)
-                if bounded && match_bound(db.small,row/MATCH_BOUND_SMALL,query,weights)>=cost {row=small_end;continue}
+                if bounded && match_bound(db.small,row/MATCH_BOUND_SMALL,query,weights)>=(least if candidates!=nil else cost) {row=small_end;continue}
                 for ;row<small_end;row+=1 {
                     value:=match_cost(db,row,query,weights)
-                    if value>=cost {continue}
+                    if value>=(least if candidates!=nil else cost) {continue}
                     if playing && (whole || match_behind(r,row,near,reach) || match_behind(r,near,row,reach)) {continue}
                     excluded:=false
                     for l in left[:left_count] {if l.range==range && match_behind(r,row,l.row,l.reach) {excluded=true;break}}
-                    if !excluded {best,cost,rate=row,value,scaled}
+                    if excluded {continue}
+                    found,least=row,value
+                    if value<cost {best,cost,rate=row,value,scaled}
                 }
             }
         }
+        if candidates!=nil && found>=0 {match_candidates_add(candidates,{row=i32(found),cost=least,rate=scaled,costs=match_cost_split(db,found,query,weights)})}
     }
     return
+}
+
+// Places a candidate by its cost after those that cost the same; past the last it is dropped.
+@(private)
+match_candidates_add :: proc "contextless" (candidates:^Match_Candidates,candidate:Match_Candidate) {
+    count:=int(clamp(candidates.count,0,MATCH_CANDIDATES))
+    at:=count
+    for item,i in candidates.items[:count] {if candidate.cost<item.cost {at=i;break}}
+    if at>=MATCH_CANDIDATES {return}
+    end:=min(count+1,MATCH_CANDIDATES)
+    for i:=end-1;i>at;i-=1 {candidates.items[i]=candidates.items[i-1]}
+    candidates.items[at]=candidate;candidates.count=i32(end)
 }
 
 // The range a row belongs to.

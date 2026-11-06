@@ -138,7 +138,10 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
 - `animation.inspect` reads an instance by parts (rig with the mirrored pair of each bone, graph,
   modifiers, actions, motion and morphs; `diagnostics` adds solver and fades). A part that does not
   apply answers `{available:false, code, reason}` without failing the call; a graph that does not
-  evaluate gives `Program_Error`.
+  evaluate gives `Program_Error`. In Play or Simulate `entity` names a rig by the handle
+  `play.inspect` gives, the only name of one the game made; in Edit it takes `id`.
+- `animation.inspect` part `Match` lists the clips of the database and the candidates of its last
+  forced search with their costs per feature: why a jump or a start chose its clip is read there.
 - `animation.inspect` part `Pose` (only when asked, with `names`) places bones and sockets in the
   world and in the space of the entity from the pose its rig ended its last tick with: a pose,
   socket or root-motion problem is read as numbers, in a paused Play after `play.step`, instead of

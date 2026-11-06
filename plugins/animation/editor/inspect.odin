@@ -32,7 +32,8 @@ Instance_Parts :: bit_set[Instance_Part]
 INSTANCE_PARTS_DEFAULT :: Instance_Parts{.Rig,.Match,.Modifiers,.Actions,.Motion,.Morphs}
 POSE_NAMES :: 16
 Instance_Inspect_Params :: struct {
-    id:base.Entity_Id,
+    id:base.Entity_Id `mirai:"optional,label=The id of the entity as scene.inspect gives it; give id or entity"`,
+    entity:[16]u8 `mirai:"text,optional,label=Play or Simulate: the handle of an entity of the game as play.inspect gives it in entity, also of one the game made, which has no id"`,
     parts:Instance_Parts `mirai:"optional,label=Omitted is all of them but Pose, which needs names"`,
     names:[POSE_NAMES][aa.NODE_PATH_CAPACITY]u8 `mirai:"text,optional,label=Pose: the bones and sockets to place; a bone by path or name or as a part of the body (@hand_r) and a socket by its name"`,
     offset:u32 `mirai:"optional,label=First bone; rig operation or morph target"`,
@@ -135,15 +136,56 @@ Asset_Window :: struct {
 
 // Each part asked; one the entity lacks holds only available, code and reason.
 Instance_Inspect_Result :: struct {
-    id:base.Entity_Id,
+    id:base.Entity_Id `mirai:"optional"`,
+    entity:[16]u8 `mirai:"text,optional,label=The handle asked"`,
     rig:Instance_Rig `mirai:"optional,label=Clips and bones with their mirror"`,
-    match:Preview_Match_Result `mirai:"optional,label=What the motion matching of its .match plays in Play, Simulation or the preview of the editor"`,
+    match:Instance_Match `mirai:"optional,label=What the motion matching of its .match plays in Play, Simulation or the preview of the editor, the clips it searches and its last search"`,
     modifiers:Instance_Modifiers `mirai:"optional,label=Rig operations and their influence"`,
     actions:Instance_Actions `mirai:"optional"`,
     motion:Instance_Motion `mirai:"optional,label=Warp windows and their targets"`,
     morphs:Instance_Morphs `mirai:"optional,label=Morph targets of the mesh instance"`,
     pose:Instance_Pose `mirai:"optional,label=Where the bones and sockets asked end, from the pose its rig ended its last tick with"`,
 }
+// The fields of Preview_Match_Result, then the clips of the database of its skeleton and the last
+// search matching had to make.
+Instance_Match :: struct {
+    available:bool `mirai:"optional,label=false when the entity plays no .match"`,
+    code:[32]u8 `mirai:"text,optional"`,
+    reason:[256]u8 `mirai:"text,optional"`,
+    clip:[64]u8 `mirai:"text,optional"`,mode:[32]u8 `mirai:"text,optional"`,forced:bool `mirai:"optional"`,
+    time:f32 `mirai:"optional,unit=s"`,rate:f32 `mirai:"optional"`,speed:f32 `mirai:"optional,unit=m/s"`,cost:f32 `mirai:"optional"`,
+    searches,jumps:u32 `mirai:"optional"`,
+    ranges:[1]Instance_Match_Range `mirai:"list,optional,label=Each clip or blended sample of the database, by its index"`,
+    search:Instance_Match_Search `mirai:"optional,label=The last search it had to make: entering a mode, starting, stopping, or leaving a clip that ends"`,
+}
+// clips: of a blended sample, each clip with its share; travel: where it goes in the space of the
+// rig (+Z forward).
+Instance_Match_Range :: struct {
+    clip:[64]u8 `mirai:"text"`,
+    clips:[1]Instance_Match_Member `mirai:"list,optional"`,
+    modes:[1][32]u8 `mirai:"text,list"`,
+    loop,entry:bool,
+    speed:f32 `mirai:"unit=m/s"`,
+    travel:mm.Vec3 `mirai:"unit=m/s"`,
+    duration:f32 `mirai:"unit=s"`,
+}
+Instance_Match_Member :: struct {clip:[64]u8 `mirai:"text"`,weight:f32}
+Instance_Match_Search :: struct {
+    search:u32 `mirai:"label=Which of searches it was"`,
+    mode:[32]u8 `mirai:"text"`,
+    entry:bool `mirai:"label=It searched the starts of the entry clips of mode"`,
+    candidates:[1]Instance_Match_Candidate `mirai:"list,label=The best row of each clip, least cost first: the first is the one it chose"`,
+}
+// costs: of each kind of feature by its weight; they sum cost.
+Instance_Match_Candidate :: struct {
+    range:u32 `mirai:"label=Its index in ranges"`,
+    clip:[64]u8 `mirai:"text"`,
+    time:f32 `mirai:"unit=s,label=Of the row in its clip"`,
+    rate:f32 `mirai:"label=It plays at to follow the trajectory"`,
+    cost:f32,
+    costs:Instance_Match_Costs,
+}
+Instance_Match_Costs :: struct {foot_position,foot_velocity,hip_velocity,body_velocity,trajectory_position,trajectory_direction:f32}
 Instance_Pose :: struct {
     available:bool `mirai:"optional,label=false when the entity lacks the part"`,
     code:[32]u8 `mirai:"text,optional"`,
@@ -311,23 +353,25 @@ asset_inspect :: proc(s:^editor.Session,call:^api.Call) {
 @(private)
 instance_inspect :: proc(s:^editor.Session,call:^api.Call) {
     p:=api.call_params(call,Instance_Inspect_Params)
-    w,e,ok:=subject(s,call,p.id);if !ok {return}
+    handle:=base.text_get(p.entity[:])
+    w,e,ok:=instance_subject(s,call,p.id,handle);if !ok {return}
     parts:=p.parts if authoring_field_present(call,"parts") else INSTANCE_PARTS_DEFAULT
     // Names that do not exist fail the call; a rig without a pose says so in its part.
     query:Pose_Query
     if .Pose in parts {query=pose_query(s,call,w,e,&p.names);if call.failed {return}}
     out:=call.out
     serial.text_write_raw(out,"{");api.write_key(out,"id",true);api.write_id(out,p.id)
+    if handle!="" {api.write_text(out,"entity",fmt.tprintf("%016x",u64(e)))}
     for part in parts {
         api.write_key(out,strings.to_lower(fmt.tprintf("%v",part),call.allocator))
         mark:=out.count
         switch part {
-        case .Rig: inner:=Describe_Params{id=p.id,offset=p.offset,limit=p.limit};inspect_with(s,call,&inner,describe)
+        case .Rig: inner:=Describe_Params{id=p.id,entity=e,offset=p.offset,limit=p.limit};inspect_with(s,call,&inner,describe)
         case .Match: instance_match(s,call,w,e)
-        case .Modifiers: inner:=Modifier_Inspect_Params{id=p.id,offset=p.offset,limit=p.limit,diagnostics=p.diagnostics};inspect_with(s,call,&inner,program_modifier_inspect)
-        case .Actions: inner:=Entity_Params{id=p.id};inspect_with(s,call,&inner,authoring_action_inspect)
-        case .Motion: inner:=Entity_Params{id=p.id};inspect_with(s,call,&inner,authoring_motion_inspect)
-        case .Morphs: inner:=Morph_Inspect_Params{id=p.id,offset=p.offset,limit=p.limit,diagnostics=p.diagnostics};inspect_with(s,call,&inner,morph_inspect)
+        case .Modifiers: inner:=Modifier_Inspect_Params{id=p.id,entity=e,offset=p.offset,limit=p.limit,diagnostics=p.diagnostics};inspect_with(s,call,&inner,program_modifier_inspect)
+        case .Actions: inner:=Entity_Params{id=p.id,entity=e};inspect_with(s,call,&inner,authoring_action_inspect)
+        case .Motion: inner:=Entity_Params{id=p.id,entity=e};inspect_with(s,call,&inner,authoring_motion_inspect)
+        case .Morphs: inner:=Morph_Inspect_Params{id=p.id,entity=e,offset=p.offset,limit=p.limit,diagnostics=p.diagnostics};inspect_with(s,call,&inner,morph_inspect)
         case .Pose: instance_pose(call,w,e,&query)
         }
         // A part the entity lacks says why; the rest stays.
@@ -342,7 +386,25 @@ instance_inspect :: proc(s:^editor.Session,call:^api.Call) {
     serial.text_write_raw(out,"}")
 }
 
-// What the motion matching of an entity plays.
+// The entity animation.inspect names: by its id in the scene, or in Play or Simulate by its handle
+// in the game, which is all those the game made have.
+@(private)
+instance_subject :: proc(s:^editor.Session,call:^api.Call,id:base.Entity_Id,handle:string) -> (w:core.World_Ref,e:core.Entity,ok:bool) {
+    NAMES :: "Give id as scene.inspect gives it or, in Play or Simulate, entity: the handle play.inspect gives in entity"
+    switch {
+    case id!=0 && handle!="": authoring_failure(call,"entity","Ambiguous_Entity","id or entity","both","Give id or entity, not both",fix=NAMES);return
+    case handle=="" && id==0: authoring_failure(call,"id","Missing_Entity","id or entity","neither","Name the entity to inspect",fix=NAMES);return
+    case handle=="": return subject(s,call,id)
+    }
+    if s.mode==.Edit {authoring_failure(call,"entity","Not_Playing","Play or Simulate","Edit","entity is a handle of the game, which runs only in Play or Simulate",fix="In Edit give id as scene.inspect gives it");return}
+    value,parsed:=serial.text_parse_hex(handle)
+    if !parsed || len(handle)!=16 {authoring_failure(call,"entity","Invalid_Handle","the 16 hexadecimal digits play.inspect gives in entity",handle,"entity is not a handle",fix="Give the handle play.inspect gives in entity");return}
+    w,e=editor.shown_world(s),core.Entity(value)
+    if !core.alive(core.world_entities(w),e) {authoring_failure(call,"entity","Missing_Entity","an entity alive in the game",handle,"The entity is not alive in the game",fix="play.inspect lists the entities alive with their handles");return}
+    return w,e,true
+}
+
+// What the motion matching of an entity plays, the clips of its database and its last search.
 @(private)
 instance_match :: proc(s:^editor.Session,call:^api.Call,world:core.World_Ref,entity:core.Entity) {
     value,present:=editor.entity_get(world,entity,anim.Animation)
@@ -350,7 +412,72 @@ instance_match :: proc(s:^editor.Session,call:^api.Call,world:core.World_Ref,ent
     if record,found:=aa.registry_find(&s.app.assets.registry,value.asset);!found || record.kind!=anim.MATCH_KIND {authoring_failure(call,"id","Not_Matching","an Animation.asset that is a .match","another asset" if found else "none","The entity plays no motion matching",fix="Make one with animation.character.setup");return}
     result,matching:=preview_match(world,s.app,entity)
     if !matching {authoring_failure(call,"id","Not_Running","a .match the world plays","not sampled","Matching runs in Play, Simulation, the preview of the editor or animation.preview",api.SERVER_ERROR);return}
-    authoring_write_value(call,&result,type_info_of(Preview_Match_Result))
+    out:=call.out
+    if !authoring_write_value(call,&result,type_info_of(Preview_Match_Result)) || out.count==0 {return}
+    // The object goes on past the fields of Preview_Match_Result.
+    out.count-=1
+    playback:=core.world_storage_of(world,anim.Playback)
+    state:^anim.Playing;for &playing in playback.states {if playing.entity==entity {state=&playing;break}}
+    shared:=core.world_ref(s.app.shared,world.info,.Shared)
+    library:=anim.animation_playing_content(core.world_storage_of(shared,anim.Source_Assets),s.app,state)
+    db:=anim.animation_match_database(core.world_storage_of(shared,anim.Graph_Assets),library,state)
+    modes:=locomotion_modes(world.info)
+    api.write_key(out,"ranges");serial.write_u8(out,'[')
+    if db!=nil {
+        for &r,i in db.ranges {
+            if i>0 {serial.write_u8(out,',')}
+            label:=anim.source_clip_label(library,r.clips[0])
+            serial.text_write_raw(out,"{");api.write_text(out,"clip",base.text_get(label[:]),true)
+            if r.weights!={0=1} {
+                api.write_key(out,"clips");serial.write_u8(out,'[');listed:=0
+                for clip,k in r.clips {
+                    if r.weights[k]<=0 {continue}
+                    if listed>0 {serial.write_u8(out,',')};listed+=1
+                    member:=Instance_Match_Member{clip=anim.source_clip_label(library,clip),weight=r.weights[k]}
+                    authoring_write_value(call,&member,type_info_of(Instance_Match_Member))
+                }
+                serial.write_u8(out,']')
+            }
+            api.write_key(out,"modes");match_modes_write(out,modes,r.modes)
+            api.write_bool(out,"loop",r.loop);api.write_bool(out,"entry",r.entry)
+            api.write_key(out,"speed");api.write_number(out,r.speed)
+            api.write_key(out,"travel");serial.write_u8(out,'[')
+            for axis,k in r.travel {if k>0 {serial.write_u8(out,',')};api.write_number(out,axis)}
+            serial.write_u8(out,']');api.write_key(out,"duration");api.write_number(out,f32(max(r.count-1,0))/db.rate)
+            serial.write_u8(out,'}')
+        }
+    }
+    serial.write_u8(out,']')
+    if db!=nil && state.program.match.searched.search>0 {
+        searched:=&state.program.match.searched
+        name,named:=locomotion_mode_name(modes,searched.mode)
+        api.write_key(out,"search");serial.text_write_raw(out,"{");api.write_uint(out,"search",u64(searched.search),true)
+        api.write_text(out,"mode",name if named else fmt.tprintf("%d",searched.mode));api.write_bool(out,"entry",searched.entry)
+        api.write_key(out,"candidates");serial.write_u8(out,'[');written:=0
+        for &candidate in searched.candidates.items[:clamp(searched.candidates.count,0,lib.MATCH_CANDIDATES)] {
+            range:=lib.match_range_of(db,int(candidate.row));if range<0 {continue}
+            if written>0 {serial.write_u8(out,',')};written+=1
+            r:=db.ranges[range];c:=candidate.costs
+            row:=Instance_Match_Candidate{range=u32(range),clip=anim.source_clip_label(library,r.clips[0]),time=f32(int(candidate.row)-int(r.first))/db.rate,rate=candidate.rate,cost=candidate.cost}
+            row.costs={c[.Foot_Position],c[.Foot_Velocity],c[.Hip_Velocity],c[.Body_Velocity],c[.Trajectory_Position],c[.Trajectory_Direction]}
+            authoring_write_value(call,&row,type_info_of(Instance_Match_Candidate))
+        }
+        serial.text_write_raw(out,"]}")
+    }
+    serial.write_u8(out,'}')
+}
+
+// The names of the locomotion modes of bits, as a list.
+@(private)
+match_modes_write :: proc(out:^serial.Writer,modes:[]core.Name_Info,bits:u32) {
+    serial.write_u8(out,'[');written:=0
+    for bit in u16(0)..<32 {
+        if bits&(u32(1)<<bit)==0 {continue}
+        if written>0 {serial.write_u8(out,',')};written+=1
+        name,named:=locomotion_mode_name(modes,bit)
+        serial.write_u8(out,'"');serial.text_write_raw(out,name if named else fmt.tprintf("%d",bit));serial.write_u8(out,'"')
+    }
+    serial.write_u8(out,']')
 }
 
 // A .match with a page of its clips and the database of each skeleton a rig built.
@@ -368,14 +495,8 @@ match_inspect :: proc(s:^editor.Session,call:^api.Call,id:base.Asset_Id,offset,l
         if i>0 {serial.write_u8(out,',')}
         serial.text_write_raw(out,"{");api.write_text(out,"clip",base.text_get(clip.clip[:]),true)
         if clip.animation!={} {api.write_key(out,"animation");serial.write_u8(out,'"');serial.text_write_asset_id(out,clip.animation);serial.write_u8(out,'"')}
-        api.write_key(out,"modes");serial.write_u8(out,'[');written:=0
-        for bit in u16(0)..<32 {
-            if clip.modes&(u32(1)<<bit)==0 {continue}
-            if written>0 {serial.write_u8(out,',')};written+=1
-            name,named:=locomotion_mode_name(modes,bit)
-            serial.write_u8(out,'"');serial.text_write_raw(out,name if named else fmt.tprintf("%d",bit));serial.write_u8(out,'"')
-        }
-        serial.write_u8(out,']');api.write_bool(out,"loop",clip.loop);api.write_bool(out,"entry",clip.entry)
+        api.write_key(out,"modes");match_modes_write(out,modes,clip.modes)
+        api.write_bool(out,"loop",clip.loop);api.write_bool(out,"entry",clip.entry)
         if clip.speed>0 {api.write_key(out,"speed");api.write_number(out,clip.speed)}
         if names,count:=anim.match_source_clips(&clip);count>1 {
             api.write_key(out,"blend");serial.write_u8(out,'[')

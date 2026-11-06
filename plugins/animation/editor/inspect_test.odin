@@ -87,3 +87,41 @@ inspectors_read_every_definition_kind_and_the_parts_of_an_instance :: proc(t:^te
     for needle in ([]string{`"name": "@hand_r", "kind": "Bone"`,`"world": {"position": [9.3, 1.45, 0]`,`"entity": {"position": [-0.7, 1.45, 0]`,`"name": "baton", "kind": "Socket"`,`"entity": {"position": [0, 1, 0]`}) {testing.expectf(t,strings.contains(text,needle),"pose lacks %s in %s",needle,text)}
     testing.expect_value(t,result_shape_mismatch(Instance_Inspect_Result,text),"")
 }
+
+@(test)
+inspecting_a_rig_the_game_made_names_it_by_its_handle_and_reads_the_last_search_of_its_matching :: proc(t:^testing.T) {
+    f:=new(Pose_Bake_Test);defer free(f);if !pose_bake_test_init(f,t,"inspect-handle") {return};defer pose_bake_test_destroy(f)
+    library:=setup_test_character(f,t)
+    a:=&f.authoring
+    setup_defaults:=Setup_Params{want=SETUP_ALL};instance_defaults:=Instance_Inspect_Params{limit=128}
+    authoring_test_register(a,t,"setup",Setup_Params,setup,&setup_defaults)
+    authoring_test_register(a,t,"instance",Instance_Inspect_Params,instance_inspect,&instance_defaults)
+    test_locomotion_modes(&f.info)
+    result:=authoring_test_execute(a,"setup",fmt.tprintf(`{{"id":"11","library":"%s","folder":"c"}}`,authoring_test_id_text(library)))
+    if !testing.expectf(t,result.code==0,"%s %s",result.message,result.data) {return}
+    // Without its id the rig is as one the game made: only its handle names it.
+    core.remove(&f.world.ids,f.rig);pose_bake_test_settle(&f.world,nil,nil)
+    handle:=fmt.tprintf("%016x",u64(f.rig))
+    Refusal :: struct {request,code,fix:string}
+    refused :: proc(t:^testing.T,a:^Authoring_Test,cases:[]Refusal,loc:=#caller_location) {
+        for c in cases {
+            result:=authoring_test_execute(a,"instance",c.request)
+            testing.expectf(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,c.code) && strings.contains(result.data,c.fix),"%s: %s %s",c.request,result.message,result.data,loc=loc)
+        }
+    }
+    refused(t,a,{{fmt.tprintf(`{{"entity":"%s"}}`,handle),"Not_Playing","scene.inspect"},{`{"id":"11"}`,"Missing_Entity","scene.inspect"},{`{}`,"Missing_Entity","play.inspect"}})
+    a.session.mode=.Play
+    world:=core.world_ref(&f.world,&f.info)
+    for _ in 0..<6 {
+        testing.expect(t,anim.match_goal(&f.world.requests,{rig=f.rig,mode=1,velocity={0,0,1},desired={0,0,1},facing={0,0,1},acceleration=10,braking=10}))
+        testing.expect(t,anim.animation_evaluate(world,&a.app,1.0/60))
+    }
+    refused(t,a,{{`{"id":"11"}`,"Missing_Entity","handle in entity"},{`{"entity":"0000000000000001"}`,"Missing_Entity","play.inspect"},{`{"entity":"rig"}`,"Invalid_Handle","play.inspect"},{fmt.tprintf(`{{"id":"11","entity":"%s"}}`,handle),"Ambiguous_Entity","play.inspect"}})
+    result=authoring_test_execute(a,"instance",fmt.tprintf(`{{"entity":"%s","parts":["Rig","Match"]}}`,handle))
+    if !testing.expectf(t,result.code==0,"%s %s",result.message,result.data) {return}
+    text:=string(serial_bytes(a))
+    for needle in ([]string{fmt.tprintf(`"entity":"%s"`,handle),`"rig":{"clips"`,`"match":{"available": true`,`"ranges":[{"clip":"Idle"`,`"modes":["WALKING"]`,`"travel":[`,`"search":{"search":1,"mode":"WALKING","entry":false,"candidates":[{"range": `,`"costs": {"foot_position": `}) {
+        testing.expectf(t,strings.contains(text,needle),"inspect lacks %s in %s",needle,text)
+    }
+    testing.expect_value(t,result_shape_mismatch(Instance_Inspect_Result,text),"")
+}

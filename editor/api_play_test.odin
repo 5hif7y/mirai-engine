@@ -19,7 +19,7 @@ import "mirai:std/serial"
 
 @(private="file") Probe_Health :: struct {points:f32,target:core.Entity}
 @(private="file") Probe_State :: enum u8 {Waiting,Playing,Won}
-@(private="file") Probe_Score :: struct {points:int,state:Probe_State}
+@(private="file") Probe_Score :: struct {points:int,state:Probe_State,seen:core.Seen}
 @(private="file") Probe_Ping :: struct {entity:core.Entity,amount:int}
 @(private="file") Probe_Pings :: struct {queue:core.Queue(Probe_Ping)}
 @(private="file") PROBE_MOVE :: input.Action(0)
@@ -615,6 +615,8 @@ verify_says_the_first_tick_and_field_where_playing_the_past_again_differs :: pro
         w:=cast(^Probe_World)data
         ran:=(cast(^host.App)app).stats.ticks
         if w.time.tick==6 {w.score.points+=int(ran)}
+        // A change cursor, which reads otherwise in a World restored from a copy, is no difference.
+        if w.time.tick==3 {w.score.seen.gone=u64(ran)}
         if w.time.tick==10 {w.transforms.values[0].position.x+=f32(ran)}
     }
     testing.expect(t,probe_steps(f,1))

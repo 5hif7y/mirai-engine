@@ -1,5 +1,6 @@
 package editor
 
+import "base:runtime"
 import "core:encoding/json"
 import "core:fmt"
 import "core:mem"
@@ -287,11 +288,14 @@ api_history_differs :: proc(s:^Session,recorded,replayed:core.World_Ref,out:^Api
         }
     }
     omitted:=serial.Field_Flags{.Transient,.Hidden}
+    value:=make([]u8,max(st.largest,1),context.temp_allocator)
     for &info,i in s.info.storages {
         if info.place!=.World || st.storage_types[i]==serial.TYPE_NONE {continue}
         serial.writer_reset(&a);serial.writer_reset(&b)
         for side in ([2]struct{w:core.World_Ref,doc:^serial.Writer}{{recorded,&a},{replayed,&b}}) {
-            api_value_out(side.w,info.info,rawptr(uintptr(side.w.data)+info.offset),scratch,handles=true)
+            at:=rawptr(uintptr(side.w.data)+info.offset)
+            if info.info.size<=len(value) {mem.copy(raw_data(value),at,info.info.size);api_history_cursors_clear(info.info,raw_data(value));at=raw_data(value)}
+            api_value_out(side.w,info.info,at,scratch,handles=true)
             serial.text_write(side.doc,&st.schema,st.storage_types[i],scratch[:info.info.size],.Line,omit_fields=omitted)
         }
         if slice.equal(serial.writer_bytes(&a),serial.writer_bytes(&b)) {continue}
@@ -300,6 +304,20 @@ api_history_differs :: proc(s:^Session,recorded,replayed:core.World_Ref,out:^Api
         return true
     }
     return false
+}
+
+// Zeroes the change cursors (core.Seen) inside a value: where a reader was in a table depends on
+// the versions of the copy of the World it was restored from, not on what the game did.
+@(private)
+api_history_cursors_clear :: proc(info:^runtime.Type_Info,data:rawptr) {
+    if info==nil {return}
+    if info.id==core.Seen {mem.zero(data,size_of(core.Seen));return}
+    #partial switch v in runtime.type_info_base(info).variant {
+    case runtime.Type_Info_Struct:
+        for k in 0..<int(v.field_count) {api_history_cursors_clear(v.types[k],rawptr(uintptr(data)+v.offsets[k]))}
+    case runtime.Type_Info_Array:
+        for k in 0..<v.count {api_history_cursors_clear(v.elem,rawptr(uintptr(data)+uintptr(k*v.elem_size)))}
+    }
 }
 
 // Whether two tables hold the same rows with the same bytes, for a type

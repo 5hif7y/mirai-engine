@@ -331,7 +331,7 @@ hostile_strokes_do_not_crash :: proc(t:^testing.T) {
     cases:=[]Case{
         {"empty",{},0.1,.Invalid},
         {"a segment",square[:2],0.1,.Invalid},
-        {"not convex",arrow,0.1,.Invalid},
+        {"concave",arrow,0.1,.None},
         {"winds twice",twice[:],0.1,.Invalid},
         {"a star",pentagram[:],0.1,.Invalid},
         {"not finite",{{0,0},{nan,0},{0,1}},0.1,.Invalid},
@@ -420,4 +420,26 @@ bench_stroke_combine :: proc(t:^testing.T) {
         fmt.printfln("BENCH %-44s %.3f ms  %d runs, area of %d points",
             "stroke_to and combine, 300-point shape",time.duration_milliseconds(total)/f64(max(runs,1)),runs,len(points))
     }
+}
+
+// A concave brush sweeps as its convex pieces: dragging a star to the right
+// leaves the dent on its left open, which the hull of the whole star fills.
+@(test)
+a_concave_brush_keeps_its_dents_while_it_is_dragged :: proc(t:^testing.T) {
+    defer free_all(context.temp_allocator)
+    st:Shape_Stroke
+    testing.expect_value(t,shape_stroke_begin(&st,brush_of(.Star,1),0.01),Shape_Error.None)
+    defer shape_stroke_destroy(&st)
+    for i in 0..=20 {shape_stroke_to(&st,{f32(i)*0.1,0})}
+    points,loops:=shape_stroke_area(&st)
+    testing.expect_value(t,len(loops),1)
+    a:=2*math.PI*198/360
+    dent:=geom.Vec2{f32(0.7*math.cos(a)),f32(0.7*math.sin(a))}
+    testing.expect(t,!loop_contains(points[:loops[0]],dent),"the dent left of the start stays open")
+    testing.expect(t,loop_contains(points[:loops[0]],{1,0}),"the path is covered")
+    testing.expect(t,loop_contains(points[:loops[0]],{2,0.9}),"the top arm reaches up at the end")
+    // A brush that crosses itself has no inside: refused.
+    bow:=[]geom.Vec2{{-1,-1},{1,1},{1,-1},{-1,1}}
+    crossed:Shape_Stroke
+    testing.expect_value(t,shape_stroke_begin(&crossed,bow,0.01),Shape_Error.Invalid)
 }

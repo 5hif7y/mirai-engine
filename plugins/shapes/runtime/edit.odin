@@ -15,24 +15,85 @@ import mm "mirai:std/math"
 
 STAMP_CIRCLE_POINTS :: 32
 
-// A stamp as a counter-clockwise loop into out, which it clears first. size:
-// half the width of the square, the radius of the circle and of the circle
-// around the triangle. angle: radians around center.
+// A stamp as a simple counter-clockwise loop into out, which it clears first.
+// size: half the width of the square and the radius of the circle; every other
+// stamp reaches about as far from center. angle: radians around center. The
+// star, the hexagram, the cross, the arrow and the heart are concave.
 stamp_points :: proc(kind:Stamp_Kind,center:[2]f32,size,angle:f32,out:^[dynamic]geom.Vec2) {
     clear(out)
-    count:int
-    first:f64
+    // A regular polygon of count corners, the first at turn first of a circle, or a star whose
+    // corners between those are at inner of the radius.
+    ring :: proc(out:^[dynamic]geom.Vec2,count:int,first:f64,radius:f64=1,inner:f64=0) {
+        steps:=count if inner==0 else 2*count
+        for i in 0..<steps {
+            a:=2*math.PI*(first+f64(i)/f64(steps))
+            r:=radius if inner==0 || i%2==0 else inner
+            append(out,geom.Vec2{f32(r*math.cos(a)),f32(r*math.sin(a))})
+        }
+    }
+    corners :: proc(out:^[dynamic]geom.Vec2,points:[]geom.Vec2) {append(out,..points)}
     switch kind {
-    case .Square:   count,first=4,0.125
-    case .Circle:   count,first=STAMP_CIRCLE_POINTS,0
-    case .Triangle: count,first=3,0.25
+    case .Square:         ring(out,4,0.125,math.SQRT_TWO)
+    case .Circle:         ring(out,STAMP_CIRCLE_POINTS,0)
+    case .Triangle:       ring(out,3,0.25)
+    case .Pentagon:       ring(out,5,0.25)
+    case .Hexagon:        ring(out,6,0)
+    case .Octagon:        ring(out,8,1.0/16)
+    case .Star:           ring(out,5,0.25,1,0.42)
+    case .Hexagram:       ring(out,6,0.25,1,1/math.SQRT_THREE)
+    case .Right_Triangle: corners(out,{{-1,-1},{1,-1},{-1,1}})
+    case .Cross:
+        w:=f32(0.32)
+        plus:=[12]geom.Vec2{{w,-1},{w,-w},{1,-w},{1,w},{w,w},{w,1},{-w,1},{-w,w},{-1,w},{-1,-w},{-w,-w},{-w,-1}}
+        turn:=math.PI/4
+        for p in plus {
+            c,s:=f32(math.cos(turn)),f32(math.sin(turn))
+            append(out,geom.Vec2{p.x*c-p.y*s,p.x*s+p.y*c})
+        }
+    case .Arrow:
+        corners(out,{{0,1},{-0.75,0.1},{-0.3,0.1},{-0.3,-1},{0.3,-1},{0.3,0.1},{0.75,0.1}})
+    case .Half_Disc:
+        for i in 0..=STAMP_CIRCLE_POINTS/2 {
+            a:=math.PI*f64(i)/f64(STAMP_CIRCLE_POINTS/2)
+            append(out,geom.Vec2{f32(math.cos(a)),f32(math.sin(a))-0.5})
+        }
+    case .Ellipse:
+        for i in 0..<STAMP_CIRCLE_POINTS {
+            a:=2*math.PI*f64(i)/f64(STAMP_CIRCLE_POINTS)
+            append(out,geom.Vec2{f32(math.cos(a)),f32(0.6*math.sin(a))})
+        }
+    case .Lens:
+        // Two arcs of a circle of radius 1.25 that meet at x = -1 and 1.
+        half:=STAMP_CIRCLE_POINTS/2
+        for side in ([2]f64{-1,1}) {
+            for i in 0..<half {
+                x:=side*(1-2*f64(i)/f64(half))
+                append(out,geom.Vec2{f32(x),f32(side*(math.sqrt(1.5625-x*x)-0.75))})
+            }
+        }
+    case .Drop:
+        // A circle under a point at the top, the two joined by the tangents from the point.
+        c,r,tip:=-0.35,0.62,1.0
+        turn:=math.acos(r/(tip-c))
+        append(out,geom.Vec2{0,f32(tip)})
+        steps:=STAMP_CIRCLE_POINTS
+        for i in 0..=steps {
+            a:=math.PI/2+turn+(2*math.PI-2*turn)*f64(i)/f64(steps)
+            append(out,geom.Vec2{f32(r*math.cos(a)),f32(c+r*math.sin(a))})
+        }
+    case .Heart:
+        // The heart curve of 16 sin^3 t and 13 cos t - 5 cos 2t - 2 cos 3t - cos 4t, over 17.
+        steps:=2*STAMP_CIRCLE_POINTS
+        for i in 0..<steps {
+            t:=-2*math.PI*f64(i)/f64(steps)
+            s:=math.sin(t)
+            x:=16*s*s*s
+            y:=13*math.cos(t)-5*math.cos(2*t)-2*math.cos(3*t)-math.cos(4*t)
+            append(out,geom.Vec2{f32(x/17),f32((y+2.5)/17)})
+        }
     }
-    radius:=f64(size)
-    if kind==.Square {radius*=math.SQRT_TWO}
-    for i in 0..<count {
-        a:=f64(angle)+2*math.PI*(first+f64(i)/f64(count))
-        append(out,geom.Vec2{center.x+f32(radius*math.cos(a)),center.y+f32(radius*math.sin(a))})
-    }
+    c,s:=f32(math.cos(f64(angle))),f32(math.sin(f64(angle)))
+    for &p in out {p={center.x+size*(p.x*c-p.y*s),center.y+size*(p.x*s+p.y*c)}}
 }
 
 // The points of the loops one after another and the size of each, the

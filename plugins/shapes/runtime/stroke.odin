@@ -4,7 +4,7 @@ import "core:math"
 import "core:slice"
 import "mirai:std/geom"
 
-// A drag of a convex brush as one area: the brush swept along the path of
+// A drag of a brush as one area: the brush swept along the path of
 // the pointer once it is simplified. Shape_Edit keeps each shape the stroke
 // may change as it was given and combines that copy with the whole area each
 // time it changes (shape_combine), so a shape never
@@ -19,14 +19,16 @@ import "mirai:std/geom"
 // screen into the tolerance at the current zoom, so the shake of a hand goes
 // where it happens.
 //
-// The area is the union of the convex hulls of the brush at both ends of each
-// segment, which is exact for a convex brush moved without turning, or the
-// brush alone for one point. The segments up to the last corner are kept
-// united; each point that is kept recomputes only the last segment, with two
-// booleans at most.
+// The area is the union of the convex hulls of each convex piece of the brush
+// at both ends of each segment, which is exact for a brush moved without
+// turning, or the brush alone for one point. The segments up to the last
+// corner are kept united; each point that is kept recomputes only the last
+// segment, with a boolean per piece of the brush.
 
 Shape_Stroke :: struct {
-    brush:[dynamic]geom.Vec2, // convex, counter-clockwise, around 0
+    brush:[dynamic]geom.Vec2, // a simple loop, counter-clockwise, around 0
+    pieces:[dynamic]geom.Vec2,// the convex pieces of the brush one after another
+    piece_sizes:[dynamic]int,
     tolerance:f64,
     started:bool,
     corner:geom.Vec2,         // the last corner of the path: the start of the last segment
@@ -36,42 +38,55 @@ Shape_Stroke :: struct {
     reach:f64,                // the farthest of those points from the corner
     closed:geom.Polygon_Set,  // the segments up to the corner, one polygon
     area:geom.Polygon_Set,    // closed and the last segment, one polygon
-    scratch,next:geom.Polygon_Set,
+    scratch,next,swept:geom.Polygon_Set, // swept: between the booleans of the pieces
     hull,ends:[dynamic]geom.Vec2,
 }
 
-// Starts a stroke of a brush: a convex loop around 0 in the units of the
-// plane, turned counter-clockwise when it is not. tolerance: in the same
-// units, at least 0. Invalid for a brush that is not convex, has no area or
-// a point that is not finite, and for a tolerance that is not finite.
+// Starts a stroke of a brush: a simple loop around 0 in the units of the
+// plane, turned counter-clockwise when it is not; a concave one is swept as
+// its convex pieces. tolerance: in the same units, at least 0. Invalid for a
+// brush that crosses itself, has no area or a point that is not finite, and
+// for a tolerance that is not finite.
 shape_stroke_begin :: proc(st:^Shape_Stroke,brush:[]geom.Vec2,tolerance:f32,allocator:=context.allocator) -> Shape_Error {
     shape_stroke_destroy(st)
     if len(brush)<3 || !(tolerance>=0) || !(f64(tolerance)<math.F32_MAX) {return .Invalid}
     for p in brush {if !finite2(p) {return .Invalid}}
     st.brush=make([dynamic]geom.Vec2,allocator)
+    st.pieces=make([dynamic]geom.Vec2,allocator)
+    st.piece_sizes=make([dynamic]int,allocator)
     st.hull=make([dynamic]geom.Vec2,allocator)
     st.ends=make([dynamic]geom.Vec2,allocator)
     geom.polygon_set_init(&st.closed,allocator)
     geom.polygon_set_init(&st.area,allocator)
     geom.polygon_set_init(&st.scratch,allocator)
+    geom.polygon_set_init(&st.swept,allocator)
     geom.polygon_set_init(&st.next,allocator)
-    append(&st.ends,..brush)
-    hull_of(st.ends[:],&st.brush)
-    // A convex loop covers its hull: a dent or a loop that winds twice does not.
-    hull_area,area:=loop_area(st.brush[:]),abs(loop_area(brush))
-    if len(st.brush)<3 || !(hull_area>0) || abs(hull_area-area)>1e-5*hull_area || !loop_turns_once(brush) {
+    append(&st.brush,..brush)
+    area:=loop_area(st.brush[:])
+    if area<0 {slice.reverse(st.brush[:])}
+    if !(abs(area)>0) || !loop_simple(st.brush[:]) {
         shape_stroke_destroy(st)
         return .Invalid
     }
+    indices:=make([dynamic]u32,context.temp_allocator)
+    sizes:=make([dynamic]u32,context.temp_allocator)
+    loops:=[1]int{len(st.brush)}
+    if geom.polygon_convex_partition(st.brush[:],loops[:],&indices,&sizes)<=0 {
+        shape_stroke_destroy(st)
+        return .Invalid
+    }
+    for i in indices {append(&st.pieces,st.brush[i])}
+    for size in sizes {append(&st.piece_sizes,int(size))}
     st.tolerance=f64(tolerance)
     return .None
 }
 
 shape_stroke_destroy :: proc(st:^Shape_Stroke) {
-    delete(st.brush);delete(st.hull);delete(st.ends)
+    delete(st.brush);delete(st.pieces);delete(st.piece_sizes);delete(st.hull);delete(st.ends)
     geom.polygon_set_destroy(&st.closed)
     geom.polygon_set_destroy(&st.area)
     geom.polygon_set_destroy(&st.scratch)
+    geom.polygon_set_destroy(&st.swept)
     geom.polygon_set_destroy(&st.next)
     st^={}
 }
@@ -162,17 +177,26 @@ stroke_area :: proc(st:^Shape_Stroke,base:^geom.Polygon_Set,a,b:geom.Vec2) -> bo
     return true
 }
 
-// out, another set than base, becomes base, one polygon, and the hull of the
-// brush at a and at b.
+// out, another set than base, becomes base, one polygon, and the hull of each
+// convex piece of the brush at a and at b.
 @(private)
 sweep_union :: proc(st:^Shape_Stroke,base:^geom.Polygon_Set,a,b:geom.Vec2,out:^geom.Polygon_Set) -> bool {
-    clear(&st.ends)
-    for p in st.brush {append(&st.ends,p+a,p+b)}
-    hull_of(st.ends[:],&st.hull)
-    if len(st.hull)<3 {return false}
-    hull_loops:=[1]int{len(st.hull)}
-    if geom.polygon_boolean(base.points[:],base.loop_sizes[:],st.hull[:],hull_loops[:],.Union,out)!=.None {return false}
-    return len(out.polygon_loops)==1
+    from:=base
+    at:=0
+    for size,i in st.piece_sizes {
+        clear(&st.ends)
+        for p in st.pieces[at:at+size] {append(&st.ends,p+a,p+b)}
+        at+=size
+        hull_of(st.ends[:],&st.hull)
+        if len(st.hull)<3 {return false}
+        hull_loops:=[1]int{len(st.hull)}
+        // The pieces go back and forth between out and swept and end in out.
+        into:=out if (len(st.piece_sizes)-1-i)%2==0 else &st.swept
+        if into==from {return false}
+        if geom.polygon_boolean(from.points[:],from.loop_sizes[:],st.hull[:],hull_loops[:],.Union,into)!=.None {return false}
+        from=into
+    }
+    return from==out && len(out.polygon_loops)==1
 }
 
 @(private)
@@ -202,27 +226,17 @@ hull_of :: proc(points:[]geom.Vec2,out:^[dynamic]geom.Vec2) {
     if len(out)>1 {pop(out)}
 }
 
-// Whether the edges of a loop, repeated points left out, turn all one way
-// and once around.
+// Whether no two edges of a loop that are not neighbors meet.
 @(private)
-loop_turns_once :: proc(points:[]geom.Vec2) -> bool {
+loop_simple :: proc "contextless" (points:[]geom.Vec2) -> bool {
     n:=len(points)
-    total,sign:f64
-    previous:DVec2
-    first:=true
-    for i in 0..=n {
-        a,b:=dvec(points[i%n]),dvec(points[(i+1)%n])
-        u:=b-a
-        if u.x==0 && u.y==0 {continue}
-        if !first {
-            cross:=previous.x*u.y-previous.y*u.x
-            if cross!=0 {
-                if sign!=0 && (cross>0)!=(sign>0) {return false}
-                sign=cross
-            }
-            total+=math.atan2(cross,previous.x*u.x+previous.y*u.y)
+    if n<3 {return false}
+    for i in 0..<n {
+        a,b:=dvec(points[i]),dvec(points[(i+1)%n])
+        for j in i+2..<n {
+            if i==0 && j==n-1 {continue}
+            if segments_meet(a,b,dvec(points[j]),dvec(points[(j+1)%n])) {return false}
         }
-        previous,first=u,false
     }
-    return abs(abs(total)-2*math.PI)<1e-3
+    return true
 }

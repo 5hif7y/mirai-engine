@@ -61,7 +61,10 @@ SHAPE_DEFAULT :: Shape{
 @(component,description="The derived child that draws and collides the Shape of its parent: made again from that source, never saved.")
 Shape_Part :: struct {}
 
-Stamp_Kind :: enum u8 {Square,Circle,Triangle}
+Stamp_Kind :: enum u8 {
+    Square,Circle,Triangle,Arrow,Cross,Hexagon,Hexagram,Pentagon,Octagon,Star,Right_Triangle,
+    Half_Disc,Ellipse,Lens,Drop,Heart,
+}
 
 Shape_Error :: enum u8 {
     None,

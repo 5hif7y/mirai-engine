@@ -8,7 +8,9 @@ import "core:os"
 import "core:path/filepath"
 import "core:reflect"
 import "core:strings"
+import "mirai:asset"
 import "mirai:rhi"
+import "mirai:std/compressor"
 
 // A generation of the shaders loaded from disk; owned: its codes are memory of allocator.
 Shader_Assets :: struct {
@@ -33,6 +35,41 @@ shader_assets_destroy :: proc(assets:^Shader_Assets) {
         delete(assets.catalog,assets.allocator)
     }
     assets^={}
+}
+
+// A stage the executable embeds. Its code is size bytes of what
+// SHADERS_PACKED decodes to, after those of the stages before it in SHADERS
+// and then in PROGRAM_SHADERS.
+Embedded_Shader :: struct {
+    using code:rhi.Shader_Code, // without its code
+    size:int,
+}
+
+// Decodes the code the executable embeds into bytes, which the stages it fills
+// in codes (SHADERS) and programs (PROGRAM_SHADERS) point into. It allocates
+// bytes alone, and nothing when it fails.
+embedded_shaders_decode :: proc(codes:^[Shader_Id]rhi.Shader_Code,programs:^[len(PROGRAM_SHADERS)]rhi.Shader_Code,allocator:=context.allocator)->(bytes:[]u8,error:string) {
+    total:=0
+    for shader in SHADERS {total+=shader.size}
+    for shader in PROGRAM_SHADERS {total+=shader.size}
+    if total>0 {
+        allocation_error:runtime.Allocator_Error
+        if bytes,allocation_error=make([]u8,total,allocator);allocation_error!=nil {return nil,"out of memory for the embedded shaders"}
+        decoder:compressor.Decoder
+        if compressor.decoder_init(&decoder,allocator)!=.None {delete(bytes,allocator);return nil,"out of memory for the embedded shaders"}
+        unpack_error:=asset.unpack(&decoder,SHADERS_PACKED,bytes)
+        compressor.decoder_destroy(&decoder)
+        if unpack_error!=.None {delete(bytes,allocator);return nil,"the embedded shaders do not decode: build the engine again"}
+    }
+    at:=0
+    place :: proc(code:^rhi.Shader_Code,shader:Embedded_Shader,bytes:[]u8,at:^int) {
+        code^=shader.code
+        when ODIN_OS==.Darwin {code.msl=string(bytes[at^:][:shader.size])} else {code.spirv=bytes[at^:][:shader.size]}
+        at^+=shader.size
+    }
+    for &code,id in codes^ {place(&code,SHADERS[id],bytes,&at)}
+    for &code,i in programs^ {place(&code,PROGRAM_SHADERS[i],bytes,&at)}
+    return
 }
 
 FRAME_EXTENSION_CAPACITY :: 8
@@ -103,7 +140,7 @@ extension_shader :: proc(r:^Renderer,name:string) -> ^rhi.Shader_Code {
 @(private)
 program_shader :: proc(r:^Renderer,name:string) -> ^rhi.Shader_Code {
     if !r.shader_assets.owned {
-        for &code in PROGRAM_SHADERS {if code.name==name {return &code}}
+        for &code in r.embedded_programs {if code.name==name {return &code}}
         return nil
     }
     for &code in r.shader_assets.programs {if code.name==name {return &code}}

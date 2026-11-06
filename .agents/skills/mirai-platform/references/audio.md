@@ -28,7 +28,11 @@ game thread), with no shared locks:
 ## Sounds
 
 Interleaved f32 PCM, mono or stereo, at its own sample rate. `sound_create` copies the samples and
-`sound_load` decodes a WAV or an Ogg Vorbis whole, told apart by their first bytes.
+`sound_load` decodes a WAV, an Ogg Vorbis or a lossless file whole, told apart by their first bytes.
+
+- **Lossless** (`lossless.odin`, written by `lossless_encode`): 16 bit samples coded as FLAC codes
+  them, in blocks that decode on their own, each indexed so that a stream starts at any frame.
+  Decoding gives the same f32 as a 16-bit WAV of the same samples.
 
 - `sound_stream` decodes while playing and does not copy the file: it must stay in memory until
   the sound is destroyed and a later `mixer_update` frees it.
@@ -48,8 +52,9 @@ thread reads, without waits: `mixer_update` must be called more often than the r
   `mixer_update` sees the voice finish, and then it starts from the beginning.
 - If the ring empties the voice goes silent (`stream_underruns`) and resumes when there is data.
 - `voice_set_loop(false)` applies at the next end of file that has not been decoded yet.
-- Its pitch has a cap of source frames per output frame, `offset` does not apply and its voice is
-  not stolen.
+- `offset` seeks the decoder before the ring fills; a loop starts over from the beginning.
+- A lossless stream decodes one block at a time into memory taken when the stream opens.
+- Its pitch has a cap of source frames per output frame and its voice is not stolen.
 
 ## Voices
 

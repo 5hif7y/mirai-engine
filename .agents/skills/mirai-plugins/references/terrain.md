@@ -87,8 +87,15 @@ whose limits `source.odin` validates.
   `PAGE` samples per side over X/Z; Volume distances and weights in blocks of `BLOCK` samples per
   side in X/Y/Z. Every page has `PAGE_VALUES` values, so reading, copying, releasing and the format
   are one for both shapes. A `<grid>_pages` table gives per page a fill value or the place, size
-  and XXH3 hash of its LZ4 block in `<grid>_blocks`, stored uncompressed: each page is read alone,
+  and XXH3 hash of its LZ block in `<grid>_blocks`, stored uncompressed: each page is read alone,
   by file range ([residency](#jobs-publishing-and-residency)).
+- **Page coding** (`page_code.odin`): before LZ a page goes in byte planes, or, f32 values on
+  multiples of `HEIGHT_STEP`, as the zigzag distance in steps from the plane of each sample's
+  neighbors left, above and above-left, in byte planes. Saving puts heights on that lattice, at
+  most half a step away; a height read from a file is saved again as it is, so edits and saves do
+  not drift. Memory keeps what the brushes wrote: a page that leaves memory and the pages the
+  network sends keep every value bit for bit. One coding serves the file, those blocks and the
+  network.
 - **A single-value page stores no values**, in memory, in the file or in copies: an all-air or
   all-solid block past the band. It takes values of its own when a brush or an import writes it,
   and a Volume brush leaves without values the blocks that it leaves with a single value
@@ -420,7 +427,7 @@ Preview and confirmation:
   outside the history) and only afterwards publishes the step, the revisions and the removal of the
   operand in the undo step. If building or writing fails, the head goes back to what it was and
   scene, confirmed file and history, including redo, remain.
-- The head stores the LZ4 block of each page it wrote with the hash of its values
+- The head stores the LZ block of each page it wrote with the hash of its values
   (`source_bytes(...,keep=true)`): writing the file again only compresses the pages that changed.
 - The undo step stores the owners' revisions, not the file. `terrain_sync` takes the head to the
   revision restored by the steps and writes it in memory; if it is what the disk has, it stops
@@ -569,7 +576,7 @@ other; authority, prediction and rollback for the rest belong to the
 - **No bit-for-bit equality.** A different check (another order, another architecture), a
   prediction that was rejected or never came back asks for the parts of that region
   (`Net_Terrain_Resync`): the pages of its grids and the sections of a Mesh. The server sends them
-  whole, LZ4 and in chunks, with a byte budget per tick that a long part spreads over ticks, and
+  whole, in LZ and in chunks, with a byte budget per tick that a long part spreads over ticks, and
   the client writes each one in the place of the order where it started arriving: what follows
   waits for it.
 - **A source knows where it came from:** `Source.origin` is the hash of the contents of the file it
@@ -683,7 +690,7 @@ Residency by distance:
   `asset_load_front`) leaves its pages in the file and reads them in jobs, by range, when a
   resident chunk needs them with the halo that its construction and its collider read
   (`chunk_pages_region`; in Volume, the gradients of its coarsest level); it releases them when
-  none reads them and no job reads the source. A page with edits is first stored in an LZ4 block of
+  none reads them and no job reads the source. A page with edits is first stored in an LZ block of
   its own and comes back with them: unloading and reloading a dug zone keeps the changes. A node
   whose border reads samples waits for the pages of that border. A Volume's weights come and go
   with its distances, block by block.
@@ -767,6 +774,9 @@ physics, saving, stability and world copy.
   `a_volume_read_by_pages_holds_only_the_blocks_it_reads_and_a_block_that_leaves_keeps_its_edits`
   and `volume_snapshots_hold_only_their_blocks_and_give_back_each_stroke`.
   `bench_terrain_volume_memory` (`-define:TERRAIN_BENCH=true`).
+- Page coding (`page_code_test.odin`):
+  `coded_pages_keep_heights_within_half_a_step_and_other_values_exactly` and
+  `saved_heights_stay_where_the_file_put_them_through_edits_and_saves`.
 - Join (`join_test.odin`):
   `a_joined_volume_meets_the_ground_on_the_sides_of_its_box_without_a_seam` and
   `a_volume_that_joins_a_heightfield_takes_its_cells_and_digs_under_them`.

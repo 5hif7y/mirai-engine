@@ -486,6 +486,16 @@ generation_is_current_until_a_source_a_folder_the_request_or_an_output_changes :
     fewer.workers=1
     testing.expect(t,current(fewer))
     testing.expect(t,regenerate(t,&mini,fewer).current)
+    // Asked to ship, only the code render embeds is encoded again; that serves every request.
+    ship:=mini.options
+    ship.ship=true
+    table:=mini_read(&mini,"render/shaders_gen.odin")
+    testing.expect(t,!current(ship),"the embedded code was encoded fast")
+    shipped:=regenerate(t,&mini,ship)
+    testing.expect(t,!shipped.current && shipped.compiled==0 && shipped.reused==6)
+    testing.expect(t,current(ship) && current(mini.options))
+    testing.expect(t,regenerate(t,&mini,mini.options).current)
+    testing.expect(t,mini_read(&mini,"render/shaders_gen.odin")==table,"the table is the same however its code was encoded")
 
     // A file that takes the place of an include it was looked for at first.
     fixture_write(t,mini.root,"shaders/tint.slang","#define TINT float4(0,0,0,1)\n")

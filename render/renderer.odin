@@ -509,6 +509,8 @@ Renderer :: struct {
 	pipelines:       [Pipeline_Id]rhi.Pipeline,
 	shader_codes:    [Shader_Id]rhi.Shader_Code,
 	shader_assets:   Shader_Assets,
+	embedded:        []u8, // the code of the shaders the executable embeds, decoded when it runs them
+	embedded_programs:[len(PROGRAM_SHADERS)]rhi.Shader_Code, // PROGRAM_SHADERS with their code in embedded
 	postprocesses:   Postprocess_List, // of the views that are no local view (Camera.slot 0)
 	view_postprocesses:[VIEW_CAPACITY]Postprocess_List, // of each local view, by Camera.slot - 1
 	programs:        Program_Catalog, // of the shaders in use, read when first asked for
@@ -634,8 +636,13 @@ renderer_init :: proc(r: ^Renderer, desc: Renderer_Desc) -> bool {
 	r.scene.pages.jobs = desc.jobs
 	if desc.pipeline_thread {pipeline_thread_start(r)}
 	r.textures.residency.streams = make([]Texture_Stream, TEXTURE_CAPACITY, r.allocator)
-	r.shader_codes=SHADERS
-	if assets!=nil && assets.owned {r.shader_assets=assets^;r.shader_codes=assets.codes;assets^={}}
+	if assets!=nil && assets.owned {
+		r.shader_assets=assets^;r.shader_codes=assets.codes;assets^={}
+	} else {
+		embedded,problem:=embedded_shaders_decode(&r.shader_codes,&r.embedded_programs,r.allocator)
+		if problem!="" {set_error(r,"%s",problem);return false}
+		r.embedded=embedded
+	}
 	info := rhi.device_info(device)
 	if s, ok := settings.?; ok {r.settings = s} else {r.settings = CPU_DEVICE_SETTINGS if info.type == .CPU else DEFAULT_SETTINGS}
 	r.highlight = DEFAULT_HIGHLIGHT_STYLE
@@ -734,6 +741,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.material_sampler != 0 {rhi.sampler_destroy(d, r.material_sampler)}
 	program_catalog_destroy(&r.programs)
 	shader_assets_destroy(&r.shader_assets)
+	delete(r.embedded,r.allocator)
 	r^ = {}
 }
 

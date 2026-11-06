@@ -41,7 +41,7 @@ listens and the Tracy GUI (`tracy-profiler`) or `tracy-capture` connect.
 - `tracy_protocol.odin` mirrors the subset of `TracyProtocol.hpp` and `TracyQueue.hpp` of the
   version that `PROTOCOL_VERSION` names: `Queue_Type` uses their exact positions, zone names are
   copied deduplicated into a fixed pool and each queue frame travels compressed with the LZ4 block
-  of `std/serial`.
+  of `lz4.odin`, the format the Tracy server reads.
 
 The GUI is the official Tracy one, of the protocol's version (`brew install tracy` on macOS; on
 Windows x64, the binaries of [5hif7y/tracy](https://github.com/5hif7y/tracy/releases)). It does

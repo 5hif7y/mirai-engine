@@ -35,19 +35,22 @@ import "mirai:std/subprocess"
 
 ENGINE_RUNTIME_PACKAGES :: [?]string{
     "std/base","std/subprocess","std/math","std/geom","std/serial","std/spatial","std/jobs","std/anim","std/ai","std/input",
+    "std/compressor","std/compressor/bc7split","std/compressor/lz/entropy","std/compressor/lz/match","std/compressor/lz/parse",
+    "std/compressor/lz",
     "third_party/freetype","platform","rhi","render","net","audio","asset","ui","project","core","host",
     "engine/volume","engine/input","engine/scene","engine/render","engine/audio","engine/gui","engine/camera","engine/save",
 }
 
 ENGINE_EDITOR_PACKAGES :: [?]string{
-    "cook/workspace","cook/cache","cook/textures","cook/image","cook/movie","cook/rig","cook/import","cook/import/obj","cook/import/gltf","cook/import/usd","third_party/ufbx","cook/import/fbx","cook/shaders","cook/prefab",
+    "cook/workspace","cook/cache","cook/compressor/bc7split","cook/compressor/texture/common","cook/compressor/texture/bc67","cook/compressor/texture/bc1",
+    "cook/compressor/texture/bc4","cook/compressor/texture/bc6","cook/compressor/texture/bc7","cook/compressor/texture","cook/textures","cook/image","cook/movie","cook/rig","cook/import","cook/import/obj","cook/import/gltf","cook/import/usd","third_party/ufbx","cook/import/fbx","cook/shaders","cook/prefab",
     "cook/import/sources","cook/install","cook/build","third_party/sqlite","editor/api","editor/acp","editor/diff","editor",
 }
 
 // Changes when what declare writes changes, so that binaries built by an
 // earlier version are built again.
 @(private)
-DECLARE_VERSION :: 7
+DECLARE_VERSION :: 8
 
 Engine_Paths :: struct {
     folder:string,
@@ -186,12 +189,15 @@ engine_plan :: proc(root,compiler:string,mode:Engine_Mode,paths:Engine_Paths) ->
     plan.flags=engine_flags(root,mode==.Dev)
     runtime_packages,editor_packages:=ENGINE_RUNTIME_PACKAGES,ENGINE_EDITOR_PACKAGES
     // render embeds the code of the shaders of the engine, whose manifest has the hash of each.
-    shaders_manifest:=project.path(root,"shaders/build/manifest.json",allocator=context.temp_allocator)
-    plan.runtime,_=fingerprint(root,compiler,plan.flags[:],engine_sources(root,runtime_packages[:],shaders_manifest))
+    // A release build embeds it as encoded to ship; a dev build, however it was encoded.
+    names:=shaders.EMBEDDED_NAMES
+    embedded:=[2]string{project.path(root,"shaders/build/manifest.json",allocator=context.temp_allocator),project.path(root,"shaders/build",names[shaders.HOST_BACKEND],allocator=context.temp_allocator)}
+    shaders_loads:=embedded[:] if mode==.Release else embedded[:1]
+    plan.runtime,_=fingerprint(root,compiler,plan.flags[:],engine_sources(root,runtime_packages[:],..shaders_loads))
     plan.editor,_=fingerprint(root,compiler,plan.flags[:],engine_sources(root,editor_packages[:]))
     plan.programs,_=fingerprint(root,compiler,plan.flags[:],nil)
     plan.tools=plan.programs
-    plan.loads,_=fingerprint(root,compiler,nil,{shaders_manifest})
+    plan.loads,_=fingerprint(root,compiler,nil,shaders_loads)
     plan.key=base.hash_combine(base.hash_combine(plan.runtime,plan.editor),DECLARE_VERSION)
     previous,stamped:=engine_stamp_read(paths.stamp)
     // The text of the stage does not change when only an embedded file does,
@@ -213,10 +219,11 @@ engine_plan :: proc(root,compiler:string,mode:Engine_Mode,paths:Engine_Paths) ->
 engine_current :: proc(engine_root:string,mode:Engine_Mode) -> bool {
     root:=slashes(engine_root,context.temp_allocator)
     if project.engine_installed(root) {return engine_installed_present(root)}
-    if root=="" || !shaders.current({root=root,odin=true}) {return false}
+    resolved:=engine_mode_resolve(root,mode)
+    if root=="" || !shaders.current({root=root,odin=true,ship=resolved==.Release}) {return false}
     compiler,found:=compiler_find(root,context.temp_allocator)
     if !found {return false}
-    return engine_plan(root,compiler,engine_mode_resolve(root,mode),engine_paths(root,mode,context.temp_allocator)).current
+    return engine_plan(root,compiler,resolved,engine_paths(root,mode,context.temp_allocator)).current
 }
 
 // Whether the binaries of a mode there were built from these sources,
@@ -258,14 +265,14 @@ engine_build :: proc(desc:Engine_Desc,allocator:=context.allocator) -> (result:E
         result.mode=ENGINE_MODE_INSTALLED
         return
     }
+    mode:=engine_mode_resolve(root,desc.mode)
+    result.mode=mode
     // Generated, not versioned: render embeds them and its table names them.
-    result.shaders=shaders.generate({root=root,odin=true})
+    result.shaders=shaders.generate({root=root,odin=true,ship=mode==.Release})
     if result.shaders.error!="" {
         result.status,result.failure,result.step,result.text=.Failed,.Shaders,"shaders of the engine",result.shaders.error
         return
     }
-    mode:=engine_mode_resolve(root,desc.mode)
-    result.mode=mode
     paths:=engine_paths(root,mode,context.temp_allocator)
     compiler:=desc.compiler
     if compiler=="" {

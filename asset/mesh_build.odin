@@ -495,13 +495,26 @@ mesh_levels_count :: proc(g:^Mesh_Geometry,sources:[]Cluster_Source,allocator:=c
 }
 
 // The deltas of each target follow the vertices of the clusters: a vertex
-// copied into several clusters moves in each of them.
+// copied into several clusters moves in each of them, quantized on the step
+// of the largest. False for ranges out of the deltas, a vertex out of the
+// source or an amount that is not finite.
 @(private="file")
 mesh_morphs_follow :: proc(g:^Mesh_Geometry,source:Mesh_Source,origins:[]u32,allocator:=context.allocator) -> bool {
     if len(source.morphs)==0 {return true}
+    for target in source.morphs {
+        if u64(target.first)+u64(target.count)>u64(len(source.morph_deltas)) {return false}
+    }
+    largest:f32
+    for d in source.morph_deltas {
+        if !finite(d.position.x,d.position.y,d.position.z,d.normal.x,d.normal.y,d.normal.z,d.tangent.x,d.tangent.y,d.tangent.z) {return false}
+        largest=max(largest,abs(d.position.x),abs(d.position.y),abs(d.position.z))
+    }
+    g.morph_step=morph_step(largest)
     error:mem.Allocator_Error
     g.morphs,error=make([]Morph_Target,len(source.morphs),allocator);if error!=nil {return false}
-    deltas:=make([dynamic]Morph_Delta,0,len(source.morph_deltas),allocator)
+    deltas:=make([dynamic]Morph_Cluster_Delta,0,len(source.morph_deltas),allocator)
+    followed:=false
+    defer if !followed {delete(deltas)}
     lookup:=make([]i32,len(source.vertices),context.temp_allocator)
     if len(source.vertices)>0 && lookup==nil {return false}
     for &at in lookup {at=-1}
@@ -515,7 +528,7 @@ mesh_morphs_follow :: proc(g:^Mesh_Geometry,source:Mesh_Source,origins:[]u32,all
         g.morphs[t].first=u32(len(deltas))
         for origin,v in origins {
             if at:=lookup[origin];at>=0 {
-                moved:=given[at]
+                moved:=morph_quantize(given[at],g.morph_step)
                 moved.vertex=u32(v)
                 if _,failed:=append(&deltas,moved);failed!=nil {return false}
             }
@@ -524,6 +537,7 @@ mesh_morphs_follow :: proc(g:^Mesh_Geometry,source:Mesh_Source,origins:[]u32,all
         for delta in given {lookup[delta.vertex]=-1}
     }
     g.morph_deltas=deltas[:]
+    followed=true
     return true
 }
 

@@ -13,7 +13,7 @@ import "core:time"
 // compiler and leaves the output alone.
 STAMP_FILE :: "generation.json"
 @(private)
-STAMP_VERSION :: 1
+STAMP_VERSION :: 2
 
 @(private)
 Stamp_File :: struct {path:string,size,time:i64}
@@ -23,6 +23,7 @@ Stamp :: struct {
     slang,metal_tools:string,
     shaders,tests,programs:int,
     engine:string,
+    shipped:bool, // the embedded code is encoded as Options.ship asks
 }
 
 // size<0: no such file.
@@ -102,6 +103,7 @@ stamp_current :: proc(g:^Generation,request:string,allocator:=context.allocator)
     stamp.slang=strings.clone(json_text(data["slang"]),allocator)
     stamp.metal_tools=strings.clone(json_text(data["metal_tools"]),allocator)
     stamp.engine=strings.clone(json_text(data["engine"]),allocator)
+    stamp.shipped=data["shipped"].(json.Boolean) or_else false
     counts:=[3]^int{&stamp.shaders,&stamp.tests,&stamp.programs}
     for key,i in ([3]string{"shaders","tests","programs"}) {
         valid:bool
@@ -131,6 +133,7 @@ stamp_write :: proc(g:^Generation,request,excluded:string,outputs:[]string,stamp
     json_key(&writer,"shaders");json_integer(&writer,i64(stamp.shaders))
     json_key(&writer,"tests");json_integer(&writer,i64(stamp.tests))
     json_key(&writer,"programs");json_integer(&writer,i64(stamp.programs))
+    json_key(&writer,"shipped");json_bool(&writer,stamp.shipped)
     json_key(&writer,"tools");json_array_begin(&writer)
     for path in g.tools {file_to_json(&writer,file_state(path))}
     json_array_end(&writer)

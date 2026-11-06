@@ -116,6 +116,7 @@ Options :: struct {
     output:  string, // "": <project>/.mirai/shaders, or <root>/shaders/build without a project
     cache:   string, // the stamp of the last generation into output; "": .mirai/shader-cache of the project, or of the engine without one
     odin:    bool,   // also compile the shaders of the RHI tests and write the Odin tables of render and rhi; never for a project
+    ship:    bool,   // with odin: the code render embeds is encoded for an executable to ship, which takes longer (EMBED_SHIP)
     workers: int,    // compilations at once; 0: one per logical processor
     tools:   [Tool]string, // "": looked up with tool_find
     backends:Backends, // {}: HOST_BACKEND, the one this system runs
@@ -1017,10 +1018,10 @@ generate :: proc(options:Options,allocator:=context.allocator) -> (result:Result
 current :: proc(options:Options) -> bool {
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
     g:=new(Generation,context.temp_allocator)
-    _,request,problem:=generation_setup(g,options,context.temp_allocator)
+    odin,request,problem:=generation_setup(g,options,context.temp_allocator)
     if problem!="" {return false}
-    _,is_current:=stamp_current(g,request,context.temp_allocator)
-    return is_current
+    stamp,is_current:=stamp_current(g,request,context.temp_allocator)
+    return is_current && (stamp.shipped || !options.ship || !odin)
 }
 
 // The folders, backends and tools of a generation, and the digest of what it
@@ -1084,7 +1085,8 @@ generate_staged :: proc(options:Options,scratch:runtime.Allocator) -> (result:Re
         g.tools[.Slangc],g.version=compiler,compiler_version
     }
     workers:=min(options.workers if options.workers>0 else max(os.get_processor_core_count(),1),RUNNER_CAPACITY)
-    if stamp,is_current:=stamp_current(g,request,scratch);is_current {
+    // A generation asked to ship goes on when the code it embeds was not encoded so.
+    if stamp,is_current:=stamp_current(g,request,scratch);is_current && (stamp.shipped || !options.ship || !odin) {
         result.shaders,result.tests,result.programs=stamp.shaders,stamp.tests,stamp.programs
         result.reused,result.current=stamp.shaders+stamp.tests,true
         result.engine=stamp.engine
@@ -1262,10 +1264,21 @@ generate_staged :: proc(options:Options,scratch:runtime.Allocator) -> (result:Re
     replacements:=make([dynamic]Publication,scratch)
     tables_folder:string
     defer if cleanup && tables_folder!="" {os.remove_all(tables_folder)}
+    shipped:=false
     if odin {
         assertions:=strings.builder_make(scratch)
         if problem:=layouts_assertions(&assertions,g.layouts);problem!="" {fail(&result,allocator,"%s",problem);return}
-        render_table:=odin_table(shader_jobs,g.backends,g.output,path_join(g.root,"render",allocator=scratch),"mirai_render","mirai:rhi",identity,"",strings.to_string(assertions),scratch,program_jobs,true)
+        shipped=true
+        names:=EMBEDDED_NAMES
+        sizes:[Backend][]int
+        for backend in g.backends {
+            packed:[]u8;packed_shipped:bool;problem:string
+            packed,sizes[backend],packed_shipped,problem=embedded_pack(g,{shader_jobs,program_jobs},backend,options.ship,scratch)
+            if problem!="" {fail(&result,allocator,"%s",problem);return}
+            if !write_file(path_join(staging_shaders,names[backend],allocator=scratch),packed) {fail(&result,allocator,"could not write %s",names[backend]);return}
+            shipped&&=packed_shipped
+        }
+        render_table:=odin_table(shader_jobs,g.backends,g.output,path_join(g.root,"render",allocator=scratch),"mirai_render","mirai:rhi",identity,"",strings.to_string(assertions),scratch,program_jobs,true,sizes)
         rhi_table:=odin_table(test_jobs,g.backends,tests_out,path_join(g.root,"rhi",allocator=scratch),"rhi","","","TEST_SHADERS","",scratch)
         tables:=[2]string{path_join(g.root,"render/shaders_gen.odin",allocator=scratch),path_join(g.root,"rhi/shaders_gen_test.odin",allocator=scratch)}
         for bytes,i in ([2][]u8{render_table,rhi_table}) {
@@ -1312,8 +1325,12 @@ generate_staged :: proc(options:Options,scratch:runtime.Allocator) -> (result:Re
             if name!="" {append(&outputs,path_join(folder,name,allocator=scratch))}
         }
     }
+    if odin {
+        names:=EMBEDDED_NAMES
+        for backend in g.backends {append(&outputs,path_join(g.output,names[backend],allocator=scratch))}
+    }
     // Without a stamp the next generation looks at every stage again.
-    stamp_write(g,request,staging,outputs[:],{slang=g.version,metal_tools=g.metal_tools,shaders=shader_count+program_count+extension_count,tests=test_count,programs=len(catalog.programs),engine=identity})
+    stamp_write(g,request,staging,outputs[:],{slang=g.version,metal_tools=g.metal_tools,shaders=shader_count+program_count+extension_count,tests=test_count,programs=len(catalog.programs),engine=identity,shipped=shipped})
     if result.compiled>0 {cache_prune(g.shared,time.now())}
     return
 }
@@ -1341,23 +1358,29 @@ generation_matches :: proc(staging,output:string) -> bool {
 // without the table. appended: text after the table (the layout assertions
 // of the shared structs). programs: with program_table, the stages compiled
 // for one program each, in PROGRAM_SHADERS, which the renderer finds by name.
+// packed: for each backend, the size of the code of each stage of jobs and
+// then of programs; the code is then the stream EMBEDDED_NAMES names
+// (SHADERS_PACKED) and each stage an Embedded_Shader of render.
 @(private)
-odin_table :: proc(jobs:[]Job,backends:Backends,out,target_folder,package_name,rhi_import,engine,guard,appended:string,allocator:=context.allocator,programs:[]Job=nil,program_table:=false) -> []u8 {
+odin_table :: proc(jobs:[]Job,backends:Backends,out,target_folder,package_name,rhi_import,engine,guard,appended:string,allocator:=context.allocator,programs:[]Job=nil,program_table:=false,packed:[Backend][]int={}) -> []u8 {
     stages:=STAGE_NAMES
     relative:=path_from(out,target_folder,context.temp_allocator)
     prefix:="rhi." if rhi_import!="" else ""
-    code :: proc(b:^strings.Builder,shader:Shader,metal:bool,relative,prefix:string,stages:[Stage]string) {
-        if metal {
-            fmt.sbprintf(b,"{{binary = {{msl = #load(\"%s/%s\", string), msl_entry = \"%s\"}}, name = \"%s\", stage = .%s,\n",relative,shader.msl,shader.entry,shader.name,stages[shader.stage])
-        } else {
-            fmt.sbprintf(b,"{{binary = {{spirv = #load(\"%s/%s\")}}, name = \"%s\", stage = .%s,\n",relative,shader.spv,shader.name,stages[shader.stage])
+    // size<0: the code is loaded as it is.
+    code :: proc(b:^strings.Builder,shader:Shader,metal:bool,relative,prefix:string,stages:[Stage]string,size:int) {
+        switch {
+        case size>=0 && metal: fmt.sbprintf(b,"{{size = %d, code = {{binary = {{msl_entry = \"%s\"}}, ",size,shader.entry)
+        case size>=0: fmt.sbprintf(b,"{{size = %d, code = {{",size)
+        case metal: fmt.sbprintf(b,"{{binary = {{msl = #load(\"%s/%s\", string), msl_entry = \"%s\"}}, ",relative,shader.msl,shader.entry)
+        case: fmt.sbprintf(b,"{{binary = {{spirv = #load(\"%s/%s\")}}, ",relative,shader.spv)
         }
+        fmt.sbprintf(b,"name = \"%s\", stage = .%s,\n",shader.name,stages[shader.stage])
         fmt.sbprintf(b,"\t\t\tthreadgroup = {{%d, %d, %d}}, bindings = []%sBinding_Info{{",shader.group[0],shader.group[1],shader.group[2],prefix)
         for binding,i in shader.bindings {
             if i>0 {strings.write_string(b,", ")}
             fmt.sbprintf(b,"{{slot = %d, kind = .%s, stages = {{.%s}}}}",binding.slot,binding.kind,stages[shader.stage])
         }
-        strings.write_string(b,"}},\n")
+        strings.write_string(b,"}}},\n" if size>=0 else "}},\n")
     }
     b:=strings.builder_make(allocator)
     fmt.sbprintf(&b,"// Code generated by mirai shaders. DO NOT EDIT.\npackage %s\n\n",package_name)
@@ -1370,23 +1393,29 @@ odin_table :: proc(jobs:[]Job,backends:Backends,out,target_folder,package_name,r
     strings.write_string(&b,"Shader_Id :: enum u8 {\n")
     for job in jobs {fmt.sbprintf(&b,"\t%s,\n",job.result.id)}
     strings.write_string(&b,"}\n\nwhen ODIN_OS == .Darwin {\n")
+    names:=EMBEDDED_NAMES
     for metal in ([]bool{true,false}) {
         if !metal {strings.write_string(&b,"} else {\n")}
-        if (Backend.Metal if metal else Backend.Vulkan) not_in backends {
+        backend:=Backend.Metal if metal else Backend.Vulkan
+        if backend not_in backends {
             fmt.sbprintf(&b,"\t#panic(\"the shaders were generated without %s code: run `mirai shaders --backends all`\")\n","Metal" if metal else "SPIR-V")
             continue
         }
-        fmt.sbprintf(&b,"\t@(rodata)\n\tSHADERS := [Shader_Id]%sShader_Code{{\n",prefix)
-        for job in jobs {
+        sizes:=packed[backend]
+        kind:="Embedded_Shader" if sizes!=nil else strings.concatenate({prefix,"Shader_Code"},context.temp_allocator)
+        size :: proc(sizes:[]int,at:int) -> int {return sizes[at] if at<len(sizes) else -1}
+        if sizes!=nil {fmt.sbprintf(&b,"\t@(rodata)\n\tSHADERS_PACKED := #load(\"%s/%s\")\n",relative,names[backend])}
+        fmt.sbprintf(&b,"\t@(rodata)\n\tSHADERS := [Shader_Id]%s{{\n",kind)
+        for job,at in jobs {
             fmt.sbprintf(&b,"\t\t.%s = ",job.result.id)
-            code(&b,job.result,metal,relative,prefix,stages)
+            code(&b,job.result,metal,relative,prefix,stages,size(sizes,at))
         }
         strings.write_string(&b,"\t}\n")
         if program_table {
-            fmt.sbprintf(&b,"\t@(rodata)\n\tPROGRAM_SHADERS := [%d]%sShader_Code{{\n",len(programs),prefix)
-            for job in programs {
+            fmt.sbprintf(&b,"\t@(rodata)\n\tPROGRAM_SHADERS := [%d]%s{{\n",len(programs),kind)
+            for job,at in programs {
                 strings.write_string(&b,"\t\t")
-                code(&b,job.result,metal,relative,prefix,stages)
+                code(&b,job.result,metal,relative,prefix,stages,size(sizes,len(jobs)+at))
             }
             strings.write_string(&b,"\t}\n")
         }

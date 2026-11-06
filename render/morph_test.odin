@@ -15,9 +15,9 @@ import mm "mirai:std/math"
 @(private="file")
 morph_test_shape :: proc(v:Mesh_Vertex,delta:Morph_Delta,weight:f32)->Mesh_Vertex {
     result:=v
-    result.position+=delta.position*weight
-    result.normal=linalg.normalize(v.normal+delta.normal*weight)
-    tangent:=v.tangent.xyz+delta.tangent*weight
+    result.position+=asset.morph_position(delta.position,TEST_MORPH_STEP)*weight
+    result.normal=linalg.normalize(v.normal+asset.morph_normal(delta.normal)*weight)
+    tangent:=v.tangent.xyz+asset.morph_tangent(delta.tangent)*weight
     tangent-=result.normal*linalg.dot(result.normal,tangent)
     result.tangent.xyz=linalg.normalize(tangent)
     return result
@@ -47,16 +47,18 @@ gpu_morphs_move_the_bind_shape_before_the_skin_with_motion_tangents_bounds_and_b
         influences:=test_by_cluster(origins,given[:])
         ranges:=[4]Morph_Range{{0,1},{1,1},{2,1},{3,1}}
         deltas:[4]Morph_Delta
-        for &delta,i in deltas {delta={position={.4*f32(i),.3,0},normal={.15,0,0},tangent={0,.2,.1},target=0}}
-        data:=test_morph_by_cluster(origins,{ranges=ranges[:],deltas=deltas[:],count=1})
+        for &delta,i in deltas {delta=test_morph_delta(0,{.4*f32(i),.3,0},{.15,0,0},{0,.2,.1})}
+        data:=test_morph_by_cluster(origins,{ranges=ranges[:],deltas=deltas[:],count=1,step=TEST_MORPH_STEP})
         skin,created:=skin_create(r,source,influences,2,data)
         if !testing.expect(t,created,r.error) {return}
         other,created_other:=skin_create(r,source,influences,2,data)
         if !testing.expect(t,created_other,r.error) {return}
         testing.expect(t,r.scene.meshes[skin].skin.binding==r.scene.meshes[other].skin.binding,"poses of one source and the same targets share their binding")
         broken:=deltas;broken[1].target=1
-        _,refused:=skin_create(r,source,influences,2,test_morph_by_cluster(origins,{ranges=ranges[:],deltas=broken[:],count=1}))
+        _,refused:=skin_create(r,source,influences,2,test_morph_by_cluster(origins,{ranges=ranges[:],deltas=broken[:],count=1,step=TEST_MORPH_STEP}))
         testing.expect(t,!refused,"a delta of a target the pose does not have is refused")
+        _,stepless:=skin_create(r,source,influences,2,test_morph_by_cluster(origins,{ranges=ranges[:],deltas=deltas[:],count=1}))
+        testing.expect(t,!stepless,"deltas without a step are refused")
         testing.expect(t,mesh_remove(r,source))
         palette:=[2]Mat4{Mat4(1),Mat4(1)}
         palette[1][1,1]=1.3;palette[1][0,3]=.25
@@ -161,12 +163,12 @@ gpu_skins_with_influences_of_every_level_pose_each_level_and_keep_its_history_an
     influences:=test_by_cluster(origins,given[:])
     ranges:[7]Morph_Range
     deltas:[7]Morph_Delta
-    for &range,i in ranges {range={first=u32(i),count=1};deltas[i]={position={0,.1*f32(i+1),.1},normal={.1,0,0},target=0}}
+    for &range,i in ranges {range={first=u32(i),count=1};deltas[i]=test_morph_delta(0,{0,.1*f32(i+1),.1},{.1,0,0})}
     single,_,_:=test_mesh_add(r,vertices[:],indices[:],levels[:])
     level0,_:=level0_vertices(&r.scene,r.scene.meshes[single])
     level_zero,level_zero_ok:=skin_create(r,single,influences[:level0],2)
     testing.expect(t,level_zero_ok && r.scene.meshes[level_zero].flags&MESH_FLAG_LEVEL0!=0,"influences of level 0 pose that level alone")
-    skin,created:=skin_create(r,source,influences,2,test_morph_by_cluster(origins,{ranges=ranges[:],deltas=deltas[:],count=1}))
+    skin,created:=skin_create(r,source,influences,2,test_morph_by_cluster(origins,{ranges=ranges[:],deltas=deltas[:],count=1,step=TEST_MORPH_STEP}))
     if !testing.expect(t,created,r.error) {return}
     testing.expect(t,mesh_remove(r,source) && mesh_remove(r,single) && mesh_remove(r,level_zero))
     record:=r.scene.meshes[skin]
@@ -250,9 +252,9 @@ gpu_skin_benchmark_reports_the_cost_of_posing_every_level_and_morph_targets :: p
             if variant.morphs {
                 for &range,i in ranges {
                     range={u32(i*4),4}
-                    for target in 0..<4 {deltas[i*4+target]={position={0,0.05*f32(target+1),0},normal={0.01,0,0},tangent={0,0.01,0},target=u32(target)}}
+                    for target in 0..<4 {deltas[i*4+target]=test_morph_delta(u32(target),{0,0.05*f32(target+1),0},{0.01,0,0},{0,0.01,0})}
                 }
-                morph={ranges=ranges,deltas=deltas,count=4}
+                morph={ranges=ranges,deltas=deltas,count=4,step=TEST_MORPH_STEP}
             }
             skins:[8]Mesh_Handle
             instances:[8]Instance_Desc

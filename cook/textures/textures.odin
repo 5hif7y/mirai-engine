@@ -1,24 +1,33 @@
 package textures
 
+import "base:runtime"
 import "core:c"
 import "core:math"
 import "core:mem"
 import stbi "vendor:stb/image"
 import "mirai:asset"
+import bc7split_encode "mirai:cook/compressor/bc7split"
+import bcn "mirai:cook/compressor/texture"
 import "mirai:std/base"
 import "mirai:std/jobs"
 import mm "mirai:std/math"
 
 // Source texels to .tex records: decoding, the mip chain of every layer and
 // what the renderer expects of each level, stored by what the texture is used
-// for and by what its source holds (stored_format), block compressed unless
-// the import asks for it uncompressed.
+// for and by what its source holds (stored_format), block compressed by
+// cook/compressor/texture unless the import asks for it
+// uncompressed.
 
 DEFAULT_MAX_SIZE :: 4096
 MAX_SOURCE_SIDE :: 1<<15
 MAX_SOURCE_PIXELS :: 1<<28
 // Changes when build would give other bytes for the same image and options.
-BUILD_VERSION :: 4
+BUILD_VERSION :: 5
+RDO_LAMBDA_DEFAULT :: 30
+RDO_LAMBDA_MAX :: 100
+// Texels of a level from which build encodes its blocks on a job system of
+// its own, when the caller gives none.
+PARALLEL_TEXELS :: 128*128
 
 Error :: enum u8 {
     None,
@@ -199,6 +208,16 @@ Encoding :: enum u8 {
     Uncompressed, // RGBA8, RGBA16 or RGBA16F, by what the source holds
 }
 
+// How hard the blocks of a texture are encoded. A texture of Fast blocks
+// carries asset.Texture_Flag.Fast, and a cook encodes it again as Final.
+Encode_Speed :: enum u8 {
+    Final, // rate-distortion optimization with the lambda of the options: what a game ships
+    Fast,  // without RDO and at the encoder's low effort: what the editor imports in its session
+}
+
+// The effort of a Fast encode.
+FAST_EFFORT :: bcn.Effort.Low
+
 Build_Options :: struct {
     max_size:int,        // 0: DEFAULT_MAX_SIZE. A larger image starts at the first level that fits
     srgb:bool,           // color: averaged as light, stored as sRGB in the formats of 8 bits
@@ -207,6 +226,26 @@ Build_Options :: struct {
     alpha_coverage:f32,  // above 0: the cutoff of a masked material whose coverage every level keeps
     keep_precision:bool, // a source of 16 bits or floats is stored uncompressed whatever the encoding: heights, displacement, data floats
     encoding:Encoding,
+    rdo_lambda:int,      // of blocks, up to RDO_LAMBDA_MAX: how much error the rate-distortion optimization trades for blocks that compress smaller. 0: RDO_LAMBDA_DEFAULT; below 0: none, the least error
+    speed:Encode_Speed,
+}
+
+// The lambda of the RDO of options, 0 for none.
+rdo_lambda :: proc "contextless" (options:Build_Options) -> int {
+    if options.rdo_lambda<0 || options.speed==.Fast {return 0}
+    return options.rdo_lambda if options.rdo_lambda>0 else RDO_LAMBDA_DEFAULT
+}
+
+// How the blocks of a level are encoded.
+@(private)
+Block_Encode :: struct {
+    lambda:int,
+    effort:bcn.Effort,
+}
+
+@(private)
+block_encode :: proc "contextless" (options:Build_Options) -> Block_Encode {
+    return {lambda=rdo_lambda(options),effort=FAST_EFFORT if options.speed==.Fast else .Default}
 }
 
 Built :: struct {
@@ -226,16 +265,50 @@ built_destroy :: proc(built:^Built) {
 }
 
 // The description asset.texture_save takes; the levels stay owned by built.
-built_desc :: proc(built:^Built,id:base.Asset_Id,source:^asset.Import_Info,compression:=asset.Compression.None) -> asset.Texture_Desc {
-    return {id=id,width=built.width,height=built.height,layers=built.layers,format=built.format,flags=built.flags,alpha_coverage=built.alpha_coverage,mips=built.mips,source=source,compression=compression}
+// A BC7 texture stores two BC7Split streams, in the temporary allocator: one
+// of its tail (asset.TEXTURE_TAIL), which a read of the small levels restores
+// alone, and one of the larger levels; a stream per level would compress
+// larger. Without memory for them the blocks are stored as they are.
+built_desc :: proc(built:^Built,id:base.Asset_Id,source:^asset.Import_Info) -> asset.Texture_Desc {
+    desc:=asset.Texture_Desc{id=id,width=built.width,height=built.height,layers=built.layers,format=built.format,flags=built.flags,alpha_coverage=built.alpha_coverage,mips=built.mips,source=source}
+    if built.format!=.BC7 || len(built.mips)==0 {return desc}
+    tail:=0
+    for tail+1<len(built.mips) && max(built.width>>uint(tail),built.height>>uint(tail))>asset.TEXTURE_TAIL {tail+=1}
+    runs:=[2][2]int{{0,tail},{tail,len(built.mips)}}
+    total:=0
+    for level in built.mips {total+=len(level)}
+    preps:=make([]asset.Texture_Bc7split,2,context.temp_allocator)
+    blocks:=make([]u8,total,context.temp_allocator)
+    payload:=make([]u8,bc7split_encode.min_output_size(total/16)+1,context.temp_allocator)
+    scratch:=make([]u8,bc7split_encode.min_scratch_size(total/16),context.temp_allocator)
+    if preps==nil || blocks==nil || payload==nil || scratch==nil {return desc}
+    count,at:=0,0
+    for run in runs {
+        if run[0]==run[1] {continue}
+        // Its levels the smallest first, as the texels hold them.
+        size:=0
+        #reverse for level in built.mips[run[0]:run[1]] {size+=copy(blocks[size:],level)}
+        written,error:=bc7split_encode.encode(&preps[count].header,payload[at:],blocks[:size],scratch)
+        if error!=.None || written==0 {return desc}
+        preps[count].level,preps[count].payload=run[0],payload[at:][:written]
+        count+=1
+        at+=written
+    }
+    desc.bc7split=preps[:count]
+    return desc
 }
 
 // What decides the bytes build gives for an image: the settings hash an
-// import records, so a texture is built again when one of them changes.
+// import records, so a texture is built again when one of them changes. Fast
+// is another hash; Final is the hash of the settings alone.
 settings_hash :: proc(options:Build_Options) -> u64 {
     limit:=min(max(options.max_size if options.max_size>0 else DEFAULT_MAX_SIZE,1),asset.TEXTURE_MAX_SIZE)
     kind:=u64(options.srgb)|u64(options.normal_map)<<1|u64(options.encoding)<<2|u64(options.green_down)<<4|u64(options.keep_precision)<<5|u64(BUILD_VERSION)<<8
-    return base.hash_combine(base.hash_combine(u64(limit),kind),u64(transmute(u32)options.alpha_coverage))
+    hash:=base.hash_combine(base.hash_combine(u64(limit),kind),u64(transmute(u32)options.alpha_coverage))
+    final:=options
+    final.speed=.Final
+    hash=base.hash_combine(hash,u64(rdo_lambda(final)))
+    return base.hash_combine(hash,0x66617374) if options.speed==.Fast else hash
 }
 
 // The format a texture is stored in, by what it is used for and what its
@@ -275,7 +348,7 @@ stored_format :: proc(source:Source,options:Build_Options) -> asset.Texture_Form
 // their own.
 build :: proc(source:Source,options:Build_Options,allocator:=context.allocator,worker:=jobs.Worker_Ref{}) -> (built:Built,error:Error) {
     layers:=max(source.layers,1)
-    if source.width<=0 || source.height<=0 || source.layers<0 || source.format>max(Source_Format) || !(options.alpha_coverage>=0 && options.alpha_coverage<=1) {return {},.Invalid}
+    if source.width<=0 || source.height<=0 || source.layers<0 || source.format>max(Source_Format) || !(options.alpha_coverage>=0 && options.alpha_coverage<=1) || options.rdo_lambda>RDO_LAMBDA_MAX || options.speed>max(Encode_Speed) {return {},.Invalid}
     flags:=asset.Texture_Flags{}
     if source.cube {flags+={.Cube}}
     if !asset.texture_layers_valid(layers,source.width,source.height,flags) || len(source.texels)<source_bytes(source) {return {},.Invalid}
@@ -326,15 +399,19 @@ build :: proc(source:Source,options:Build_Options,allocator:=context.allocator,w
     built.width,built.height,built.layers=level.width,level.height,layers
     built.format=stored_format(source,options)
     js:jobs.Job_System
-    parallel:=worker.system==nil && bc_jobs_begin(&js,built.format,level.width,level.height*layers)
+    parallel:=worker.system==nil && encode_jobs_begin(&js,built.format,level.width,level.height*layers)
     defer if parallel {jobs.system_destroy(&js)}
     on:=worker
     if parallel {on={&js,jobs.OWNER,nil}}
+    encode:=block_encode(options)
     for {
         encode_zone:=jobs.worker_zone_begin(worker,"texture.encode")
-        stored,alloc_error:=level_store(level,built.format,&transfer,allocator,on)
+        stored,store_error:=level_store(level,built.format,&transfer,encode,allocator,on)
         base.profile_end(encode_zone)
-        if alloc_error!=nil {return {},fail(&mips,&owned)}
+        if store_error!=.None {
+            fail(&mips,&owned)
+            return {},store_error
+        }
         append(&mips,stored)
         if level.width==1 && level.height==1 {break}
         reduced,ok:=next(level,&transfer,options,coverage,allocator)
@@ -349,6 +426,9 @@ build :: proc(source:Source,options:Build_Options,allocator:=context.allocator,w
     built.flags=flags
     if options.srgb {built.flags+={.Srgb}}
     if options.normal_map {built.flags+={.Normal_Map}}
+    #partial switch built.format {
+    case .BC1,.BC3,.BC5,.BC6H,.BC7: if options.speed==.Fast {built.flags+={.Fast}}
+    }
     return built,.None
 }
 
@@ -366,31 +446,85 @@ from_bytes :: proc(bytes:[]u8,options:Build_Options,allocator:=context.allocator
 // formats of 8 bits take it as sRGB under transfer, RGBA16, RGBA16F and BC6H
 // linear. In allocator.
 @(private)
-level_store :: proc(level:Source,format:asset.Texture_Format,transfer:^Transfer,allocator:mem.Allocator,worker:jobs.Worker_Ref) -> (out:[]u8,error:mem.Allocator_Error) {
-    layers:=max(level.layers,1)
+level_store :: proc(level:Source,format:asset.Texture_Format,transfer:^Transfer,encode:Block_Encode,allocator:mem.Allocator,worker:jobs.Worker_Ref) -> (out:[]u8,error:Error) {
+    alloc_error:mem.Allocator_Error
     switch format {
-    case .RGBA8: return level_convert(level,.RGBA8,transfer,transfer,allocator)
+    case .RGBA8: out,alloc_error=level_convert(level,.RGBA8,transfer,transfer,allocator)
     case .RGBA16:
         linear:=transfer_make(false)
-        return level_convert(level,.RGBA16,transfer,&linear,allocator)
-    case .RGBA16F: return level_convert(level,.RGBA16F,transfer,transfer,allocator)
-    case .BC6H:
-        out=make([]u8,asset.texture_level_size(format,level.width,level.height)*layers,allocator) or_return
-        bc6h_compress(level,transfer,out,worker)
-        return
-    case .BC1,.BC3,.BC5,.BC7:
-        pixels:=level.texels
-        if level.format!=.RGBA8 {
-            pixels=level_convert(level,.RGBA8,transfer,transfer,allocator) or_return
-        }
-        defer if level.format!=.RGBA8 {delete(pixels,allocator)}
-        out=make([]u8,asset.texture_level_size(format,level.width,level.height)*layers,allocator) or_return
-        image:=level.width*level.height*4
-        size:=asset.texture_level_size(format,level.width,level.height)
-        for layer in 0..<layers {bc_compress_into(pixels[layer*image:][:image],level.width,level.height,format,out[layer*size:][:size],worker)}
-        return
+        out,alloc_error=level_convert(level,.RGBA16,transfer,&linear,allocator)
+    case .RGBA16F: out,alloc_error=level_convert(level,.RGBA16F,transfer,transfer,allocator)
+    case .BC1,.BC3,.BC5,.BC6H,.BC7: return level_encode(level,format,transfer,encode,allocator,worker)
     }
-    return
+    if alloc_error!=nil {return nil,.Out_Of_Memory}
+    return out,.None
+}
+
+// The blocks of a level, each layer apart, by cook/compressor/texture with the
+// perceptual metric, lambda and effort of encode: BC6H from half floats, the others from RGBA8.
+// Alpha keeps its exact 0 and 255, and a BC7 layer whose texels are all
+// opaque is encoded without alpha, which then decodes 255. On a worker the
+// blocks go in parallel, with scratch from the heap.
+@(private)
+level_encode :: proc(level:Source,format:asset.Texture_Format,transfer:^Transfer,encode:Block_Encode,allocator:mem.Allocator,worker:jobs.Worker_Ref) -> (out:[]u8,error:Error) {
+    layers:=max(level.layers,1)
+    texels:=level
+    texels.layers=layers
+    pixel:=bcn.Pixel_Format.RGBA8
+    owned:=false
+    defer if owned {delete(texels.texels,allocator)}
+    alloc_error:mem.Allocator_Error
+    if format==.BC6H {
+        // Through texel_write, which clamps light to what half floats hold and makes a NaN 0.
+        texels.format,pixel,owned=.RGBA16F,.RGBA16F,true
+        if texels.texels,alloc_error=make([]u8,source_bytes(texels),allocator);alloc_error!=nil {return nil,.Out_Of_Memory}
+        for at in 0..<level.width*level.height*layers {texel_write(texels.texels,.RGBA16F,at,texel_read(level.texels,level.format,at,transfer),transfer)}
+    } else if level.format!=.RGBA8 {
+        texels.format,owned=.RGBA8,true
+        if texels.texels,alloc_error=level_convert(level,.RGBA8,transfer,transfer,allocator);alloc_error!=nil {return nil,.Out_Of_Memory}
+    }
+    size:=asset.texture_level_size(format,level.width,level.height)
+    if out,alloc_error=make([]u8,size*layers,allocator);alloc_error!=nil {return nil,.Out_Of_Memory}
+    options:=bcn.Options{effort=encode.effort,lambda=encode.lambda,metric=.Perceptual,preserve_extremes=true}
+    blocks:bcn.Format
+    #partial switch format {
+    case .BC1: blocks=.BC1
+    case .BC3: blocks=.BC3
+    case .BC5: blocks=.BC5
+    case .BC6H: blocks=.BC6H
+    case .BC7: blocks=.BC7
+    }
+    scratch:=allocator if worker.system==nil else runtime.heap_allocator()
+    image:=source_bytes(texels)/layers
+    for layer in 0..<layers {
+        pixels:=texels.texels[layer*image:][:image]
+        options.ignore_alpha=format==.BC7 && opaque(pixels)
+        result:=bcn.encode(blocks,{pixels=pixels,width=level.width,height=level.height,format=pixel},options,out[layer*size:][:size],scratch,worker)
+        if result!=.None {
+            delete(out,allocator)
+            return nil,.Out_Of_Memory if result==.Out_Of_Memory else .Invalid
+        }
+    }
+    return out,.None
+}
+
+// Whether every texel of RGBA8 pixels is opaque.
+@(private="file")
+opaque :: proc(pixels:[]u8) -> bool {
+    for i:=3;i<len(pixels);i+=4 {if pixels[i]!=255 {return false}}
+    return true
+}
+
+// A job system of its own for the levels of a texture in blocks whose first
+// level is large, so a build in any thread uses every core; false for one
+// that goes in the calling thread.
+@(private)
+encode_jobs_begin :: proc(js:^jobs.Job_System,format:asset.Texture_Format,width,height:int) -> bool {
+    #partial switch format {
+    case .BC1,.BC3,.BC5,.BC6H,.BC7: if width*height<PARALLEL_TEXELS {return false}
+    case: return false
+    }
+    return jobs.system_init(js,{threads=jobs.THREADS_AUTO})
 }
 
 // One image of a source as RGBA8 rows from the top, to look at: with the
@@ -520,8 +654,9 @@ alpha_coverage_keep :: proc(level:Source,cutoff,wanted:f32) {
 // The texture of an asset that stores RGBA8, in the blocks of its use
 // (stored_format): each of its levels and layers compressed as it is, so the
 // chain is the one the asset has. False, with nothing, for a texture in
-// another format, which keeps it: blocks already, or more than 8 bits.
-blocks_of :: proc(view:asset.Texture_View,allocator:=context.allocator) -> (built:Built,ok:bool) {
+// another format, which keeps it: blocks already, or more than 8 bits. The
+// blocks are encoded on the job system of worker, else on one of their own.
+blocks_of :: proc(view:asset.Texture_View,allocator:=context.allocator,worker:=jobs.Worker_Ref{}) -> (built:Built,ok:bool) {
     info:=view.info
     if info==nil || info.format!=.RGBA8 || len(view.mips)==0 {return}
     layers:=int(info.layers)
@@ -534,12 +669,14 @@ blocks_of :: proc(view:asset.Texture_View,allocator:=context.allocator) -> (buil
     built={width=int(info.width),height=int(info.height),layers=layers,format=format,flags=info.flags,alpha_coverage=info.alpha_coverage,allocator=allocator}
     built.mips=make([][]u8,len(view.mips),allocator)
     js:jobs.Job_System
-    parallel:=bc_jobs_begin(&js,format,built.width,built.height*layers)
+    parallel:=worker.system==nil && encode_jobs_begin(&js,format,built.width,built.height*layers)
     defer if parallel {jobs.system_destroy(&js)}
+    on:=worker
+    if parallel {on={&js,jobs.OWNER,nil}}
     transfer:=transfer_make(options.srgb)
     for _,level in view.mips {
-        blocks,error:=level_store(plane(view,level),format,&transfer,allocator,{&js,jobs.OWNER,nil} if parallel else {})
-        if error!=nil {
+        blocks,error:=level_store(plane(view,level),format,&transfer,block_encode(options),allocator,on)
+        if error!=.None {
             built_destroy(&built)
             return {},false
         }

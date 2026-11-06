@@ -1,10 +1,13 @@
 package asset
 
+import "base:intrinsics"
+import "core:simd"
+
 // BC7 (BPTC): 4x4 texels in 16 bytes, in one of eight modes that trade
 // subsets (pieces of the block, each with its two endpoints), endpoint
 // precision and index bits, with alpha in the endpoints or apart. What a
-// block decodes to follows the Khronos Data Format Specification; the
-// encoder is cook/textures (bc7.odin), and the tables below serve both.
+// block decodes to follows the Khronos Data Format Specification. BC6H
+// shares its partitions of two subsets, their anchors and its weights.
 
 Bc7_Mode_Info :: struct {
     subsets:u32,        // 1 to 3, by a partition of the block
@@ -210,88 +213,139 @@ bc7_interpolate :: proc "contextless" (e0,e1,weight:u32) -> u32 {
 // Texels of a BC7 block, row by row. A block of no mode (its first byte
 // zero) decodes as transparent black, as the specification asks.
 texture_bc7_block_decode :: proc "contextless" (block:[16]u8) -> (texels:[16][4]u8) {
+    switch intrinsics.count_trailing_zeros(block[0]) {
+    case 0: return bc7_decode_mode(block,0)
+    case 1: return bc7_decode_mode(block,1)
+    case 2: return bc7_decode_mode(block,2)
+    case 3: return bc7_decode_mode(block,3)
+    case 4: return bc7_decode_mode(block,4)
+    case 5: return bc7_decode_mode(block,5)
+    case 6: return bc7_decode_mode(block,6)
+    case 7: return bc7_decode_mode(block,7)
+    }
+    return
+}
+
+// subsets, partition bits, rotation bits, selector bit, color bits, alpha bits, endpoint
+// p-bits, shared p-bits, index bits and second index bits of each mode, as BC7_MODES.
+@(private="file")
+BC7_LAYOUT :: [8][10]int{
+    {3,4,0,0,4,0,1,0,3,0},
+    {2,6,0,0,6,0,0,1,3,0},
+    {3,6,0,0,5,0,0,0,2,0},
+    {2,6,0,0,7,0,1,0,2,0},
+    {1,0,2,1,5,6,0,0,2,3},
+    {1,0,2,0,7,8,0,0,2,2},
+    {1,0,0,0,7,7,1,0,4,0},
+    {2,6,0,0,5,5,1,0,2,0},
+}
+
+@(private="file")
+bc7_field :: #force_inline proc "contextless" (bits:u128,at:int,$N:int) -> u32 {
+    return u32(bits>>uint(at))&u32((1<<uint(N))-1)
+}
+
+// v with a zero bit inserted at bit pos.
+@(private="file")
+bc7_insert_zero :: #force_inline proc "contextless" (v:u64,pos:u32) -> u64 {
+    low:=(u64(1)<<pos)-1
+    return (v&low)|((v&~low)<<1)
+}
+
+@(private="file")
+bc7_weights :: #force_inline proc "contextless" ($IB:int) -> ^[1<<uint(IB)]u32 {
+    when IB==2 {return &BC7_WEIGHTS_2} else when IB==3 {return &BC7_WEIGHTS_3} else {
+        return &BC7_WEIGHTS_4
+    }
+}
+
+@(private="file")
+bc7_decode_mode :: #force_inline proc "contextless" (block:[16]u8,
+    $M:int) -> (texels:[16][4]u8) #no_bounds_check {
+    L :: BC7_LAYOUT[M]
+    NS :: L[0]; PB :: L[1]; RB :: L[2]; ISB :: L[3]; CB :: L[4]; AB :: L[5]
+    EPB :: L[6]; SPB :: L[7]; IB :: L[8]; IB2 :: L[9]
     bits:=transmute(u128)block
-    at:uint
-    read :: proc "contextless" (bits:u128,at:^uint,count:u32) -> u32 {
-        value:=u32((bits>>at^)&(u128(1)<<count-1))
-        at^+=uint(count)
-        return value
-    }
-    mode:=0
-    for mode<8 && (block[0]>>uint(mode))&1==0 {mode+=1}
-    if mode==8 {return}
-    m:=BC7_MODES[mode]
-    at=uint(mode)+1
-    partition:=read(bits,&at,m.partition_bits)
-    rotation:=read(bits,&at,m.rotation_bits)
-    selector:=read(bits,&at,m.selector_bit)
-    endpoints:[3][2][4]u32 // subset, endpoint, channel
-    for c in 0..<3 {
-        for s in 0..<m.subsets {for e in 0..<2 {endpoints[s][e][c]=read(bits,&at,m.color_bits)}}
-    }
-    if m.alpha_bits>0 {
-        for s in 0..<m.subsets {for e in 0..<2 {endpoints[s][e][3]=read(bits,&at,m.alpha_bits)}}
-    }
-    color_bits,alpha_bits:=m.color_bits,m.alpha_bits
-    if m.endpoint_pbits || m.shared_pbits {
-        for s in 0..<m.subsets {
-            shared:=read(bits,&at,1) if m.shared_pbits else 0
-            for e in 0..<2 {
-                p:=read(bits,&at,1) if m.endpoint_pbits else shared
-                for &v in endpoints[s][e] {v=v<<1|p}
+    partition:=bc7_field(bits,M+1,PB)
+    rotation:=bc7_field(bits,M+1+PB,RB)
+    selector:=bc7_field(bits,M+1+PB+RB,ISB)
+    E :: M+1+PB+RB+ISB
+    A :: E+3*NS*2*CB
+    P :: A+NS*2*AB
+    PBIT :: min(EPB+SPB,1)
+    NC :: CB+PBIT
+    NA :: (AB+PBIT)*min(AB,1)
+    ep:[3][2]u32 // RGBA bytes
+    #unroll for s in 0..<NS {
+        #unroll for e in 0..<2 {
+            v:[4]u32
+            #unroll for c in 0..<3 {v[c]=bc7_field(bits,E+((c*NS+s)*2+e)*CB,CB)}
+            when AB>0 {v[3]=bc7_field(bits,A+(s*2+e)*AB,AB)}
+            when EPB>0 {
+                p:=bc7_field(bits,P+s*2+e,1)
+                for &x in v {x=x<<1|p}
+            } else when SPB>0 {
+                p:=bc7_field(bits,P+s,1)
+                for &x in v {x=x<<1|p}
             }
-        }
-        color_bits+=1
-        if alpha_bits>0 {alpha_bits+=1}
-    }
-    for s in 0..<m.subsets {
-        for e in 0..<2 {
-            for &v,c in endpoints[s][e] {
-                n:=color_bits if c<3 else alpha_bits
-                v=v<<(8-n)|v>>(2*n-8) if n>0 else 255
-            }
+            #unroll for c in 0..<3 {v[c]=v[c]<<uint(8-NC)|v[c]>>uint(2*NC-8)}
+            when NA>0 {v[3]=v[3]<<uint(8-NA)|v[3]>>uint(2*NA-8)} else {v[3]=255}
+            ep[s][e]=v[0]|v[1]<<8|v[2]<<16|v[3]<<24
         }
     }
-    anchored :: proc "contextless" (subsets,partition:u32,i:int) -> bool {
-        switch subsets {
-        case 2: return i==int(BC7_ANCHORS_2[partition])
-        case 3: return i==int(BC7_ANCHORS_3[partition][0]) || i==int(BC7_ANCHORS_3[partition][1])
+    I0 :: 16*IB-NS
+    I1 :: (16*IB2-1)*min(IB2,1)
+    f0:=u64(bits>>uint(128-I0-I1))&((u64(1)<<uint(I0))-1)
+    f0=bc7_insert_zero(f0,u32(IB-1))
+    when NS==2 {
+        f0=bc7_insert_zero(f0,u32(BC7_ANCHORS_2[partition])*u32(IB)+u32(IB-1))
+    } else when NS==3 {
+        a1:=u32(BC7_ANCHORS_3[partition][0])
+        a2:=u32(BC7_ANCHORS_3[partition][1])
+        f0=bc7_insert_zero(f0,min(a1,a2)*u32(IB)+u32(IB-1))
+        f0=bc7_insert_zero(f0,max(a1,a2)*u32(IB)+u32(IB-1))
+    }
+    lo,hi,w:[16]u32
+    when IB2>0 {
+        f1:=u64(bits>>uint(128-I1))&((u64(1)<<uint(I1))-1)
+        f1=bc7_insert_zero(f1,u32(IB2-1))
+        w0:=bc7_weights(IB)
+        w1:=bc7_weights(IB2)
+        for i in 0..<16 {
+            c:=w0[(f0>>uint(i*IB))&((1<<uint(IB))-1)]
+            a:=w1[(f1>>uint(i*IB2))&((1<<uint(IB2))-1)]
+            if selector==1 {c,a=a,c}
+            w[i]=c|c<<8|c<<16|a<<24
         }
-        return false
-    }
-    indices,indices2:[16]u32
-    for i in 0..<16 {
-        anchor:=i==0 || anchored(m.subsets,partition,i)
-        indices[i]=read(bits,&at,m.index_bits-u32(anchor))
-    }
-    if m.index_bits2>0 {
-        for i in 0..<16 {indices2[i]=read(bits,&at,m.index_bits2-u32(i==0))}
-    }
-    weight :: proc "contextless" (index_bits,index:u32) -> u32 {
-        switch index_bits {
-        case 2: return BC7_WEIGHTS_2[index]
-        case 3: return BC7_WEIGHTS_3[index]
-        }
-        return BC7_WEIGHTS_4[index]
+    } else {
+        w0:=bc7_weights(IB)
+        for i in 0..<16 {w[i]=w0[(f0>>uint(i*IB))&((1<<uint(IB))-1)]*0x01010101}
     }
     for i in 0..<16 {
-        s:=u32(0)
-        switch m.subsets {
-        case 2: s=u32(BC7_PARTITIONS_2[partition][i])
-        case 3: s=u32(BC7_PARTITIONS_3[partition][i])
-        }
-        color,color_bits_index:=indices[i],m.index_bits
-        alpha,alpha_bits_index:=color,color_bits_index
-        if m.index_bits2>0 {
-            alpha,alpha_bits_index=indices2[i],m.index_bits2
-            if selector==1 {color,color_bits_index,alpha,alpha_bits_index=alpha,alpha_bits_index,color,color_bits_index}
-        }
-        e0,e1:=endpoints[s][0],endpoints[s][1]
-        texel:[4]u32
-        for c in 0..<3 {texel[c]=bc7_interpolate(e0[c],e1[c],weight(color_bits_index,color))}
-        texel[3]=bc7_interpolate(e0[3],e1[3],weight(alpha_bits_index,alpha))
-        if rotation>0 {texel[3],texel[rotation-1]=texel[rotation-1],texel[3]}
-        texels[i]={u8(texel[0]),u8(texel[1]),u8(texel[2]),u8(texel[3])}
+        s:=0
+        when NS==2 {s=int(BC7_PARTITIONS_2[partition][i])}
+        when NS==3 {s=int(BC7_PARTITIONS_3[partition][i])}
+        lo[i]=ep[s][0]
+        hi[i]=ep[s][1]
     }
+    U :: #simd[16]u16
+    B :: #simd[16]u8
+    out:[4]B
+    #unroll for q in 0..<4 {
+        l:=cast(U)transmute(B)(^[4]u32)(&lo[q*4])^
+        h:=cast(U)transmute(B)(^[4]u32)(&hi[q*4])^
+        x:=cast(U)transmute(B)(^[4]u32)(&w[q*4])^
+        out[q]=cast(B)simd.shr(l*(U(64)-x)+h*x+U(32),U(6))
+    }
+    when RB>0 {
+        for &o in out {
+            switch rotation {
+            case 1: o=simd.shuffle(o,o,3,1,2,0,7,5,6,4,11,9,10,8,15,13,14,12)
+            case 2: o=simd.shuffle(o,o,0,3,2,1,4,7,6,5,8,11,10,9,12,15,14,13)
+            case 3: o=simd.shuffle(o,o,0,1,3,2,4,5,7,6,8,9,11,10,12,13,15,14)
+            }
+        }
+    }
+    texels=transmute([16][4]u8)out
     return
 }

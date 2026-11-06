@@ -77,8 +77,16 @@ test_morph_by_cluster :: proc(origins: []u32, morph: Morph_Data) -> Morph_Data {
 		ranges[v] = {u32(len(deltas)), given.count}
 		append(&deltas, ..morph.deltas[given.first:][:given.count])
 	}
-	return {ranges = ranges, deltas = deltas[:], count = morph.count}
+	return {ranges = ranges, deltas = deltas[:], count = morph.count, step = morph.step}
 }
+
+// A delta of a target quantized on step, as a mesh stores it.
+@(private)
+test_morph_delta :: proc(target: u32, position: Vec3, normal: Vec3 = {}, tangent: Vec3 = {}, step: f32 = TEST_MORPH_STEP) -> Morph_Delta {
+	q := asset.morph_quantize({position = position, normal = normal, tangent = tangent}, step)
+	return {target = target, position = q.position, normal = q.normal, tangent = q.tangent}
+}
+TEST_MORPH_STEP :: 1.0 / 4096
 
 // Influences of two joints at weights 1 - w and w.
 @(private)

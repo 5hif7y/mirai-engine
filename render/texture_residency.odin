@@ -25,8 +25,8 @@ import "mirai:rhi"
 
 // Texels of side of the levels a streamed texture holds whatever its
 // distance: what a load brings first (assets of a section) and what a texture
-// nothing near shows keeps.
-TEXTURE_TAIL :: 128
+// nothing near shows keeps. A .tex stores them so that they decode alone.
+TEXTURE_TAIL :: asset.TEXTURE_TAIL
 // log2(1.25): a level stays until every view is 1.25 times farther than where
 // it was asked for, as what streams by distance (scene.RESIDENT_KEEP).
 TEXTURE_KEEP_LEVELS :: f32(0.32192809)

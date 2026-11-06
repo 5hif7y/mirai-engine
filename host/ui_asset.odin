@@ -27,11 +27,11 @@ ui_tree_document :: proc(doc:^asset.Document,types:^asset.Types,id:base.Asset_Id
 
 @(private)
 ui_tree_tables :: proc(doc:^asset.Document,types:^asset.Types,data:ui.Tree_Data) -> asset.Error {
-    asset.document_put(doc,types,asset.UI_TABLE_NODES,data.nodes,{},.LZ4) or_return
+    asset.document_put(doc,types,asset.UI_TABLE_NODES,data.nodes,{},.LZ) or_return
     asset.document_put(doc,types,asset.UI_TABLE_STYLES,data.styles) or_return
     asset.document_put(doc,types,asset.UI_TABLE_VARIANTS,data.variants) or_return
     asset.document_put(doc,types,asset.UI_TABLE_COMPONENTS,data.components) or_return
-    asset.document_put(doc,types,asset.UI_TABLE_COMPONENT_NODES,data.component_nodes,{},.LZ4) or_return
+    asset.document_put(doc,types,asset.UI_TABLE_COMPONENT_NODES,data.component_nodes,{},.LZ) or_return
     asset.document_put(doc,types,asset.UI_TABLE_OVERRIDES,data.overrides) or_return
     asset.document_put(doc,types,asset.UI_TABLE_IMAGES,data.images) or_return
     asset.document_put(doc,types,asset.UI_TABLE_ANIMS,data.anims) or_return
@@ -41,9 +41,9 @@ ui_tree_tables :: proc(doc:^asset.Document,types:^asset.Types,data:ui.Tree_Data)
     asset.document_put(doc,types,asset.UI_TABLE_ANIM_SETS,data.anim_sets) or_return
     asset.document_put(doc,types,asset.UI_TABLE_FONTS,data.fonts) or_return
     asset.document_put(doc,types,asset.UI_TABLE_STYLE_INFOS,data.style_infos) or_return
-    asset.document_put(doc,types,asset.UI_TABLE_TRANSLATIONS,data.translations,{},.LZ4) or_return
+    asset.document_put(doc,types,asset.UI_TABLE_TRANSLATIONS,data.translations,{},.LZ) or_return
     asset.document_put(doc,types,asset.UI_TABLE_GRID_TRACKS,data.grid_tracks) or_return
-    asset.document_put(doc,types,asset.UI_TABLE_TEXT,data.text,{.Bulk},.LZ4) or_return
+    asset.document_put(doc,types,asset.UI_TABLE_TEXT,data.text,{.Bulk},.LZ) or_return
     return .None
 }
 

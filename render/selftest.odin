@@ -12,7 +12,7 @@ hardware_rt_self_test :: proc(r: ^Renderer) -> (ok: bool, reason: string) {
 	d := r.device
 	// The RHI makes native the instances the renderer writes, as this test does.
 	if !rhi.tlas_translator_set(d, &r.shader_codes[.Tlas_Instances_Comp]) {return false, fmt.tprintf("translation of TLAS instances: %s", rhi.device_error(d))}
-	pipeline := rhi.pipeline_create_compute(d, {shader = &SHADERS[.Rt_Selftest_Comp], name = "rt self test"})
+	pipeline := rhi.pipeline_create_compute(d, {shader = &r.shader_codes[.Rt_Selftest_Comp], name = "rt self test"})
 	if pipeline == 0 {return false, "self-test pipeline failed"}
 	defer rhi.pipeline_destroy(d, pipeline)
 

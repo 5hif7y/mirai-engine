@@ -186,6 +186,21 @@ an_import_takes_a_texture_that_another_import_built_from_the_texture_cache :: pr
     testing.expect(t,format==.BC1 && mips==5)
     _,_,again:=imported(t,&types,image,fmt.tprintf("%s/e",folder),options)
     testing.expect(t,again==first)
+
+    // The editor's import takes the Final of the cache, and builds Fast without one.
+    fast:=options
+    fast.fast_textures=true
+    _,_,taken:=imported(t,&types,image,fmt.tprintf("%s/f",folder),fast)
+    testing.expect(t,taken==first,"the Final the cache holds")
+    fast.texture_cache=fmt.tprintf("%s/empty",folder)
+    report,error:=import_source(image,fmt.tprintf("%s/g",folder),fast)
+    defer importer.report_destroy(&report)
+    if testing.expectf(t,error.code==.None && len(report.assets)==1,"%v %s",error.code,error.message) {
+        a:asset.Asset
+        testing.expect_value(t,asset.asset_load(&a,report.assets[0].path,context.temp_allocator),asset.Error.None)
+        view,view_error:=asset.texture_view(&a,&types)
+        testing.expect(t,view_error==.None && .Fast in view.info.flags && view.info.format==.BC1,"Fast, for a cook to encode again")
+    }
 }
 
 @(test)

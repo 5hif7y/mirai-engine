@@ -64,10 +64,10 @@ settings_live_next_to_the_source_and_importing_again_uses_them :: proc(t:^testin
     source:=sphere_obj(folder)
     stored,found,load_error:=importer.settings_load(source)
     testing.expect(t,!found && load_error.code==.None && stored=={},"a source without settings has the defaults")
-    wanted:=importer.Import_Settings{max_texture_size=512,textures=.Uncompressed,image=.Normal,alpha_coverage=0.5,lods=.None,collision=.Pieces,collision_hulls=4,rig=.Spider}
+    wanted:=importer.Import_Settings{max_texture_size=512,textures=.Uncompressed,rdo_lambda=-1,image=.Normal,alpha_coverage=0.5,lods=.None,collision=.Pieces,collision_hulls=4,rig=.Spider}
     testing.expect(t,importer.settings_save(source,wanted))
     text,_:=os.read_entire_file(importer.settings_path(source,context.temp_allocator),context.temp_allocator)
-    testing.expect(t,strings.contains(string(text),"\"lods\": \"None\"") && strings.contains(string(text),"\"collision\": \"Pieces\"") && strings.contains(string(text),"\"max_texture_size\": 512") && strings.contains(string(text),"\"alpha_coverage\": 0.5"),string(text))
+    testing.expect(t,strings.contains(string(text),"\"lods\": \"None\"") && strings.contains(string(text),"\"collision\": \"Pieces\"") && strings.contains(string(text),"\"max_texture_size\": 512") && strings.contains(string(text),"\"alpha_coverage\": 0.5") && strings.contains(string(text),"\"rdo_lambda\": -1"),string(text))
     stored,found,load_error=importer.settings_load(source)
     testing.expect(t,found && load_error.code==.None && stored==wanted)
     // The same settings are not written again.

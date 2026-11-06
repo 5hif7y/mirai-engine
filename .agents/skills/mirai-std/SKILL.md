@@ -18,7 +18,7 @@ description: Mirai standard library for games, with the packages std/base, jobs,
   random, noise, color and quantization: [std/math](references/math.md).
 - Tweens, clips, additive blend spaces, poses, blending, IK and retarget:
   [std/anim](references/anim.md).
-  - Resident keys: [anim-storage](references/anim-storage.md).
+  - Compressed and cooked clips: [anim-storage](references/anim-storage.md).
   - Motion matching, inertialization, warping and distance to time:
     [anim-motion](references/anim-motion.md).
   - Chains, Multi IK, springs, twist, reach with stretch, spline, aiming with an up axis and pose

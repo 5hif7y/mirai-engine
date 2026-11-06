@@ -205,43 +205,69 @@ when_write :: proc(d:^Declare,scope:^File_Scope,out:^Output,s:^ast.When_Stmt,ind
 }
 
 // Procedures of C stay in the binary; the binary exports each one under its
-// own name with the calling convention of its block.
+// own name with the calling convention of its block. An LLVM intrinsic has no
+// symbol to export: its declaration is copied as it is.
 @(private="file")
 foreign_block_write :: proc(d:^Declare,scope:^File_Scope,out:^Output,s:^ast.Foreign_Block_Decl,indent:string) {
     convention:="c"
+    private_file:=false
     for attribute in s.attributes {
         for elem in attribute.elems {
-            field,is_field:=elem.derived.(^ast.Field_Value)
-            if !is_field {continue}
-            if key,_:=field.field.derived.(^ast.Ident);key!=nil && key.name=="default_calling_convention" {
-                if value,is_lit:=field.value.derived.(^ast.Basic_Lit);is_lit {convention=strings.trim(value.tok.text,"\"")}
+            key,value:=attribute_key(elem)
+            switch key {
+            case "default_calling_convention": convention=value
+            case "private": private_file=value=="file"
             }
         }
     }
     body,ok:=s.body.derived.(^ast.Block_Stmt)
     if !ok {return}
+    intrinsics:=0
     for stmt in body.stmts {
         decl,is_value:=stmt.derived.(^ast.Value_Decl)
         if !is_value || len(decl.names)!=1 || len(decl.values)!=1 {continue}
         lit,is_lit:=decl.values[0].derived.(^ast.Proc_Lit)
         if !is_lit {continue}
+        if intrinsic(decl) {
+            if intrinsics==0 {
+                fmt.sbprintfln(&out.decl,"%s@(default_calling_convention=%q%s)",indent,convention,private_file?",private=\"file\"":"")
+                fmt.sbprintfln(&out.decl,"%sforeign _ {{",indent)
+            }
+            fmt.sbprintfln(&out.decl,"%s    %s",indent,decl_text(scope,decl))
+            intrinsics+=1
+            continue
+        }
         if c_vararg(lit.type) {continue}
         name:=ident_text(decl.names[0])
         proc_declare(d,scope,out,decl,lit,name,convention,indent)
     }
+    if intrinsics>0 {fmt.sbprintfln(&out.decl,"%s}}",indent)}
+}
+
+// Whether a foreign procedure is an LLVM intrinsic, by its link name.
+@(private="file")
+intrinsic :: proc(decl:^ast.Value_Decl) -> bool {
+    for attribute in decl.attributes {
+        for elem in attribute.elems {
+            if key,value:=attribute_key(elem);key=="link_name" && strings.has_prefix(value,"llvm.") {return true}
+        }
+    }
+    return false
 }
 
 @(private="file")
 value_write :: proc(d:^Declare,scope:^File_Scope,out:^Output,decl:^ast.Value_Decl,indent:string) {
     lit:^ast.Proc_Lit
     if len(decl.values)==1 {lit,_=decl.values[0].derived.(^ast.Proc_Lit)}
-    private_file,private:=scope.private_file,scope.private_package
+    private_file,private,rodata:=scope.private_file,scope.private_package,false
     for attribute in decl.attributes {
         for elem in attribute.elems {
             key,value:=attribute_key(elem)
             switch key {
             case "private":
                 if value=="file" {private_file=true} else {private=true}
+            case "rodata":
+                rodata=true
             case "init","fini":
                 return
             }
@@ -249,8 +275,9 @@ value_write :: proc(d:^Declare,scope:^File_Scope,out:^Output,decl:^ast.Value_Dec
     }
     if lit==nil {
         // Types, constants and groups of procedures are the same here; a
-        // variable of the package only when the rest can see it.
-        if decl.is_mutable && (private || private_file) {return}
+        // variable of the package only when the rest can see it, and a
+        // read-only table always, which the inline bodies copied here read.
+        if decl.is_mutable && (private || private_file) && !rodata {return}
         fmt.sbprintfln(&out.decl,"%s%s",indent,decl_text(scope,decl))
         return
     }

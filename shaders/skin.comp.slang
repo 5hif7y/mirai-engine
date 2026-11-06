@@ -9,15 +9,17 @@
 #define MIRAI_GROUP_Z 1
 struct Skin_Joint { float4 current[3]; float4 previous[3]; };
 // clusters: those it poses, from its first; output, previous: where the vertices go, words of the vertex pool.
-struct Params_Block { uint mesh; uint clusters; uint output; uint previous; uint morph_count; uint pad0; uint pad1; uint pad2; };
+// morph_step: of the positions of the morph deltas.
+struct Params_Block { uint mesh; uint clusters; uint output; uint previous; uint morph_count; float morph_step; uint pad0; uint pad1; };
 struct Morph_Range { uint first; uint count; };
-struct Morph_Delta { float3 position; float3 normal; float3 tangent; uint target; };
 [[vk::binding(SLOT_PARAMS,0)]] ConstantBuffer<Params_Block> params : register(MIRAI_REGISTER(b,SLOT_PARAMS),space0);
 // The influences of each vertex of the mesh (asset.Skin_Vertex): eight joints in four words, eight weights of 255ths in two.
 [[vk::binding(SLOT_PASS0,0)]] StructuredBuffer<uint> influences : register(MIRAI_REGISTER(t,SLOT_PASS0),space0);
 [[vk::binding(SLOT_PASS1,0)]] StructuredBuffer<Skin_Joint> joints : register(MIRAI_REGISTER(t,SLOT_PASS1),space0);
 [[vk::binding(SLOT_PASS2,0)]] StructuredBuffer<Morph_Range> morph_ranges : register(MIRAI_REGISTER(t,SLOT_PASS2),space0);
-[[vk::binding(SLOT_PASS3,0)]] StructuredBuffer<Morph_Delta> morph_deltas : register(MIRAI_REGISTER(t,SLOT_PASS3),space0);
+// Five words a delta (render.Morph_Delta): its target; its position, then its normal, as six
+// int16 two to a word, low first; its tangent as three signed 10-bit fields from bit 0.
+[[vk::binding(SLOT_PASS3,0)]] StructuredBuffer<uint> morph_deltas : register(MIRAI_REGISTER(t,SLOT_PASS3),space0);
 // Of each target, its weight now and in the frame before.
 [[vk::binding(SLOT_PASS4,0)]] StructuredBuffer<float2> morph_weights : register(MIRAI_REGISTER(t,SLOT_PASS4),space0);
 [[vk::binding(SLOT_MESHES,0)]] StructuredBuffer<Mesh> meshes : register(MIRAI_REGISTER(t,SLOT_MESHES),space0);
@@ -57,12 +59,16 @@ void main(uint3 group:SV_GroupID,uint3 lane:SV_GroupThreadID) {
             Morph_Range range=morph_ranges[index];
             float3 t=tangent.xyz;
             for (uint d=0;d<range.count;++d) {
-                Morph_Delta delta=morph_deltas[range.first+d];
-                float2 weight=morph_weights[delta.target];
-                position+=delta.position*weight.x;
-                n+=delta.normal*weight.x;
-                t+=delta.tangent*weight.x;
-                old_position+=delta.position*weight.y;
+                uint at=(range.first+d)*5u;
+                uint w1=morph_deltas[at+1u],w2=morph_deltas[at+2u],w3=morph_deltas[at+3u],w4=morph_deltas[at+4u];
+                float2 weight=morph_weights[morph_deltas[at]];
+                float3 moved=float3(asint(uint3(w1<<16u,w1,w2<<16u))>>16)*params.morph_step;
+                float3 normal=float3(asint(uint3(w2,w3<<16u,w3))>>16)*(2.0/32767.0);
+                float3 turned=float3(asint(uint3(w4<<22u,w4<<12u,w4<<2u))>>22)*(2.0/511.0);
+                position+=moved*weight.x;
+                n+=normal*weight.x;
+                t+=turned*weight.x;
+                old_position+=moved*weight.y;
             }
             n=dot(n,n)>1e-20?normalize(n):rest.normal;
             t-=n*dot(n,t);

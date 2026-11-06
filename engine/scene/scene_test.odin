@@ -374,7 +374,7 @@ scene_test_lamps :: proc(t:^testing.T,types:^asset.Types,id:base.Asset_Id,count:
         if component.name=="Scene_Test_Lamp" {entry=asset.blob_chunk(&file.blob,component.table.columns[1].chunk)}
     }
     asset.asset_close(&file)
-    if !testing.expect_value(t,entry.compression,asset.Compression.LZ4) {return nil}
+    if !testing.expect_value(t,entry.compression,asset.Compression.LZ) {return nil}
     mem.set(&data[entry.offset],0xff,int(entry.size))
     (cast(^asset.Header)raw_data(data)).content_hash=asset.blob_hash(data)
     return data

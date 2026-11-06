@@ -5,14 +5,14 @@ import "core:os"
 import "core:testing"
 import "mirai:project"
 
-// The cook of a project as the job Game does it: without a texture cache,
-// filling an empty one and from it. Run with --release -define:COOK_BENCH=true;
+// The cook of a project as the job Game does it: filling an empty texture
+// cache and from it. Run with --release -define:COOK_BENCH=true;
 // COOK_BENCH_PROJECT names the project, the demo when empty.
 @(private="file") COOK_BENCH :: #config(COOK_BENCH,false)
 @(private="file") COOK_BENCH_PROJECT :: #config(COOK_BENCH_PROJECT,"")
 
 @(test)
-bench_cook_of_a_project_with_and_without_its_texture_cache :: proc(t:^testing.T) {
+bench_cook_of_a_project_filling_its_texture_cache_and_from_it :: proc(t:^testing.T) {
     if !COOK_BENCH {return}
     engine:=#directory+"/../.."
     root:=COOK_BENCH_PROJECT if COOK_BENCH_PROJECT!="" else project.path(engine,"demo",allocator=context.temp_allocator)
@@ -33,18 +33,10 @@ bench_cook_of_a_project_with_and_without_its_texture_cache :: proc(t:^testing.T)
         if found.prefix!="" {append(&plugins,found)}
     }
     desc.plugins=plugins[:]
-    best :: proc(t:^testing.T,desc:Cook_Desc,runs:int) -> (seconds:f64,report:Cook_Report) {
-        seconds=max(f64)
-        for _ in 0..<runs {
-            report=cook_assets(desc)
-            testing.expect_value(t,report.error,Cook_Error.None)
-            seconds=min(seconds,report.seconds)
-        }
-        return
-    }
-    plain,report:=best(t,desc,3)
     desc.texture_cache=fmt.tprintf("%s/cache",folder)
-    filling,_:=best(t,desc,1)
-    cached,_:=best(t,desc,3)
-    fmt.printfln("cook of %s: %d files, %d textures compressed; without a texture cache %.1f ms, filling it %.1f ms, from it %.1f ms",p.root,len(report.files),report.textures_compressed,plain*1000,filling*1000,cached*1000)
+    filling:=cook_assets(desc)
+    testing.expect_value(t,filling.error,Cook_Error.None)
+    cached:=cook_assets(desc)
+    testing.expect_value(t,cached.error,Cook_Error.None)
+    fmt.printfln("cook of %s on %d threads: %d files, %d textures compressed; filling the texture cache %.1f s, from it %.1f s",p.root,os.get_processor_core_count(),len(cached.files),cached.textures_compressed,filling.seconds,cached.seconds)
 }

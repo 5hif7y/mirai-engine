@@ -1,7 +1,7 @@
 package asset
 
-import "core:hash/xxhash"
 import "core:mem"
+import "mirai:std/base"
 import "mirai:std/serial"
 
 // What changed between two documents, one line per difference:
@@ -210,7 +210,7 @@ diff_tables :: proc(d:^Diff,table_a,table_b:int) {
                 serial.text_write_raw(d.w," rows, ")
                 serial.text_write_int(d.w,i64(len(data)))
                 serial.text_write_raw(d.w," bytes, hash ")
-                serial.text_write_hex(d.w,xxhash.XXH3_64_default(data),16,false)
+                serial.text_write_hex(d.w,base.hash64(data),16,false)
             }
             line_end(d)
         }

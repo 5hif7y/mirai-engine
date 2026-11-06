@@ -11,6 +11,7 @@ import "mirai:std/serial"
 
 @(test)
 built_textures_are_kept_by_image_and_settings_and_read_back_whole :: proc(t:^testing.T) {
+    defer free_all(context.temp_allocator)
     types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
     directory,_:=os.temp_directory(context.temp_allocator)
     folder:=fmt.tprintf("%s/mirai-textures-%d-cache",directory,os.get_pid())
@@ -34,7 +35,10 @@ built_textures_are_kept_by_image_and_settings_and_read_back_whole :: proc(t:^tes
     testing.expect(t,cache_write(folder,key,&types,&built))
     read,found:=cache_read(folder,key,&types,context.temp_allocator)
     testing.expect(t,found && read.width==built.width && read.height==built.height && read.format==built.format && read.flags==built.flags && len(read.mips)==len(built.mips))
-    for level,at in built.mips {testing.expect(t,slice.equal(read.mips[at],level))}
+    for level,at in built.mips {
+        side:=max(16>>uint(at),1)
+        testing.expect(t,same_level(built.format,read.mips[at],level,side,side))
+    }
     _,other_key:=cache_read(folder,key+2,&types,context.temp_allocator)
     testing.expect(t,!other_key)
     _,no_folder:=cache_read("",key,&types,context.temp_allocator)
@@ -76,5 +80,4 @@ built_textures_are_kept_by_image_and_settings_and_read_back_whole :: proc(t:^tes
         _,read_back:=cache_read(folder,key,&types,context.temp_allocator)
         testing.expect(t,!read_back)
     }
-    free_all(context.temp_allocator)
 }

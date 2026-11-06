@@ -78,7 +78,7 @@ write_assets :: proc(cli:^Cli,types:^Types) {
 
     pixels:=make([]u8,64+16+4);defer delete(pixels)
     for &b,i in pixels {b=u8(i)}
-    testing.expect_value(t,texture_save(file(cli,"leaf.tex"),types,{id={0x7e8,1},width=4,height=4,format=.RGBA8,flags={.Srgb},mips={pixels[:64],pixels[64:80],pixels[80:]},compression=.LZ4}),Error.None)
+    testing.expect_value(t,texture_save(file(cli,"leaf.tex"),types,{id={0x7e8,1},width=4,height=4,format=.RGBA8,flags={.Srgb},mips={pixels[:64],pixels[64:80],pixels[80:]}}),Error.None)
 
     info:=MATERIAL_DEFAULTS
     info.maps.base_color.texture={0x7e8,1}
@@ -257,7 +257,7 @@ cli_reads_and_edits_assets_of_every_kind :: proc(t:^testing.T) {
     serial.text_reader_init(&reader,dump.out,context.temp_allocator)
     testing.expect(t,serial.text_skip(&reader) && serial.text_end(&reader),"dump prints one JSON value")
     with_schema:=expect_run(&cli,0,ANY,"dump",file(&cli,"plant.mesh"),"--schema")
-    testing.expect(t,strings.contains(with_schema.out,`{"kind": "Struct", "name": "Mesh_Page", "size": 40, "align": 4, "fields": [`) && !strings.contains(with_schema.out,`"data": [0,`),"the schema is printed and bulk rows are not")
+    testing.expect(t,strings.contains(with_schema.out,`{"kind": "Struct", "name": "Mesh_Page", "size": 44, "align": 4, "fields": [`) && !strings.contains(with_schema.out,`"data": [0,`),"the schema is printed and bulk rows are not")
 
     // verify finds what is wrong with a file.
     bytes,_:=serial.file_read(file(&cli,"plant.mesh"),context.temp_allocator)
@@ -277,12 +277,12 @@ cli_reads_and_edits_assets_of_every_kind :: proc(t:^testing.T) {
     keys:=[2]anim.Keyframe{{time=0},{time=1,value={0,1,0,0}}}
     clips:=[1]Animation_Clip_Desc{{name="rise",tracks={{target="lift",property=.Position,keys=keys[:]}}}}
     testing.expect_value(t,animation_save(file(&cli,"rise.anim"),&types,{id={0xa11,1},clips=clips[:]}),Error.None)
-    samples:=[8]i16{}
-    testing.expect_value(t,sound_save(file(&cli,"tick.sound"),&types,{id={0x50d,1},channels=2,sample_rate=48000,frames=4,samples=samples[:]}),Error.None)
+    lossless:=[8]u8{'M','L','P','C',0,0,0,0}
+    testing.expect_value(t,sound_save(file(&cli,"tick.sound"),&types,{id={0x50d,1},channels=2,sample_rate=48000,frames=4,lossless=lossless[:]}),Error.None)
     expect_run(&cli,0,fmt.tprintf("ok %s\nok %s\n",file(&cli,"rise.anim"),file(&cli,"tick.sound")),"verify",file(&cli,"rise.anim"),file(&cli,"tick.sound"))
     expect_run(&cli,0,"","set",file(&cli,"rise.anim"),"tracks[0].key_count=9")
     expect_run(&cli,0,"","set",file(&cli,"tick.sound"),"sound.channels=7")
-    expect_run(&cli,1,fmt.tprintf("FAIL %s: animation: an invalid range, key or name\nFAIL %s: sound: inconsistent channels, sample rate, samples or file\n",file(&cli,"rise.anim"),file(&cli,"tick.sound")),
+    expect_run(&cli,1,fmt.tprintf("FAIL %s: animation: an invalid range, key or name\nFAIL %s: sound: inconsistent channels, sample rate, lossless data or file\n",file(&cli,"rise.anim"),file(&cli,"tick.sound")),
         "verify",file(&cli,"rise.anim"),file(&cli,"tick.sound"))
     // And so do fonts, texts and prompts.
     testing.expect_value(t,font_save(file(&cli,"face.font"),&types,{id={0xf07,1},file=#load("../assets/fixtures/cff.otf")}),Error.None)

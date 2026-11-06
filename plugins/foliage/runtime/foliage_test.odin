@@ -59,6 +59,19 @@ a_foliage_asset_comes_back_as_it_was_written_and_damage_is_refused :: proc(t:^te
     s:Source
     defer source_destroy(&s)
     sample(&s)
+    // A cell whose neighbours are coded from each other: ids out of turn,
+    // positions and grounds of both signs and -0, every rotation pattern.
+    rotations:=[?]u32{0,max(u32),u32(mm.quat_pack(1,10)),0x9abcdef1}
+    for k in 0..<64 {
+        f:=f32(k)
+        coord,id:=source_instance_add(&s,u32(k%2),{64+f*0.49,-f*1.75+3,-31.5+f*0.3},rotations[k%len(rotations)],{0.5+f,1+f*0.01},INSTANCE_GROUNDED,-f*0.125)
+        testing.expect(t,coord==[2]i32{2,-1} && id!=0)
+    }
+    shuffled:=source_cell(&s,{2,-1})
+    shuffled.manual[3].ground=-0.0
+    shuffled.manual[5].position.y=-0.0
+    shuffled.manual[7],shuffled.manual[40]=shuffled.manual[40],shuffled.manual[7]
+    source_override_set(&s,{2,-1},{type=1,point=900,kind=.Moved,instance={type=1,position={31.99,-4,0},rotation=max(u32),scale={3,3},flags=INSTANCE_GROUNDED,ground=-0.0}})
     data,error:=source_bytes(&s,{5,6},&types)
     defer delete(data)
     if !testing.expect_value(t,error,asset.Error.None) {return}
@@ -75,9 +88,9 @@ a_foliage_asset_comes_back_as_it_was_written_and_damage_is_refused :: proc(t:^te
     testing.expect_value(t,len(back.cells),len(s.cells))
     for cell,i in s.cells {
         other:=back.cells[i]
-        testing.expect(t,other.coord==cell.coord && other.generate==cell.generate && len(other.manual)==len(cell.manual) && len(other.overrides)==len(cell.overrides))
-        for b,k in cell.manual {testing.expect_value(t,other.manual[k],b)}
-        for o,k in cell.overrides {testing.expect_value(t,other.overrides[k],o)}
+        testing.expect(t,other.coord==cell.coord && other.generate==cell.generate)
+        testing.expect(t,same_rows(other.manual[:],cell.manual[:]),"manual instances come back bit for bit, in their order")
+        testing.expect(t,same_rows(other.overrides[:],cell.overrides[:]),"overrides come back bit for bit")
     }
     // Cut at any length, a file is refused and the source it would replace stays.
     for length in 0..<len(data) {

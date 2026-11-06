@@ -91,8 +91,9 @@ mesh_round_trips_its_clusters_compressed :: proc(t:^testing.T) {
     testing.expect(t,view.info.skeleton==base.Asset_Id{7,7} && view.joints[1].node==1)
     testing.expect(t,len(view.colliders)==2 && view.colliders[0].size==[3]f32{1,2,3} && view.collision_points[3]==[3]f32{0,0,1} && view.collision_indices[5]==3)
     testing.expect(t,view.source!=nil && serial.text_field(view.source.source[:])=="models/model.gltf" && view.source.index==2 && view.source.importer_version==3)
-    // The bulk columns are LZ4: they are memory of the asset, not the file.
-    testing.expect(t,inside(&a,view.info) && !inside(&a,raw_data(view.vertices)) && !inside(&a,raw_data(view.clusters)) && !inside(&a,raw_data(view.triangles)) && !inside(&a,raw_data(view.skin)))
+    // The bulk columns are LZ: they are memory of the asset, not the file. LZ keeps a
+    // chunk of a few hundred bytes as it is, like the clusters here.
+    testing.expect(t,inside(&a,view.info) && !inside(&a,raw_data(view.vertices)) && !inside(&a,raw_data(view.triangles)) && !inside(&a,raw_data(view.skin)))
     table,_:=asset_table(&a,"vertices")
     testing.expect(t,.Bulk in table.flags && blob_chunk(&a.blob,table.columns[0].chunk).tag==TAG_BULK)
 }
@@ -318,6 +319,64 @@ texture_round_trips_every_format_and_checks_level_sizes :: proc(t:^testing.T) {
     defer asset_close(&a)
     _,error:=texture_view(&a,&types)
     testing.expect_value(t,error,Error.Corrupt)
+    free_all(context.temp_allocator)
+}
+
+@(test)
+a_read_of_the_small_levels_decodes_only_the_start_of_the_texels :: proc(t:^testing.T) {
+    types:Types;types_init(&types);defer types_destroy(&types)
+    // BC1 whose endpoints change slowly and whose indices are noise: as planes
+    // of fields it compresses smaller. Its levels take several blocks of LZ.
+    SIDE :: 1024
+    count:=texture_mip_count(SIDE,SIDE)
+    levels:=make([][]u8,count,context.temp_allocator)
+    state:=u64(5)
+    for &level,i in levels {
+        side:=max(SIDE>>uint(i),1)
+        level=make([]u8,texture_level_size(.BC1,side,side),context.temp_allocator)
+        for at:=0;at<len(level);at+=8 {
+            endpoint:=u16(at/8/256)
+            level[at],level[at+1],level[at+2],level[at+3]=u8(endpoint),u8(endpoint>>8),u8(endpoint+1),0x80
+            for k in 4..<8 {level[at+k]=u8(test_random(&state))}
+        }
+    }
+    for fast in ([2]bool{false,true}) {
+        doc:Document
+        flags:=Texture_Flags{.Fast} if fast else {}
+        testing.expect_value(t,texture_document(&doc,&types,{id={3,4},width=SIDE,height=SIDE,format=.BC1,flags=flags,mips=levels}),Error.None)
+        w:serial.Writer;serial.writer_init(&w);defer serial.writer_destroy(&w)
+        testing.expect_value(t,document_write(&doc,&w),Error.None)
+        document_destroy(&doc)
+        bytes:=serial.writer_bytes(&w)
+        a:Asset
+        testing.expect_value(t,asset_open(&a,bytes),Error.None)
+        view,error:=texture_open(&a,&types)
+        testing.expect(t,error==.None && texture_mip(view,count-1)==nil,"open decodes no level")
+        testing.expectf(t,(.Fields in view.info.flags)==!fast,"planes of fields when they are smaller, never for fast blocks (fast: %v)",fast)
+        testing.expect(t,view.mips[count-1].offset==0 && view.mips[0].offset>view.mips[1].offset,"the smallest level first")
+        testing.expect_value(t,texture_decode(&a,&types,&view,0),Error.None)
+        for level,i in levels {
+            got:=texture_mip(view,i)
+            testing.expect(t,mem.compare(got,level)==0 && uintptr(raw_data(got))%TEXTURE_BULK_ALIGNMENT==0)
+        }
+        table,_:=asset_table(&a,"texels")
+        entry:=blob_chunk(&a.blob,table.columns[0].chunk)
+        testing.expect(t,entry.compression==.LZ && entry.uncompressed_size>u64(len(levels[0])))
+        asset_close(&a)
+
+        // With the end of the stream damaged, the levels at its start still read.
+        damaged:=make([]u8,len(bytes),context.temp_allocator)
+        copy(damaged,bytes)
+        for k in 1..=64 {damaged[entry.offset+entry.size-u64(k)]~=0x5a}
+        testing.expect_value(t,asset_open(&a,damaged),Error.None)
+        view,error=texture_open(&a,&types)
+        testing.expect(t,error==.None && texture_decode(&a,&types,&view,2)==.None)
+        testing.expect(t,view.first==2 && texture_mip(view,1)==nil && len(view.texels)<len(levels[0])/2)
+        for level in 2..<count {testing.expectf(t,mem.compare(texture_mip(view,level),levels[level])==0,"level %d",level)}
+        whole:=texture_decode(&a,&types,&view,0)
+        testing.expect(t,whole!=.None || mem.compare(texture_mip(view,0),levels[0])!=0,"a read of every level decodes the damaged end")
+        asset_close(&a)
+    }
     free_all(context.temp_allocator)
 }
 

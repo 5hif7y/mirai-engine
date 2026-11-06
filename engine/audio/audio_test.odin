@@ -36,8 +36,10 @@ fixture_init :: proc(t:^testing.T,f:^Fixture,name:string,set:asset.Sound_Set_Inf
     types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
     samples:=make([]i16,4800,context.temp_allocator)
     for &sample in samples {sample=8000}
+    lossless,coded:=mixer.lossless_encode(samples,1,48000,context.temp_allocator)
+    if !testing.expect_value(t,coded,mixer.Error.None) {return false}
     for sound in ([3]struct{id:base.Asset_Id,name:string}{{HUM,"hum"},{STEP_A,"step_a"},{STEP_B,"step_b"}}) {
-        desc:=asset.Sound_Desc{id=sound.id,channels=1,sample_rate=48000,frames=len(samples),samples=samples}
+        desc:=asset.Sound_Desc{id=sound.id,channels=1,sample_rate=48000,frames=len(samples),lossless=lossless}
         if !testing.expect_value(t,asset.sound_save(fmt.tprintf("%s/%s.sound",f.root,sound.name),&types,desc),asset.Error.None) {return false}
     }
     info:=set

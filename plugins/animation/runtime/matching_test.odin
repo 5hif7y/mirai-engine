@@ -261,7 +261,7 @@ match_fixture :: proc(t:^testing.T,f:^Match_Fixture,memory:u32=MATCH_INFO_DEFAUL
     f.content.id,f.content.generation={0x3a7c,3},1
     if !lib.library_init(&f.content.lib,{max_keys=64,max_tracks=16,max_clips=2*len(descs),max_markers=2}) {return false}
     for desc in descs {if _,error:=lib.clip_add(&f.content.lib,desc);error!=.None {return false}}
-    if _,error:=lib.library_optimize(&f.content.lib);error!=.None {return false}
+    if _,error:=lib.library_compress(&f.content.lib);error!=.None {return false}
     host.content_animation_loops(&f.content.lib,len(descs));f.content.clip_count=len(descs)
     f.content.markers=make([]u64,1);f.content.markers[0]=base.name_hash("release")
     f.assets.registry.by_id=make(map[base.Asset_Id]u32)

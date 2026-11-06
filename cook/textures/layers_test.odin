@@ -3,6 +3,7 @@ package textures
 import "core:math"
 import "core:testing"
 import "mirai:asset"
+import "mirai:cook/compressor/texture/bc67"
 
 @(private="file")
 floats_of :: proc(values:[][4]f32) -> []u8 {
@@ -39,7 +40,7 @@ hdr_is_bc6h_without_clipping_light :: proc(t:^testing.T) {
     for texel,at in decoded_level(&built,0,0) {
         for c in 0..<3 {worst=max(worst,abs(texel[c]-values[at][c])/values[at][c])}
     }
-    testing.expectf(t,worst<0.06,"a gradient of light keeps every texel within %v of its value",worst)
+    testing.expectf(t,worst<0.08,"a gradient of light keeps every texel within %v of its value",worst)
     for texel in decoded_level(&built,4,0) {testing.expectf(t,texel.r>5 && abs(texel.b/texel.r-0.6)<0.05,"the last level keeps the light above 1 and its tint: %v",texel)}
 
     // What BC6H cannot hold is kept in half floats, and so is what asks for it.
@@ -116,5 +117,61 @@ images_of_16_bits_and_radiance_keep_what_they_hold :: proc(t:^testing.T) {
     defer built_destroy(&kept)
     testing.expect_value(t,kept.format,asset.Texture_Format.BC6H)
     testing.expectf(t,abs(decoded_level(&kept,0,0)[0].r-100)<3,"100 is not clipped: %v",decoded_level(&kept,0,0)[0])
+    free_all(context.temp_allocator)
+}
+
+// asset decodes every mode the encoder writes as the reference decoder
+// does: the blocks of a texture, and blocks of any bits.
+@(private="file",rodata)
+WEIGHTS_3 := [8]u8{0,9,18,27,37,46,55,64}
+@(private="file",rodata)
+WEIGHTS_4 := [16]u8{0,4,9,13,17,21,26,30,34,38,43,47,51,55,60,64}
+
+@(test)
+bc6h_decodes_every_mode_as_the_encoder_reads_it :: proc(t:^testing.T) {
+    SIDE :: 32
+    values:=make([][4]f32,SIDE*SIDE,context.temp_allocator)
+    for &value,at in values {
+        x,y:=at%SIDE,at/SIDE
+        light:=0.01*math.pow(f32(4000),f32((x*7+y*13)%SIDE)/(SIDE-1))
+        value={light,light*f32(x%5+1)/5,light*f32(y%3+1)/3,1}
+    }
+    built,_:=build({texels=floats_of(values),width=SIDE,height=SIDE,format=.RGBA32F},{})
+    defer built_destroy(&built)
+    blocks:=make([dynamic][16]u8,context.temp_allocator)
+    for level in built.mips {
+        for at:=0;at<len(level);at+=16 {append(&blocks,(^[16]u8)(&level[at])^)}
+    }
+    state:=u64(7)
+    for _ in 0..<4096 {
+        block:[16]u8
+        for &b in block {
+            state=state*6364136223846793005+1442695040888963407
+            b=u8(state>>56)
+        }
+        append(&blocks,block)
+    }
+    modes:bit_set[0..<32]
+    for &block in blocks {
+        expected:[16][3]u16
+        desc:bc67.BC6H_Block_Raw_Desc
+        if bc67.bc6h_analyze_block_raw(&desc,false,&block) {
+            modes+={int(block[0]&0x1f) if block[0]&2!=0 else int(block[0]&3)}
+            weights:=WEIGHTS_3[:] if desc.mode.ib==3 else WEIGHTS_4[:]
+            subsets:=bc67.partition_of(desc.mode.ns,u32(desc.partition_id)).subset_mask
+            for &texel,i in expected {
+                s:=(subsets>>(u32(i)*2))&3
+                w:=i32(weights[desc.inds[i]])
+                for c in 0..<3 {
+                    low,high:=desc.endpoints_internal[c][s*2],desc.endpoints_internal[c][s*2+1]
+                    texel[c]=u16((((low*(64-w)+high*w+32)>>6)*31)>>6)
+                }
+            }
+        }
+        for texel,i in asset.texture_bc6h_block_decode(block) {
+            testing.expectf(t,texel==expected[i],"block %v texel %d is %v",block,i,texel)
+        }
+    }
+    testing.expect_value(t,card(modes),14)
     free_all(context.temp_allocator)
 }

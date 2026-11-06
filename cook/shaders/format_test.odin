@@ -301,4 +301,11 @@ odin_table_embeds_the_backends_compiled_with_the_reflected_bindings :: proc(t:^t
     testing.expect(t,strings.has_suffix(local,"\t}\n}\n}\n"),"the guard closes after the table")
     testing.expect(t,strings.contains(local,"SHADERS := [Shader_Id]Shader_Code{") && strings.contains(local,"bindings = []Binding_Info{}") && strings.contains(local,"#load(\"../shaders/build/tests/triangle.vert.spv\")"))
     testing.expect(t,!strings.contains(local,"SHADERS_FINGERPRINT"))
+    // Packed: the code is one stream per backend and each stage, of SHADERS and then of PROGRAM_SHADERS, its size in it.
+    packed:=string(odin_table(jobs,{.Vulkan,.Metal},"C:/e/shaders/build","C:/e/render","render","mirai:rhi","abc123","","",context.temp_allocator,jobs[1:],true,{.Vulkan={10,20,30},.Metal={11,21,31}}))
+    testing.expect(t,strings.contains(packed,"} else {\n\t@(rodata)\n\tSHADERS_PACKED := #load(\"../shaders/build/shaders.spv.lz\")\n\t@(rodata)\n\tSHADERS := [Shader_Id]Embedded_Shader{\n\t\t.Fill_Comp = {size = 10, code = {name = \"fill.comp\", stage = .Compute,\n"+
+        "\t\t\tthreadgroup = {64, 1, 1}, bindings = []rhi.Binding_Info{{slot = 0, kind = .Uniform_Buffer, stages = {.Compute}}, {slot = 1, kind = .Storage_Buffer, stages = {.Compute}}}}},\n"),packed)
+    testing.expect(t,strings.contains(packed,"\tPROGRAM_SHADERS := [1]Embedded_Shader{\n\t\t{size = 30, code = {name = \"triangle.vert\", stage = .Vertex,\n\t\t\tthreadgroup = {0, 0, 0}, bindings = []rhi.Binding_Info{}}},\n\t}\n}\n"),packed)
+    testing.expect(t,strings.contains(packed,"SHADERS_PACKED := #load(\"../shaders/build/shaders.metal.lz\")") && strings.contains(packed,"{size = 21, code = {binary = {msl_entry = \"main0\"}, name = \"triangle.vert\""),packed)
+    testing.expect(t,!strings.contains(packed,".spv\")") && !strings.contains(packed,".metal\", string)"),"no stage loads its own code")
 }

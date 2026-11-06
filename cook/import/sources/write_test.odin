@@ -153,7 +153,13 @@ a_skinned_mesh_is_written_with_its_rig :: proc(t:^testing.T) {
     model,ok:=import_ok(t,FIXTURES+"skeletal-analytic.glb")
     if !ok {return}
     defer importer.model_destroy(&model)
+    // A clip that bends a bone of the rig, which the file does not bring.
+    keys:=[2]anim.Keyframe{{value={0,0,0,1}},{time=1,value={0,0,.38,.92}}}
+    tracks:=[1]asset.Animation_Track_Desc{{target=base.text_get(model.skeletons[0].bones[len(model.skeletons[0].bones)-1].path[:]),property=.Rotation,keys=keys[:]}}
+    bend:=[1]asset.Animation_Clip_Desc{{name="bend",tracks=tracks[:]}}
+    brought:=model.animations;model.animations=bend[:]
     report,error:=importer.import_write(&model,folder)
+    model.animations=brought
     defer importer.report_destroy(&report)
     testing.expect_value(t,error.code,importer.Error_Code.None)
     types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
@@ -177,6 +183,16 @@ a_skinned_mesh_is_written_with_its_rig :: proc(t:^testing.T) {
     skeleton,skeleton_error:=asset.skeleton_view(&skeleton_file,&types)
     testing.expect_value(t,skeleton_error,asset.Error.None)
     testing.expect(t,len(skeleton.bones)>=2 && int(view.joints[1].node)<len(skeleton.bones))
+    // Its clips play on that rig.
+    animation_written:importer.Written
+    for item in report.assets {if item.kind==asset.KIND_ANIMATION {animation_written=item}}
+    if !testing.expect(t,animation_written.id!={}) {return}
+    animation_file,has_animation:=read_asset(t,animation_written,&types)
+    if !has_animation {return}
+    defer asset.asset_close(&animation_file)
+    clips,clips_error:=asset.animation_view(&animation_file,&types)
+    testing.expect_value(t,clips_error,asset.Error.None)
+    testing.expect(t,len(clips.clips)==1 && clips.clips[0].skeleton==report.skeleton_ids[0])
 }
 
 @(test)

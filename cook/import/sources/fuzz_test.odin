@@ -81,7 +81,7 @@ sound_survives :: proc(t:^testing.T,name:string,bytes:[]u8) {
                 continue
             }
             built^+=1
-            delete(desc.samples)
+            delete(desc.lossless)
         }
     }
     attempt(bytes,&built,&refused)
@@ -142,7 +142,7 @@ damaged_images_and_settings_are_imported_or_refused :: proc(t:^testing.T) {
     testing.expectf(t,refused>len(png)/2,"%d of %d damaged images are refused",refused,imported+refused)
 
     // The settings next to a source: any text is the settings it says or is refused, and never the defaults by accident.
-    wanted:=importer.Import_Settings{max_texture_size=256,textures=.Uncompressed,image=.Color,alpha_coverage=0.25,lods=.None,collision=.Mesh,collision_hulls=3}
+    wanted:=importer.Import_Settings{max_texture_size=256,textures=.Uncompressed,rdo_lambda=30,image=.Color,alpha_coverage=0.25,lods=.None,collision=.Mesh,collision_hulls=3}
     text:=importer.settings_text(wanted,context.temp_allocator)
     parsed,valid:=importer.settings_parse(text)
     testing.expect(t,valid && parsed==wanted)

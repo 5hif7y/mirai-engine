@@ -98,8 +98,9 @@ projects_show_their_thumbnail_or_the_view_of_their_start_scene :: proc(t:^testin
     folder,_:=os.make_directory_temp("","mirai-projects",context.temp_allocator)
     defer os.remove_all(folder)
     root:=project.path_absolute(folder,context.temp_allocator)
-    file,image:[dynamic]u8
-    defer {delete(file);delete(image)}
+    file:Thumbnail_File
+    image:[dynamic]u8
+    defer {thumbnail_file_destroy(&file);delete(image)}
     m:=project.manifest_default("racer")
     testing.expect(t,!projects_thumbnail_read(root,&m,THUMBNAIL_SIZE,&file,&image))
     // The view an editor of the project kept of its start scene.

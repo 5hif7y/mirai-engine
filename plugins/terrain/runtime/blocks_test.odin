@@ -61,7 +61,7 @@ volume_blocks_all_air_or_all_solid_hold_no_values_through_brushes_and_the_file :
     testing.expect(t,source_value(&source,{40,24,40})==band)
     neighbor:=BLOCKS_DEEP+1
     testing.expect(t,g.pages[neighbor].values!=nil,"a block the surface of the cavity crosses holds its values")
-    // The file keeps a uniform block as its value and every other one as its own LZ4 block.
+    // The file keeps a uniform block as its value and every other one as its own LZ block.
     root:=source_test_path("blocks");defer os.remove_all(root)
     os.make_directory_all(root)
     path:=fmt.tprintf("%s/volume.terrain",root)

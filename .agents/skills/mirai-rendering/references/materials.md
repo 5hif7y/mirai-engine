@@ -209,6 +209,7 @@ A texture of an asset resides with the levels that the distance of what shows it
 - **When.** The estimate runs between frames (`textures_update`) only if a view or a source moved
   `TEXTURE_VIEW_MOVE`, or instances, materials, batches or textures changed. `host`
   (`app_textures_stream`, in `app_frame_begin`) reads up to `TEXTURE_READS` at a time in jobs,
+  each decoding only the levels it gives (the smallest lie at the start of the `.tex` stream),
   first those that need more levels (those that free memory if the pool is exceeded) and those
   farthest from their levels, and gives them to the renderer with the
   [load budget](../../mirai-core/references/host.md#loaded-assets).

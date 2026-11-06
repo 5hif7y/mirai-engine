@@ -8,7 +8,6 @@ import "mirai:core"
 import "mirai:std/geom"
 import "mirai:host"
 import "mirai:std/base"
-import "mirai:std/serial"
 
 // Edits another library orders, as a bridge of the network does: terrain
 // does not know the network. While a tick is routed (Terrain_Replays.routed,
@@ -42,7 +41,7 @@ Replay :: struct {
     page:u32,           // Page; Section: its index
     fill:u32,           // Page without values: the bits of the one value it holds
     whole:bool,         // Head: every value of the source starts over, as a new source of that shape holds them; else it takes only the layers and materials
-    values:[]u8,        // Page: its values as they are in memory; Section and Head: terrain_section_bytes and terrain_head_bytes. Who pushed it keeps them until terrain_replay runs
+    values:[]u8,        // Page: its values coded (terrain_page_bytes); Section and Head: terrain_section_bytes and terrain_head_bytes. Who pushed it keeps them until terrain_replay runs
 }
 
 @(storage,queue)
@@ -239,8 +238,8 @@ grid_size :: proc "contextless" (s:^Source,kind:Grid_Kind) -> [3]int {
     return {}
 }
 
-// Writes page i of a grid whole: count values, or fill alone when values is
-// empty. low..high is the region of samples it covers. False when the page
+// Writes page i of a grid whole: its values coded (page_code), or fill alone
+// when values is empty. low..high is the region of samples it covers. False when the page
 // is not one of the grid, the values are not those of the page or one is
 // not valid, or without memory; then the grid reads as before.
 @(private)
@@ -254,9 +253,10 @@ grid_page_put :: proc(s:^Source,entry:^Data_Source,g:^Grid($T),size:[3]int,i:int
     if g.size!=size || i<0 || i>=len(g.pages) {return}
     low,high=grid_page_region(g,i)
     _,count:=grid_page_extent(g,i)
+    decoded:[PAGE_VALUES]T=---
+    held:=decoded[:count]
     if len(values)>0 {
-        if len(values)!=count*size_of(T) {return}
-        held:=([^]T)(raw_data(values))[:count]
+        if !page_uncode(values,mem.slice_to_bytes(held)) {return}
         if !page_valid(held,valid) {return}
         when T==f32 {if band>0 && !distances_within(held,band) {return}}
     } else if !valid(fill) {return}
@@ -264,7 +264,7 @@ grid_page_put :: proc(s:^Source,entry:^Data_Source,g:^Grid($T),size:[3]int,i:int
     page:=&g.pages[i]
     if len(page.values)!=count {return}
     if len(values)>0 {
-        mem.copy(raw_data(page.values),raw_data(values),len(values))
+        copy(page.values,held)
     } else {
         for &value in page.values {value=fill}
         grid_settle(g,low,high,s.allocator)
@@ -673,19 +673,19 @@ terrain_grid_pages :: proc(data:core.Ref(Terrain_Data),id:base.Asset_Id,kind:Gri
 }
 
 // The values of page i of a grid of a loaded source, wherever they are (in
-// memory, or in a block of its own or of its file), into out as they are in
-// memory, or the bits of the one value of a uniform page (size 0). out holds
-// PAGE_VALUES values of 4 bytes.
+// memory, or in a block of its own or of its file), into out coded as they
+// are (page_code), or the bits of the one value of a uniform page (size 0).
+// out holds PAGE_BYTES_MAX bytes.
 terrain_page_bytes :: proc(data:core.Ref(Terrain_Data),id:base.Asset_Id,kind:Grid_Kind,i:int,out:[]u8) -> (size:int,fill:u32,ok:bool) {
     s:=terrain_source(data,id)
     if s==nil || len(out)<PAGE_BYTES_MAX {return}
     read :: proc(g:^Grid($T),i:int,file:string,out:[]u8) -> (size:int,fill:u32,ok:bool) {
         if i<0 || i>=len(g.pages) {return}
         page:=&g.pages[i]
-        _,count:=grid_page_extent(g,i)
-        size=count*size_of(T)
+        extent,count:=grid_page_extent(g,i)
+        size=PAGE_HEADER+count*size_of(T)
         if page.values!=nil {
-            copy(out[:size],mem.slice_to_bytes(page.values))
+            page_code(page.values,extent.x,false,out)
             return size,0,true
         }
         if !grid_absent(g,i) {
@@ -694,8 +694,12 @@ terrain_page_bytes :: proc(data:core.Ref(Terrain_Data),id:base.Asset_Id,kind:Gri
             mem.copy_non_overlapping(&bits,&value,size_of(T))
             return 0,bits,true
         }
-        scratch,error:=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),context.temp_allocator)
-        if error!=nil || !page_load(g.blocks[i],file,scratch,out[:size]) {return}
+        read:Page_Reader
+        read_ok:=page_reader_init(&read,context.temp_allocator)
+        defer page_reader_destroy(&read,context.temp_allocator)
+        if !read_ok {return}
+        block,block_ok:=page_block_read(g.blocks[i],file,read.block)
+        if !block_ok || !page_unpack(block,g.blocks[i].hash,out[:size],&read.decoder) {return}
         return size,0,true
     }
     switch kind {

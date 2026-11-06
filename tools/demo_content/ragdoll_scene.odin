@@ -41,7 +41,7 @@ physics_ragdoll_station :: proc(o:^Out,s:^Scene_Out,origin:mm.Vec3) -> base.Enti
     keys:[5]lib.Keyframe
     for &key,i in keys {angle:f32=.6 if i%2==1 else -.6;q:=mm.quat_axis_angle({0,0,1},angle);key={time=f32(i)*.5,value={q.x,q.y,q.z,q.w},interpolation=.Linear}}
     track:=asset.Animation_Track_Desc{target=base.text_get(bones[3].path[:]),property=.Rotation,keys=keys[:]}
-    clip:=asset.Animation_Clip_Desc{name="wave",tracks={track}}
+    clip:=asset.Animation_Clip_Desc{name="wave",tracks={track},skeleton=skeleton_id}
     check(o,"physics-ragdoll.anim",asset.animation_save(path(o,folder+"/wave.anim"),&o.types,{id=clip_id,clips={clip}}))
     root:=entity(s,"Ragdoll: animation / simulation / motors",origin)
     put(s,root,"Mesh_Renderer",&render.Mesh_Renderer{mesh=mesh_id})

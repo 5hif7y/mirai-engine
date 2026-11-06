@@ -172,40 +172,43 @@ source_join :: proc(cache:^Source_Assets,set:^Source_Set,primary:base.Asset_Id,s
     if cache==nil || set==nil || primary=={} || len(sources)<2 {return .Invalid}
     allocator:=cache.allocator if cache.allocator.procedure!=nil else context.allocator
     desc:=lib.Library_Desc{allocator=allocator}
-    count,marker_names,packed,bounds:=0,0,0,0
+    count,marker_names,sampled,segments,samples:=0,0,0,0,0
     found:=false
     for source,i in sources {
-        if source.id=={} || source.clip_count<0 || source.clip_count>len(source.names) || source.clip_count>len(source.roots) || source.lib.key_count<0 || source.lib.key_count>len(source.lib.keys) || source.lib.track_count<0 || source.lib.track_count>len(source.lib.tracks) || source.lib.marker_count<0 || source.lib.marker_count>len(source.lib.markers) || source.clip_count>source.lib.clip_count || source.clip_count>len(source.lib.clips) {return .Invalid}
+        if source.id=={} || source.clip_count<0 || source.clip_count>len(source.names) || source.clip_count>len(source.roots) || source.lib.key_count<0 || source.lib.key_count>len(source.lib.keys) || source.lib.track_count<0 || source.lib.track_count>len(source.lib.tracks) || source.lib.marker_count<0 || source.lib.marker_count>len(source.lib.markers) || source.lib.sampled_count<0 || source.lib.sampled_count>len(source.lib.sampled) || source.lib.segment_count<0 || source.lib.segment_count>len(source.lib.segments) || source.lib.sample_count<0 || source.lib.sampled_count>0 && source.lib.sample_count+lib.SAMPLED_PADDING>len(source.lib.samples) || source.clip_count>source.lib.clip_count || source.clip_count>len(source.lib.clips) {return .Invalid}
         for previous in sources[:i] {if previous.id==source.id {return .Invalid}}
         found ||= source.id==primary
-        count+=source.clip_count;marker_names+=len(source.markers);packed+=len(source.lib.packed_keys);bounds+=len(source.lib.packed_bounds)
+        count+=source.clip_count;marker_names+=len(source.markers);sampled+=source.lib.sampled_count;segments+=source.lib.segment_count;samples+=source.lib.sample_count
         desc.max_keys+=source.lib.key_count;desc.max_tracks+=source.lib.track_count;desc.max_markers+=source.lib.marker_count
     }
     if !found || count==0 {return .Invalid}
     desc.max_clips=count*2;desc.max_keys=max(desc.max_keys,1);desc.max_tracks=max(desc.max_tracks,1)
+    desc.max_sampled,desc.max_segments,desc.max_samples=sampled,segments,samples
     next:Source_Set
     published:=false
     defer {if !published {source_set_free(&next,allocator)}}
     if !lib.library_init(&next.content.lib,desc) {return .Out_Of_Memory}
-    e1,e2,e3,e4,e5,e6:mem.Allocator_Error
+    e1,e2,e3,e4:mem.Allocator_Error
     next.content.markers,e1=make([]u64,marker_names,allocator)
     next.content.names,e2=make([][asset.ANIMATION_NAME_CAPACITY]u8,count,allocator)
     next.content.roots,e3=make([]asset.Animation_Root,count,allocator)
-    next.content.lib.packed_keys,e4=make([]lib.Packed_Key,packed,allocator)
-    next.content.lib.packed_bounds,e5=make([]lib.Packed_Bounds,bounds,allocator)
-    next.clip_sources,e6=make([]base.Asset_Id,count,allocator)
-    if e1!=nil || e2!=nil || e3!=nil || e4!=nil || e5!=nil || e6!=nil {return .Out_Of_Memory}
+    next.clip_sources,e4=make([]base.Asset_Id,count,allocator)
+    if e1!=nil || e2!=nil || e3!=nil || e4!=nil {return .Out_Of_Memory}
     joined:=&next.content
-    key_at,track_at,marker_at,name_at,clip_at,packed_at,bound_at:=0,0,0,0,0,0,0
+    key_at,track_at,marker_at,name_at,clip_at,sampled_at,segment_at,sample_at:=0,0,0,0,0,0,0,0
     for source in sources {
         copy(joined.lib.keys[key_at:],source.lib.keys[:source.lib.key_count])
-        copy(joined.lib.packed_keys[packed_at:],source.lib.packed_keys)
-        copy(joined.lib.packed_bounds[bound_at:],source.lib.packed_bounds)
+        copy(joined.lib.samples[sample_at:],source.lib.samples[:source.lib.sample_count])
+        for segment,j in source.lib.segments[:source.lib.segment_count] {joined.lib.segments[segment_at+j]=segment+u32(sample_at)}
+        for sampled,j in source.lib.sampled[:source.lib.sampled_count] {
+            sampled:=sampled
+            sampled.data+=u32(sample_at);sampled.first_segment+=u32(segment_at)
+            joined.lib.sampled[sampled_at+j]=sampled
+        }
         copy(joined.markers[name_at:],source.markers)
         for track,j in source.lib.tracks[:source.lib.track_count] {
             track:=track
-            track.first+=u32(packed_at if track.encoding==.Quantized else key_at)
-            if track.encoding==.Quantized {track.bounds+=u32(bound_at)}
+            track.first+=u32(sampled_at if track.encoding==.Sampled else key_at)
             joined.lib.tracks[track_at+j]=track
         }
         for marker,j in source.lib.markers[:source.lib.marker_count] {
@@ -222,9 +225,10 @@ source_join :: proc(cache:^Source_Assets,set:^Source_Set,primary:base.Asset_Id,s
             next.clip_sources[clip_at]=source.id;clip_at+=1
         }
         key_at+=source.lib.key_count;track_at+=source.lib.track_count;marker_at+=source.lib.marker_count
-        name_at+=len(source.markers);packed_at+=len(source.lib.packed_keys);bound_at+=len(source.lib.packed_bounds)
+        name_at+=len(source.markers);sampled_at+=source.lib.sampled_count;segment_at+=source.lib.segment_count;sample_at+=source.lib.sample_count
     }
     joined.lib.key_count,joined.lib.track_count,joined.lib.marker_count=key_at,track_at,marker_at
+    joined.lib.sampled_count,joined.lib.segment_count,joined.lib.sample_count=sampled_at,segment_at,sample_at
     host.content_animation_loops(&joined.lib,count);joined.lib.prepared=true;joined.clip_count=count
     cache.generations+=1
     joined.id,joined.generation=primary,SOURCE_GENERATION|cache.generations

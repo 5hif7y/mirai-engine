@@ -113,7 +113,7 @@ pooled_page_block :: proc(p: Pooled_Mesh, page: u32) -> []u32 {
 	if p.stream == nil || p.scratch == nil || len(p.scratch.words) == 0 {return nil}
 	if p.scratch.stream != p.stream.id || p.scratch.page != page {
 		p.scratch.stream = 0
-		if !asset.mesh_page_decode(p.stream.flags, p.stream.pages[page], p.stream.data, p.scratch.words) {return nil}
+		if !asset.mesh_page_decode(p.stream.flags, p.stream.pages[page], p.stream.data, p.scratch.coded, p.scratch.words, &p.scratch.decoder) {return nil}
 		p.scratch.stream, p.scratch.page = p.stream.id, page
 	}
 	return p.scratch.words

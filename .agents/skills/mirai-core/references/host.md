@@ -468,8 +468,8 @@ row.
   font of a `.ui` that does not load makes the load of the `.ui` fail.
 - `prompts_find` gives the `ui.Prompt` of the texture part of the pack; keys and mouse are of the
   `Keyboard` family whichever one is asked for.
-- An `.anim` is published prepared with `anim.library_optimize`; if the preparation fails, the
-  previous load stays ([animation storage](../../mirai-std/references/anim-storage.md)).
+- An `.anim` is published compressed with `asset.animation_compress` (a cooked one, as it comes);
+  if the preparation fails, the previous load stays ([animation storage](../../mirai-std/references/anim-storage.md)).
 
 ## Shaders at run time
 

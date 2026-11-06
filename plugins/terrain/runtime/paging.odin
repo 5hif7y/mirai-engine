@@ -3,7 +3,6 @@ package terrain
 import "base:runtime"
 import "core:mem"
 import "mirai:std/base"
-import "mirai:std/serial"
 
 // Pages of a Heightfield and blocks of a Volume read from its file when a
 // resident chunk needs them and let go when none does; a page with edits
@@ -77,19 +76,21 @@ source_region_held :: proc(s:^Source,low,high:[3]int) -> bool {
 grid_page_read :: proc(g:^Grid($T),i:int,file:string,valid:proc "contextless" (value:T) -> bool,allocator:runtime.Allocator) -> bool {
     if !grid_absent(g,i) {return true}
     _,count:=grid_page_extent(g,i)
-    read,read_error:=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),context.temp_allocator)
+    read:Page_Reader
+    read_ok:=page_reader_init(&read,context.temp_allocator)
+    defer page_reader_destroy(&read,context.temp_allocator)
     values,made:=shared_make(T,count,allocator)
-    if read_error!=nil || !made {shared_free(values);return false}
-    if !page_load(g.blocks[i],file,read,mem.slice_to_bytes(values)) || !page_valid(values,valid) {shared_free(values);return false}
+    if !read_ok || !made {shared_free(values);return false}
+    if !page_load(g.blocks[i],file,&read,mem.slice_to_bytes(values)) || !page_valid(values,valid) {shared_free(values);return false}
     grid_page_install(g,i,values)
     return true
 }
 
 // Reads the block of a page and decodes it into out; what a job of a page runs.
 @(private)
-page_load :: proc(block:Page_Block,file:string,read,out:[]u8) -> bool {
-    bytes,ok:=page_block_read(block,file,read)
-    return ok && page_decode(bytes,block.hash,out)
+page_load :: proc(block:Page_Block,file:string,read:^Page_Reader,out:[]u8) -> bool {
+    bytes,ok:=page_block_read(block,file,read.block)
+    return ok && page_decode(bytes,block.hash,out,&read.decoder,read.coded)
 }
 
 @(private)
@@ -178,15 +179,17 @@ grid_page_leave :: proc(g:^Grid($T),i:int,allocator:runtime.Allocator) -> bool {
             shared_free(block.own)
             page.fill,block^=page.values[0],{}
         } else {
-            scratch,error:=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),context.temp_allocator)
-            if error!=nil {return false}
-            size,ok:=serial.lz4_compress(mem.slice_to_bytes(page.values),scratch)
+            writer:Page_Writer
+            if !page_writer_init(&writer,context.temp_allocator) {return false}
+            defer page_writer_destroy(&writer)
+            extent,_:=grid_page_extent(g,i)
+            encoded,ok:=page_encode(&writer,page.values,extent.x,false)
             if !ok {return false}
-            own,made:=shared_make(u8,size,allocator)
+            own,made:=shared_make(u8,len(encoded),allocator)
             if !made {return false}
-            copy(own,scratch[:size])
+            copy(own,encoded)
             shared_free(block.own)
-            block^={size=u32(size),hash=base.hash64(own),own=own}
+            block^={size=u32(len(encoded)),hash=base.hash64(own),own=own}
             page.fill=page.values[0]
         }
     }
@@ -229,10 +232,10 @@ chunk_pages_mark :: proc(s:^Source,index:int,needed:[]bool) {
 
 // What differs between next, read again, and g of the same size: next takes
 // the values g holds in memory of each page whose block in next holds the
-// same, and g holds them no more. Nothing else of g changes. scratch has
-// room for an LZ4 block of a page.
+// same, and g holds them no more. Nothing else of g changes. writer codes
+// the pages of g as the file does, quantize as grid_put_document.
 @(private)
-grid_take :: proc(next,g:^Grid($T),scratch:[]u8) -> (low,high:[3]int,changed:bool) {
+grid_take :: proc(next,g:^Grid($T),writer:^Page_Writer,quantize:bool) -> (low,high:[3]int,changed:bool) {
     if next.size!=g.size || len(next.pages)!=len(g.pages) {
         for axis in 0..<3 {high[axis]=max(next.size[axis],g.size[axis])-1}
         return {},high,true
@@ -253,8 +256,10 @@ grid_take :: proc(next,g:^Grid($T),scratch:[]u8) -> (low,high:[3]int,changed:boo
             if old.values!=nil {
                 if len(g.blocks)>0 && !g.blocks[i].edited {
                     same=g.blocks[i].size>0 && g.blocks[i].hash==block.hash
-                } else if size,ok:=serial.lz4_compress(mem.slice_to_bytes(old.values),scratch);ok {
-                    same=base.hash64(scratch[:size])==block.hash
+                } else {
+                    extent,_:=grid_page_extent(g,i)
+                    encoded,ok:=page_encode(writer,old.values,extent.x,quantize)
+                    same=ok && base.hash64(encoded)==block.hash
                 }
                 if same {page.values,old.values=old.values,nil}
             } else if grid_absent(g,i) {

@@ -10,10 +10,12 @@ import audio "mirai:audio"
 import "mirai:std/base"
 import "mirai:std/serial"
 
-// Sounds: a WAV or an Ogg Vorbis file becomes a .sound. A short one is
-// stored decoded, as 16 bit samples, so that loading it decodes nothing; one
-// of SOUND_STREAM_SECONDS or more keeps its file and is streamed, so that it
-// never sits decoded in memory.
+// Sounds: a WAV or an Ogg Vorbis file becomes a .sound. Its 16 bit samples
+// are coded without loss (audio.lossless_encode) and decoded whole when it
+// loads; one of SOUND_STREAM_SECONDS or more is streamed instead, so that it
+// never sits decoded in memory. A long Ogg Vorbis keeps its file, which is
+// smaller than its samples coded, and so does a long WAV with samples that
+// 16 bits would round.
 
 SOUND_STREAM_SECONDS :: f32(10)
 
@@ -27,11 +29,12 @@ Sound_Options :: struct {
     stream_seconds:f32, // 0: SOUND_STREAM_SECONDS
 }
 
-// What a .sound of the bytes of a WAV or Ogg Vorbis file holds. samples
+// What a .sound of the bytes of a WAV or Ogg Vorbis file holds. lossless
 // belongs to allocator; file is the bytes given.
 sound_build :: proc(bytes:[]u8,options:Sound_Options={},allocator:=context.allocator) -> (desc:asset.Sound_Desc,error:audio.Error) {
     bytes:=bytes
-    if len(bytes)>=4 && string(bytes[:4])=="OggS" {
+    ogg:=len(bytes)>=4 && string(bytes[:4])=="OggS"
+    if ogg {
         // A stream keeps only the pages the decoder will open: those that are whole and intact.
         bytes=bytes[:audio.ogg_whole_pages(bytes)]
         if len(bytes)==0 {return {},.Invalid_Data}
@@ -43,17 +46,22 @@ sound_build :: proc(bytes:[]u8,options:Sound_Options={},allocator:=context.alloc
     limit:=options.stream_seconds>0?options.stream_seconds:SOUND_STREAM_SECONDS
     stream:=options.storage==.Stream || options.storage==.Auto && f32(frames)/f32(pcm.sample_rate)>=limit
     desc={channels=pcm.channels,sample_rate=pcm.sample_rate,frames=frames}
-    if stream {
-        desc.file,desc.flags=bytes,{.Stream}
-        return desc,.None
-    }
+    if stream {desc.flags={.Stream}}
     samples,failed:=make([]i16,len(pcm.samples),allocator)
     if failed!=nil {return {},.Out_Of_Memory}
+    defer delete(samples,allocator)
+    exact:=true
     for sample,i in pcm.samples {
         scaled:=clamp(sample,-1,1)*32768
         samples[i]=i16(clamp(scaled+(scaled<0?-0.5:0.5),-32768,32767))
+        if f32(samples[i])*(1.0/32768)!=sample {exact=false}
     }
-    desc.samples=samples
+    // A stream plays its file as it is: coded, it has to be the same samples.
+    if stream && (ogg || !exact) {
+        desc.file=bytes
+        return desc,.None
+    }
+    desc.lossless=audio.lossless_encode(samples,pcm.channels,pcm.sample_rate,allocator) or_return
     return desc,.None
 }
 

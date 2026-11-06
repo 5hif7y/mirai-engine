@@ -270,7 +270,7 @@ prompts_write :: proc(w:^Writer,path:string,bytes:[]u8,entries:[]Prompts_Entry,o
             }
         }
         page_name:=fmt.tprintf("%s_atlas",name) if len(pages)==1 else fmt.tprintf("%s_atlas_%d",name,page)
-        jobs[page]={name=page_name,bytes=pixels,made=textures.rgba8(pixels,size.x,size.y),size=u64(len(pixels)),hash=base.hash64(pixels),srgb=true,index=page,version=import_version(0),compression=.LZ4}
+        jobs[page]={name=page_name,bytes=pixels,made=textures.rgba8(pixels,size.x,size.y),size=u64(len(pixels)),hash=base.hash64(pixels),srgb=true,index=page,version=import_version(0)}
     }
     parts:=make([]Part,len(pages),context.temp_allocator)
     for &job,page in jobs {

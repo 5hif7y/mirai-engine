@@ -2,7 +2,7 @@
 
 Container, typed tables, asset types, registry and text. By topic:
 
-- [std/serial](serial.md): streams, LZ4, schemas, migration, paths and JSON.
+- [std/serial](serial.md): streams, schemas, migration, paths and JSON.
 - [Asset types in detail](kinds.md): mesh, skeleton, texture, material, fracture, animation, sound
   and interface.
 - [Scene and prefab](scenes.md): the `asset.Scene` document and prefab instances.
@@ -12,8 +12,8 @@ Container, typed tables, asset types, registry and text. By topic:
 
 Little endian (`asset/container.odin`): a fixed header (magic `MIRA`, type fourcc, container and
 type version, flags, id, `owner`, the `content_hash` of everything that follows), a directory of
-chunks (tag, compression `None` or `LZ4`, alignment, offset and sizes) and the chunks, each at a
-multiple of its alignment.
+chunks (tag, compression `None` or `LZ`, alignment, offset and sizes) and the chunks, each at
+a multiple of its alignment.
 
 - **The header id is an asset's only identity**: nothing derives it from its path, name or source,
   and a moved or renamed asset remains the same.
@@ -21,9 +21,49 @@ multiple of its alignment.
   of its own. `Document.owner` and the `owner` of each importable `*_Desc` write it;
   `header_owner_set` and `file_owner_set` change it without touching the content or `content_hash`.
 - `header_read` validates only the header (what a scan uses). `blob_open` validates the whole file:
-  exact size, each chunk inside the file and aligned, uncompressed size reachable by an LZ4 block of
-  that size and a total memory limit (`DEFAULT_MEMORY_LIMIT`).
-- `blob_build` stores LZ4 only when it shrinks the chunk.
+  exact size, each chunk inside the file and aligned, uncompressed size reachable by an LZ
+  stream of that size (`pack_reach`) and a total memory limit (`DEFAULT_MEMORY_LIMIT`).
+- `blob_build` stores LZ only when it shrinks the chunk. The dependencies, names, schema and
+  table directory are stored as they are: a scan reads them without a decoder.
+
+### Compression
+
+LZ streams: `std/compressor` decodes them and `std/compressor/lz` encodes them.
+`pack` and `unpack` are the only entry points
+of the formats, also for what compresses outside a chunk (mesh pages, terrain blocks, the parts the
+terrain sends over the network, editor thumbnails, the shaders the executables embed).
+
+- **Packs.** A write says how hard it compresses (`Pack`): `Edit` for what the editor, imports and
+  the game save, `Ship` for the cooking of a shipped game, which writes every asset again with
+  `document_repack` (its chunks and the pages of a mesh), and `Quick` for the cook of a `--dev`
+  game, a few times faster and a little larger. All decode the same way.
+- **Pieces.** A chunk over `PACK_PIECE` is a run of LZ streams of that many raw bytes, each
+  decoding without the others (the library's `seekChunkReset`): a scene load decodes them at once
+  on its workers (`Piece_Decoders`), and a write with a worker compresses them at once into the
+  same bytes.
+- **Decoders.** `Decoder` holds the scratch of the LZ and BC7Split decoders, made once by
+  whoever reads (a job keeps one per thread) and lent to `asset_open`/`asset_load`; an asset opened
+  without one makes its own the first time it decodes. A mesh page or a terrain block decodes with
+  an `compressor.Decoder` of its reader (the renderer keeps one per worker).
+- **Texture levels.** The `texels` column is LZ with the smallest level first: a read of the
+  small levels decodes only the start of the stream. A BC7 texture written by `cook/textures`
+  stores BC7Split streams of runs of levels (the `bc7split` table), and BC1, BC3 and BC5 may store
+  planes of fields ([texture](kinds.md#texture)); `texture_decode` restores them into memory of the
+  asset before the renderer takes them.
+
+#### Codec packages
+
+- `std/compressor` (runtime): the decoder of LZ streams (`decompress`), and
+  `format.odin`, the stream format both sides read: block, quantum and chunk headers, array types,
+  packet layouts, levels and the prediction of packed Huffman code lengths.
+- `std/compressor/bc7split` (runtime): restores BC7 blocks from a BC7Split stream (`decode`).
+- `std/compressor/lz` (runtime, since a game saves with `Edit`): the encoder (`compress`) and its block
+  framing over the packages `entropy` (entropy arrays: Huffman, tANS, RLE, split; costs and log2
+  tables), `match` (hash tables, suffix trie, long range matcher) and `lz`. It allocates its
+  scratch on demand in the `Encoder`, kept across calls.
+- `cook/compressor/bc7split` (engine-time, package `bc7split_encode`): the BC7Split encoder that
+  `cook/textures` runs on BC7 levels, on top of `std/compressor/bc7split` and the log2 table of
+  `entropy`.
 
 ## Typed tables
 
@@ -99,7 +139,8 @@ plugin without adding them to the core: `.pose`, `.blend` and `.agraph`
 - **`.scene`, `.prefab`** (`SCEN`, `PRFB`): `entities`, a table per component, `scene`,
   `instances`, `members`, `overrides` and `off` (turned-off components).
 - **`.anim`** (`ANIM`): `clips` (`Animation_Clip`), `tracks` (`Animation_Track`), `keys`
-  (`anim.Keyframe`), `markers` (`Animation_Marker`).
+  (`anim.Keyframe`), `markers` (`Animation_Marker`), `sampled` (`anim.Sampled_Track`) and the bulk
+  `samples`, empty but in a cooked `.anim`.
 - **`.pose`** (`POSE`): constraint tables of the [animation
   plugin](../../mirai-animation/references/animation.md): `ik`, `look`, `limits`, `contacts`,
   `grounding`, `retarget`.
@@ -119,8 +160,8 @@ plugin without adding them to the core: `.pose`, `.blend` and `.agraph`
   `particle` (`Particle_Info`), `parameters` (`Particle_Parameter`), `hidden` (`Particle_Field`).
 - **`.fracture`** (`FRAC`): `fracture` (`Fracture_Info`), `pieces`, `connections`, `clusters`,
   `vertices` (`Vertex`) and `indices` local to each piece.
-- **`.foliage`** (`FOLI`): `foliage` (`Foliage_Info`), `types`, `cells`, and LZ4 bulk `manual` and
-  `overrides`; defined and validated by the
+- **`.foliage`** (`FOLI`): `foliage` (`Foliage_Info`), `types`, `cells`, and LZ bulk `manual`
+  and `overrides`; defined and validated by the
   [foliage](../../mirai-plugins/references/foliage.md#format) plugin.
 - **`.physics_cache`** (`PCAC`): format of the
   [physics_cache](../../mirai-plugins/references/physics-cache.md) plugin (unique geometry, tracks,

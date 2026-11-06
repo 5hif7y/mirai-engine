@@ -169,9 +169,11 @@ declare_says_whether_a_declaration_changed :: proc(t:^testing.T) {
 }
 
 // An inline procedure copied into the declarations can call one private to its
-// file: each file declares its own under a link name of its file.
+// file, an LLVM intrinsic of its file and read a table of its file: each file
+// declares its own procedure under a link name of its file, carries its table
+// and the intrinsic as it is, which has nothing to export.
 @(test)
-declarations_keep_the_procedures_private_to_a_file_that_inline_ones_call :: proc(t:^testing.T) {
+declarations_keep_the_procedures_and_tables_private_to_a_file_that_inline_ones_use :: proc(t:^testing.T) {
     context.allocator=context.temp_allocator
     folder,error:=os.make_directory_temp("","mirai-declare-*",context.temp_allocator)
     if !testing.expect(t,error==nil) {return}
@@ -179,7 +181,7 @@ declarations_keep_the_procedures_private_to_a_file_that_inline_ones_call :: proc
     for name in ([]string{"a","b"}) {
         source:=project.path(folder,"engine","thing",strings.concatenate({name,".odin"}))
         testing.expect(t,os.make_directory_all(os.dir(source))==nil)
-        text:=fmt.tprintf("package thing\n\n@(private=\"file\")\nhelper :: proc(x:int) -> int {{return x*2}}\n\n%s :: #force_inline proc(x:int) -> int {{return helper(x)+1}}\n",name)
+        text:=fmt.tprintf("package thing\n\n@(private=\"file\")\nhelper :: proc(x:int) -> int {{return x*2}}\n\n@(private=\"file\",rodata)\nTABLE := [2]int{{3,4}}\n\n@(private=\"file\",default_calling_convention=\"none\")\nforeign _ {{\n    @(link_name=\"llvm.ctpop.i64\")\n    popcount :: proc(x:i64) -> i64 ---\n}}\n\n%s :: #force_inline proc(x:int) -> int {{return helper(x)+TABLE[x&1]+int(popcount(i64(x)))}}\n",name)
         testing.expect(t,os.write_entire_file(source,text)==nil)
     }
     desc:=Declare_Desc{root=project.path(folder,"engine"),packages={"thing"},binary="mirai",library=project.path(folder,"out","thing.lib"),stage=project.path(folder,"out","stage"),decl=project.path(folder,"out","decl")}
@@ -189,8 +191,9 @@ declarations_keep_the_procedures_private_to_a_file_that_inline_ones_call :: proc
         link:=fmt.tprintf("link_name=\"mirai.thing.%s.helper\"",name)
         decl:=declared(project.path(folder,"out","decl"),"thing",strings.concatenate({name,".odin"}))
         stage:=declared(project.path(folder,"out","stage"),"thing",strings.concatenate({name,".odin"}))
-        testing.expectf(t,strings.contains(decl,link) && strings.contains(decl,"helper :: proc"),"%s declares its helper:\n%s",name,decl)
+        testing.expectf(t,strings.contains(decl,link) && strings.contains(decl,"helper :: proc") && strings.contains(decl,"TABLE := [2]int"),"%s declares its helper and its table:\n%s",name,decl)
         testing.expectf(t,strings.contains(stage,fmt.tprintf("@(export,%s,private=\"file\")",link)),"%s exports its helper:\n%s",name,stage)
+        testing.expectf(t,strings.contains(decl,"@(link_name=\"llvm.ctpop.i64\")") && !strings.contains(stage,"__mirai_export_popcount"),"%s declares its intrinsic and exports none:\n%s",name,decl)
     }
 }
 

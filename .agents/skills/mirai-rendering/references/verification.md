@@ -133,7 +133,10 @@ checkouts (it takes the `mirai measure` turn), against the `main` build measured
 change of light, GI, materials, exposure or render cost is accepted only with this check without
 regressions, besides the reference metrics of `gi_test`: synthetic fixtures are not enough to
 assert quality or cost. A change that cannot move the cost (a constant, a value of a scene, an
-asset of the same size) is accepted with `--quality`.
+asset of the same size and format) is accepted with `--quality`, and one that changes nothing the
+GPU receives (how assets are stored or loaded when they decode to the same data) needs no render
+check: captures against `main` are enough. The full check measures cost, so it runs only on a
+machine with no other GPU load.
 
 - **Views** (`render_check.mirai`): window sizes (the demo measures only 1440×900; another with
   `--sizes` when the doubt is about scale), frames and, per view, scene, editor camera and `luma`,

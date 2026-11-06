@@ -6,7 +6,6 @@ import "mirai:core"
 import "mirai:host"
 import "mirai:std/base"
 import "mirai:std/jobs"
-import "mirai:std/serial"
 
 // Builds of chunks and readings of pages run in std/jobs. A job reads the
 // live source: whatever changes or frees it (an edit, a reading of its file,
@@ -41,7 +40,7 @@ Work_Slot :: struct {
     grid:Grid_Kind,   // Page
     block:Page_Block, // Page: the block it reads, its own borrowed
     file:string,      // Page: borrowed from the source
-    read:[]u8,        // Page: room for a block
+    read:Page_Reader, // Page: room for a block and its decoder
     page:[]u8,        // Page: the values it decodes, until they go to the grid (shared_make)
     band:f32,         // Page of a Volume: how far its distances may reach
     allocator:runtime.Allocator,      // of the slot
@@ -76,7 +75,7 @@ work_free :: proc(data:^Terrain_Data) {
         chunk_mesh_destroy(&slot.mesh)
         piece_border_destroy(&slot.border)
         delete(slot.cuts)
-        delete(slot.read,slot.allocator)
+        page_reader_destroy(&slot.read,slot.allocator)
         shared_free(slot.page)
     }
     if len(data.work)>0 {delete(data.work,data.work[0].allocator)}
@@ -142,10 +141,7 @@ work_build :: proc(data:^Terrain_Data,slot:^Work_Slot,entry:^Data_Source,owner:c
 @(private)
 work_page :: proc(data:^Terrain_Data,slot:^Work_Slot,entry:^Data_Source,grid:Grid_Kind,index:int,phase:core.Phase) -> bool {
     s:=&entry.source
-    if slot.read==nil {
-        error:runtime.Allocator_Error
-        if slot.read,error=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),slot.allocator);error!=nil {return false}
-    }
+    if slot.read.block==nil && !page_reader_init(&slot.read,slot.allocator) {return false}
     block:Page_Block
     size,count:=4,0
     switch grid {
@@ -184,7 +180,7 @@ work_run :: proc(slot:^Work_Slot,worker:int) {
         }
         if slot.ok {chunk_render_prepare(s.kind,&slot.mesh,slot.limits)}
     case .Page:
-        slot.ok=page_load(slot.block,slot.file,slot.read,slot.page)
+        slot.ok=page_load(slot.block,slot.file,&slot.read,slot.page)
         if !slot.ok {break}
         switch slot.grid {
         case .Heights: slot.ok=page_valid(slice.reinterpret([]f32,slot.page),height_valid)

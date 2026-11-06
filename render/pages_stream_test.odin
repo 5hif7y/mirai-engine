@@ -6,9 +6,10 @@ import "core:mem"
 import "core:testing"
 import "mirai:asset"
 import mm "mirai:std/math"
+import "mirai:std/compressor"
 
 // A bumpy sheet of side cells as a file holds it: a DAG with pages out of
-// its root and the LZ4 block of each page in page_data.
+// its root and the LZ block of each page in page_data.
 @(private)
 streamed_sheet :: proc(side: int) -> (g: asset.Mesh_Geometry, ok: bool) {
 	vertices := make([dynamic]asset.Vertex, context.temp_allocator)
@@ -106,7 +107,11 @@ a_streamed_mesh_keeps_its_root_and_loads_its_other_pages_into_slots :: proc(t: ^
 	base := record_pooled(s, m).pages[page].base
 	testing.expect_value(t, base, s.pages.region + slot * PAGE_SLOT_WORDS)
 	block := make([]u32, asset.MESH_PAGE_WORDS, context.temp_allocator)
-	testing.expect(t, asset.mesh_page_decode(g.flags, g.pages[page], g.page_data, block))
+	scratch := make([]u8, asset.MESH_PAGE_SCRATCH_BYTES, context.temp_allocator)
+	decoder: compressor.Decoder
+	testing.expect_value(t, compressor.decoder_init(&decoder), compressor.Error.None)
+	defer compressor.decoder_destroy(&decoder)
+	testing.expect(t, asset.mesh_page_decode(g.flags, g.pages[page], g.page_data, scratch, block, &decoder))
 	words := g.pages[page].words
 	testing.expect(t, mem.compare(mem.slice_to_bytes(s.vertices[base:][:words]), mem.slice_to_bytes(block[:words])) == 0, "the copy of the slot is the decoded block of its page")
 	for parent in page_parents(stream, page) {testing.expect_value(t, stream.children[parent], 1)}
@@ -158,7 +163,11 @@ a_far_mesh_made_in_memory_streams_as_a_mesh_of_a_file :: proc(t: ^testing.T) {
 	if !testing.expect(t, slot != PAGE_SLOT_NONE) {return}
 	base := record_pooled(s, s.meshes[handle]).pages[page].base
 	block := make([]u32, asset.MESH_PAGE_WORDS, context.temp_allocator)
-	testing.expect(t, asset.mesh_page_decode(g.flags, g.pages[page], g.page_data, block))
+	scratch := make([]u8, asset.MESH_PAGE_SCRATCH_BYTES, context.temp_allocator)
+	decoder: compressor.Decoder
+	testing.expect_value(t, compressor.decoder_init(&decoder), compressor.Error.None)
+	defer compressor.decoder_destroy(&decoder)
+	testing.expect(t, asset.mesh_page_decode(g.flags, g.pages[page], g.page_data, scratch, block, &decoder))
 	words := g.pages[page].words
 	testing.expect(t, mem.compare(mem.slice_to_bytes(s.vertices[base:][:words]), mem.slice_to_bytes(block[:words])) == 0, "the copy of the slot is the decoded block of its page")
 	testing.expect(t, mesh_remove(r, handle))

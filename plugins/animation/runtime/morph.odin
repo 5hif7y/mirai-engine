@@ -158,7 +158,7 @@ morph_rig_read :: proc(rig:^Skin_Rig,view:asset.Mesh_View,allocator:mem.Allocato
     error:mem.Allocator_Error
     rig.morphs,error=make([]asset.Morph_Target,len(view.morphs),allocator);if error!=nil {return false}
     copy(rig.morphs,view.morphs)
-    rig.morph.count=u32(len(view.morphs))
+    rig.morph.count,rig.morph.step=u32(len(view.morphs)),view.morph_step
     rig.morph.ranges,error=make([]erender.Morph_Range,vertices,allocator);if error!=nil {return false}
     total:=0
     for delta in view.morph_deltas {

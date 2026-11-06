@@ -36,30 +36,22 @@ quat_vec4 :: #force_inline proc "contextless" (q:math.Quat) -> math.Vec4 {return
 // The value of a track at a time. Keys are sorted by time; before the first
 // and after the last one the track holds their values, and at a NaN time the
 // value of the first. Zero without keys.
-track_evaluate :: #force_inline proc "contextless" (keys:[]Keyframe,property:Property,time:f32) -> math.Vec4 {
-    return track_evaluate_keys(keys,property,time)
-}
-track_source_evaluate :: #force_inline proc "contextless" (source:Key_Source,property:Property,time:f32) -> math.Vec4 {
-    if len(source.packed)>0 {return track_evaluate_keys(Packed_Source{source.packed,source.bounds},property,time)}
-    return track_evaluate_keys(source.keys,property,time)
-}
-@(private)
-track_evaluate_keys :: proc "contextless" (source:$T,property:Property,time:f32) -> math.Vec4 {
-    count:=key_source_count(source)
+track_evaluate :: proc "contextless" (keys:[]Keyframe,property:Property,time:f32) -> math.Vec4 {
+    count:=len(keys)
     if count==0 {return {}}
     last:=count-1
-    if !(time>key_source_time(source,0)) {return key_source_key(source,0,property).value}
-    if time>=key_source_time(source,last) {return key_source_key(source,last,property).value}
+    if !(time>keys[0].time) {return keys[0].value}
+    if time>=keys[last].time {return keys[last].value}
     low,high:=0,last
     for high-low>1 {
         middle:=(low+high)>>1
-        if key_source_time(source,middle)<=time {low=middle} else {high=middle}
+        if keys[middle].time<=time {low=middle} else {high=middle}
     }
-    return keyframe_segment(source,low,property,time)
+    return keyframe_segment(keys,low,property,time)
 }
 @(private)
-keyframe_segment :: proc "contextless" (source:$T,index:int,property:Property,time:f32) -> math.Vec4 {
-    a,b:=key_source_key(source,index,property),key_source_key(source,index+1,property)
+keyframe_segment :: proc "contextless" (keys:[]Keyframe,index:int,property:Property,time:f32) -> math.Vec4 {
+    a,b:=keys[index],keys[index+1]
     span:=b.time-a.time
     if span<=0 {return b.value}
     t:=math.ease_apply(b.ease,(time-a.time)/span)
@@ -69,8 +61,8 @@ keyframe_segment :: proc "contextless" (source:$T,index:int,property:Property,ti
         if property==.Rotation {return quat_vec4(math.quat_slerp(vec4_quat(a.value),vec4_quat(b.value),t))}
         return a.value+(b.value-a.value)*t
     case .Cubic,.Cubic_Spline:
-        before:=key_source_key(source,max(index-1,0),property)
-        after:=key_source_key(source,min(index+2,key_source_count(source)-1),property)
+        before:=keys[max(index-1,0)]
+        after:=keys[min(index+2,len(keys)-1)]
         v0,v1,vb,va:=a.value,b.value,before.value,after.value
         if property==.Rotation && b.interpolation==.Cubic {
             v1=quat_align(v1,v0);vb=quat_align(vb,v0);va=quat_align(va,v1)

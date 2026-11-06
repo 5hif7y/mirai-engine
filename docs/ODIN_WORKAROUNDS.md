@@ -163,6 +163,58 @@ Defects of Odin `dev-2026-11` (`nightly:e28f5d1`).
     content browser failed. The other uses of `os.walker_walk` remain.
   - To test: with a version that resolves it, the reproducer renames the folder; go back to the
     walker and run `mirai test editor a_folder_moves_and_copies_with_all_it_holds`.
+- **`#force_inline` silently not inlined at `-o:none` and `-o:minimal`** (odin-lang/Odin#7780,
+  with the reproducer below in a comment; odin-lang/Odin#6410).
+  - Defect: at `-o:none` no call is inlined, and at `-o:minimal` a call is not inlined when the
+    package is split into several modules (`pkg-file$1`, `$2`, …) and the callee lands in another
+    one (seen in the encoder, without a standalone reproducer); neither warns. Inlining that
+    changes the result is then lost: a `#simd[4]u64` passed by value from an
+    `enable_target_feature="avx2"` procedure to a callee built without AVX2 travels in different
+    registers on each side. Reproducer: `a.odin` with
+    `twice :: #force_inline proc "contextless" (x:$T) -> T {return simd.shl_masked(x,T(1))}`,
+    `b.odin` with `@(enable_target_feature="avx2") work :: proc "contextless"
+    (p:^#simd[4]u64) {p^=twice(p^)}` and a `main` that calls `work`; `odin run . -o:none`
+    crashes with an access violation.
+  - Workaround: the BC7Split kernels (`std/compressor/bc7split/kernels.odin`) pass `[4]u64` arrays
+    between procedures, which go through memory, and use `#simd` only inside a procedure;
+    at `-o:speed` everything is inlined and is vector code again.
+  - To test: with a version that inlines or warns, the reproducer runs at `-o:none`; go back to
+    `Lanes :: #simd[LANES]u64` and run `mirai test std/compressor/bc7split` with `-o:none` and the
+    BC7 `.tex` files of the demo through `mirai asset verify`.
+- **`simd.reduce_add_bisect` of a widened byte difference keeps half the sum**
+  (llvm/llvm-project#239204; a defect of LLVM's x86 backend, also in LLVM trunk).
+  - Defect: `simd.reduce_add_bisect(cast(#simd[16]u32)(simd.max(a,b)-simd.min(a,b)))` is emitted
+    as a tree of shuffles and adds, which LLVM turns into `psadbw`, whose sums of bytes 0-7 and
+    8-15 land in two 64-bit lanes, and returns only the low one, at every optimization level.
+    Reproducer: a procedure that takes `a` and `b` by pointer and returns that sum, with bytes
+    8 to 15 of `a` set to `len(os.args)*5` and bytes 0 to 3 of `b` set to `len(os.args)*3`:
+    `odin run .` prints 12 instead of 52.
+  - Workaround: the byte SADs of the texture encoder (`sad_u8x16` in
+    `cook/compressor/texture/common/vector.odin`, `sad_halves` in `vector_other.odin`) use
+    `simd.reduce_add_ordered`, which becomes `llvm.vector.reduce.add` and adds both lanes.
+  - To test: with an LLVM that resolves it, the reproducer prints 52 at `-o:minimal` and
+    `-o:speed`.
+- **A 32-byte `simd.runtime_swizzle` is scalar code with AVX2** (odin-lang/Odin#8199).
+  - Defect: in an `enable_target_feature="avx2"` procedure, `simd.runtime_swizzle` of two
+    `#simd[32]u8` is lowered to one extraction and insertion per byte, scalar code with `pinsrb`,
+    instead of `vpshufb` and blend sequences; of `#simd[16]u8` it is one `pshufb`. Reproducer: an
+    exported `avx2` procedure that stores `simd.runtime_swizzle(a^,b^)` of two `^#simd[32]u8`,
+    built with `-build-mode:asm -o:speed`.
+  - Workaround: the 256-bit kernels of the texture encoder (`cook/compressor/texture/common` and
+    `bc7`, `dispatch_amd64.odin`) shuffle with `x86._mm256_shuffle_epi8` and
+    `x86._mm256_permutevar8x32_epi32` within 128-bit lanes, under the comment that names this.
+  - To test: with a version that lowers it, the reproducer has no `vpinsrb`; the kernels can go
+    back to `simd.runtime_swizzle`.
+- **A `#simd[W]T` parameter with a polymorphic `$W` is rejected** (odin-lang/Odin#8198).
+  - Defect: a parameter type that uses an earlier `$W:int` is checked with `W` 0, so
+    `total :: proc($W:int,v:#simd[W]u32) -> u32` fails with `Invalid length for #simd, expected
+    a power of two length, got '0'`; `v:$V/#simd[$W]$E`, a `#simd[W]T` return and `#simd[W]T`
+    declared in the body work. Reproducer: that `total` called as `total(4,v)` with a
+    `#simd[4]u32` in `odin build`.
+  - Workaround: the texture encoder writes one kernel body per vector width (the 128-bit body of
+    `common/vqhelp.odin` and `bc7/quant.odin`, the 256-bit and 512-bit ones of
+    `dispatch_amd64.odin`) instead of one body over the width.
+  - To test: with a version that resolves it, the reproducer builds and prints 10.
 - **Slow Linux Odin with many modules** (no issue).
   - Defect: the nightly in `.deps/odin/linux-amd64` is static with musl. Compiling `stage-runtime`
     at `-o:minimal` with `/usr/bin/time` gives 116 s of processor time, 68 of them in the kernel,

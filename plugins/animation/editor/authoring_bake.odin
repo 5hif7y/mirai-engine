@@ -35,7 +35,7 @@ authoring_retarget_bake :: proc(s:^editor.Session,call:^api.Call) {
     profile,d:=authoring_profile_open(s,call,p.profile,&profile_file);if !d {return}
     doc:asset.Document;defer asset.document_destroy(&doc)
     if !finite(p.rate) || p.rate<1 || p.rate>240 {authoring_failure(call,"rate","Range","finite Hz in [1,240]",fmt.tprintf("%g",p.rate),"The retarget bake sample rate is invalid");return}
-    error:=retarget_bake(&doc,&s.app.assets.types,id,animation,source,destination,profile,p.rate,s.app.allocator)
+    error:=retarget_bake(&doc,&s.app.assets.types,id,animation,source,destination,profile,p.rate,s.app.allocator,p.target_skeleton)
     if error!=.None {authoring_failure(call,"profile","Retarget_Bake","valid bone mappings or semantic chains within output capacity",fmt.tprintf("%v",error),"The retarget bake could not be prepared",api.SERVER_ERROR if error==.Out_Of_Memory else api.INVALID_PARAMS);return}
     _=authoring_publish(s,call,target,&doc)
 }

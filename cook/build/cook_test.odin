@@ -1,11 +1,17 @@
 package build
 
+import "base:runtime"
 import "core:fmt"
+import cmath "core:math"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "mirai:asset"
+import anim "mirai:std/anim"
+import mm "mirai:std/math"
 import "mirai:std/base"
+import "mirai:std/jobs"
 
 @(private="file") WOOD_COLOR :: base.Asset_Id{1,1}
 @(private="file") WOOD_NORMAL :: base.Asset_Id{1,2}
@@ -149,15 +155,15 @@ a_cook_ships_what_the_scenes_and_the_roots_reach_as_the_runtime_loads_it :: proc
     total:i64
     for file in report.files {
         testing.expect(t,file.bytes>0 && file.source_bytes>0 && (file.compressed==(file.kind==asset.KIND_TEXTURE)))
-        if file.compressed {testing.expect(t,file.bytes<file.source_bytes)}
         total+=file.bytes
     }
     testing.expect(t,report.output_bytes>total && report.source_bytes>report.output_bytes,"the size is that of the files and the index")
     testing.expect(t,!os.exists(fmt.tprintf("%s/notes.txt",output)) && !os.exists(fmt.tprintf("%s/ui",output)))
-    // What is copied is the same bytes.
+    // Any other asset is the same document, compressed for shipping.
     source,_:=os.read_entire_file(fmt.tprintf("%s/models/crate.mesh",assets),context.temp_allocator)
     shipped,_:=os.read_entire_file(fmt.tprintf("%s/models/crate.mesh",output),context.temp_allocator)
-    testing.expect(t,len(source)>0 && string(source)==string(shipped))
+    repacked,repack_error:=asset.document_repack(source,.Ship,context.temp_allocator)
+    testing.expect(t,len(source)>0 && repack_error==.None && string(repacked)==string(shipped))
 
     // The index is what a scan of the output finds.
     indexed,scanned:asset.Registry
@@ -242,9 +248,11 @@ a_cook_that_cannot_be_what_was_asked_says_why :: proc(t:^testing.T) {
     bare:=cook_assets({assets=empty,output=output,allocator=context.temp_allocator})
     testing.expect(t,bare.error==.None && len(bare.files)==0 && len(bare.dropped)==1 && os.is_file(fmt.tprintf("%s/%s",output,asset.REGISTRY_INDEX)))
     // A cook that fails halfway leaves no index, not the one before over the files it rewrote.
+    // Of two files that cannot be written, the first by path is the one it names, as a cook on one thread does.
     testing.expect(t,os.make_directory_all(fmt.tprintf("%s/scenes/main.scene",output))==nil)
+    testing.expect(t,os.make_directory_all(fmt.tprintf("%s/textures/wood_normal.tex",output))==nil)
     halfway:=cook_assets({assets=assets,output=output,allocator=context.temp_allocator})
-    testing.expect(t,halfway.error==.Write_Failed && !os.exists(fmt.tprintf("%s/%s",output,asset.REGISTRY_INDEX)))
+    testing.expect(t,halfway.error==.Write_Failed && halfway.detail=="scenes/main.scene" && !os.exists(fmt.tprintf("%s/%s",output,asset.REGISTRY_INDEX)),halfway.detail)
 }
 
 @(test)
@@ -335,4 +343,112 @@ a_cook_brings_the_prefab_instances_of_what_it_ships_up_to_date :: proc(t:^testin
     for file in report.files {testing.expect_value(t,file.resolved,file.path=="scenes/level.scene")}
     testing.expect_value(t,glow_range(t,&types,fmt.tprintf("%s/scenes/level.scene",output)),f32(4))
     testing.expect_value(t,glow_range(t,&types,level_path),f32(1))
+}
+
+// Files cooked at once on many workers are the files and the report of a
+// cook on one: textures of one content share their blocks in the cache, and
+// scenes resolve against the same prefab.
+@(test)
+a_cook_on_many_workers_writes_what_a_cook_on_one_does :: proc(t:^testing.T) {
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    folder:=cook_folder("workers")
+    defer os.remove_all(folder)
+    assets:=fmt.tprintf("%s/project/assets",folder)
+    project_write(t,&types,assets)
+    for at in 0..<16 {
+        texture_write(t,&types,fmt.tprintf("%s/textures/tile_%02d.tex",assets,at),{8,u64(at)},{.Srgb},at%2==1)
+        material_write(t,&types,fmt.tprintf("%s/materials/tile_%02d.mat",assets,at),{10,u64(at)},{8,u64(at)},{})
+    }
+    lamp_path:=fmt.tprintf("%s/prefabs/lamp.prefab",assets)
+    lamp:=glow_prefab_write(t,&types,lamp_path,1)
+    for at in 0..<6 {
+        level:asset.Scene;asset.scene_init(&level,&types,asset.KIND_SCENE,{11,u64(at)})
+        _,_,placed:=asset.scene_instantiate(&level,&lamp,PROP,0)
+        testing.expect_value(t,placed,asset.Error.None)
+        testing.expect_value(t,asset.scene_save(&level,fmt.tprintf("%s/scenes/level_%d.scene",assets,at)),asset.Error.None)
+        asset.scene_destroy(&level)
+    }
+    asset.scene_destroy(&lamp)
+    lamp=glow_prefab_write(t,&types,lamp_path,4)
+    asset.scene_destroy(&lamp)
+    manifest:=fmt.tprintf("%s/project/%s",folder,COOK_FILE)
+    testing.expect(t,os.write_entire_file(manifest,`{"roots":["materials/"]}`)==nil)
+
+    cook :: proc(folder,assets,manifest,name:string,threads:int) -> Cook_Report {
+        js:jobs.Job_System
+        if !jobs.system_init(&js,{threads=threads,allocator=runtime.heap_allocator()}) {return {error=.Write_Failed}}
+        defer jobs.system_destroy(&js)
+        return cook_assets({assets=assets,output=fmt.tprintf("%s/%s",folder,name),manifest=manifest,texture_cache=fmt.tprintf("%s/%s_cache",folder,name),worker={system=&js},allocator=context.temp_allocator})
+    }
+    one:=cook(folder,assets,manifest,"one",0)
+    many:=cook(folder,assets,manifest,"many",7)
+    testing.expectf(t,one.error==.None && many.error==.None,"%v %s, %v %s",one.error,one.detail,many.error,many.detail)
+    testing.expect(t,one.textures_compressed>8 && one.scenes_resolved==6,"textures to compress and scenes to resolve")
+    testing.expect(t,len(one.files)==len(many.files) && len(one.dropped)==len(many.dropped) && len(one.missing)==len(many.missing))
+    testing.expect(t,one.roots==many.roots && one.textures_compressed==many.textures_compressed && one.scenes_resolved==many.scenes_resolved && one.output_bytes==many.output_bytes && one.source_bytes==many.source_bytes)
+    for file,at in one.files {
+        if at>=len(many.files) {break}
+        other:=many.files[at]
+        testing.expectf(t,file.path==other.path && file.id==other.id && file.kind==other.kind && file.bytes==other.bytes && file.compressed==other.compressed && file.resolved==other.resolved,"%s against %s",file.path,other.path)
+        written,_:=os.read_entire_file(fmt.tprintf("%s/one/%s",folder,file.path),context.temp_allocator)
+        again,_:=os.read_entire_file(fmt.tprintf("%s/many/%s",folder,other.path),context.temp_allocator)
+        testing.expectf(t,len(written)>0 && slice.equal(written,again),"%s is not the same",file.path)
+    }
+    for file,at in one.dropped {
+        if at<len(many.dropped) {testing.expect_value(t,many.dropped[at].path,file.path)}
+    }
+    for lost,at in one.missing {
+        if at<len(many.missing) {testing.expect(t,many.missing[at].path==lost.path && many.missing[at].id==lost.id)}
+    }
+    // A quick cook writes the same files, a little larger, and each reads back as the asset it was.
+    quick:=cook_assets({assets=assets,output=fmt.tprintf("%s/quick",folder),manifest=manifest,quick=true,allocator=context.temp_allocator})
+    testing.expectf(t,quick.error==.None && len(quick.files)==len(one.files) && quick.output_bytes>=one.output_bytes,"%v %s: %d against %d bytes",quick.error,quick.detail,quick.output_bytes,one.output_bytes)
+}
+
+@(test)
+a_cook_ships_animations_sampled_on_the_rest_pose_of_their_skeleton :: proc(t:^testing.T) {
+    RIG :: base.Asset_Id{7,1}
+    CLIPS :: base.Asset_Id{7,2}
+    STAGE :: base.Asset_Id{7,3}
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    folder:=cook_folder("animations")
+    defer os.remove_all(folder)
+    assets,output:=fmt.tprintf("%s/project/assets",folder),fmt.tprintf("%s/ship/assets",folder)
+    for sub in ([]string{"models","scenes"}) {os.make_directory_all(fmt.tprintf("%s/%s",assets,sub))}
+    // Bones in centimeters under a root that scales them to meters.
+    bones:=[2]asset.Skeleton_Bone{{parent=-1,rotation=1,scale={.01,.01,.01}},{parent=0,translation={0,100,0},rotation=1,scale={1,1,1}}}
+    base.text_set(bones[0].name[:],"root");base.text_set(bones[0].path[:],"root");bones[0].target=base.name_hash("root")
+    base.text_set(bones[1].name[:],"arm");base.text_set(bones[1].path[:],"root/arm");bones[1].target=base.name_hash("root/arm")
+    testing.expect_value(t,asset.skeleton_save(fmt.tprintf("%s/models/rig.skeleton",assets),&types,{id=RIG,bones=bones[:]}),asset.Error.None)
+    keys:[61]anim.Keyframe
+    for &key,k in keys {key={time=f32(k)/30,value=anim.quat_vec4(quaternion(w=cmath.cos(f32(k)*.05),x=cmath.sin(f32(k)*.05),y=0,z=0))}}
+    tracks:=[1]asset.Animation_Track_Desc{{target="root/arm",property=.Rotation,keys=keys[:]}}
+    clips:=[1]asset.Animation_Clip_Desc{{name="swing",tracks=tracks[:],skeleton=RIG}}
+    path:=fmt.tprintf("%s/models/arm.anim",assets)
+    testing.expect_value(t,asset.animation_save(path,&types,{id=CLIPS,clips=clips[:]}),asset.Error.None)
+    scene_write(t,&types,fmt.tprintf("%s/scenes/stage.scene",assets),asset.KIND_SCENE,STAGE,CLIPS)
+
+    report:=cook_assets({assets=assets,output=output,manifest=fmt.tprintf("%s/project/%s",folder,COOK_FILE),allocator=context.temp_allocator})
+    testing.expect_value(t,report.error,Cook_Error.None)
+    kept,_:=names(&report)
+    testing.expect_value(t,kept,"models/arm.anim models/rig.skeleton scenes/stage.scene ")
+    testing.expect_value(t,report.animations_compressed,1)
+    shipped:asset.Asset
+    testing.expect_value(t,asset.asset_load(&shipped,fmt.tprintf("%s/models/arm.anim",output)),asset.Error.None)
+    defer asset.asset_close(&shipped)
+    view,error:=asset.animation_view(&shipped,&types)
+    testing.expect_value(t,error,asset.Error.None)
+    testing.expect(t,len(view.tracks)==1 && view.tracks[0].encoding==.Sampled && len(view.keys)==0 && view.clips[0].skeleton==RIG)
+    lib:anim.Library
+    testing.expect(t,anim.library_init(&lib,asset.animation_library_desc(view)))
+    defer anim.library_destroy(&lib)
+    testing.expect_value(t,asset.animation_clips_add(view,&lib),anim.Clip(1))
+    // The arm swings 100 cm out from a root at 0.01: a point 3 cm from it moves within 0.1 mm.
+    for step in 0..=240 {
+        time:=f32(step)/120
+        exact:=anim.vec4_quat(anim.track_evaluate(keys[:],.Rotation,time))
+        played:=anim.vec4_quat(anim.clip_evaluate(&lib,anim.clip_tracks(&lib,1)[0],time))
+        moved:=mm.quat_rotate(exact,{0,.03,0})-mm.quat_rotate(played,{0,.03,0})
+        testing.expect(t,cmath.sqrt(moved.x*moved.x+moved.y*moved.y+moved.z*moved.z)<=anim.COMPRESS_DEFAULT.precision*1.05)
+    }
 }

@@ -10,7 +10,7 @@ import anim "plugins:animation/runtime"
 
 @(private) Bake_Chain :: struct {source,target:[]i32,mapping:[]lib.Chain_Retarget_Bone,weight:f32}
 
-retarget_bake :: proc(doc:^asset.Document,types:^asset.Types,id:base.Asset_Id,clips:asset.Animation_View,source,target:asset.Skeleton_View,profile:anim.Pose_Profile,rate:f32=60,allocator:=context.allocator) -> asset.Error {
+retarget_bake :: proc(doc:^asset.Document,types:^asset.Types,id:base.Asset_Id,clips:asset.Animation_View,source,target:asset.Skeleton_View,profile:anim.Pose_Profile,rate:f32=60,allocator:=context.allocator,skeleton:=base.Asset_Id{}) -> asset.Error {
     if !asset.animation_check(clips) || !asset.skeleton_check(source) || !asset.skeleton_check(target) || !anim.pose_profile_check(profile) || len(profile.retarget)==0 && len(profile.retarget_chains)==0 || rate<1 || rate>240 || rate-rate!=0 {return .Invalid}
     scratch:=context.temp_allocator
     rig :: proc(bones:[]asset.Skeleton_Bone,allocator:runtime.Allocator) -> (result:lib.Skeleton,error:asset.Error) {
@@ -118,7 +118,7 @@ retarget_bake :: proc(doc:^asset.Document,types:^asset.Types,id:base.Asset_Id,cl
             }
             if root.bone[0]==0 {root.translation,root.rotation=false,false}
         }
-        output[i]={name=base.text_get(clip.name[:]),tracks=tracks,markers=markers,root=root}
+        output[i]={name=base.text_get(clip.name[:]),tracks=tracks,markers=markers,root=root,skeleton=skeleton}
     }
     return asset.animation_document(doc,types,{id=id,clips=output},allocator)
 }

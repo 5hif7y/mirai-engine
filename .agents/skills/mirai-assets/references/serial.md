@@ -1,14 +1,13 @@
 # std/serial
 
-Little-endian streams with varints (`stream.odin`), files with atomic writing (`file.odin`), block
-LZ4 (`lz4.odin`), binary schemas (`schema_binary.odin`), value image and migration (`value.odin`),
-paths (`path.odin`), references to entities and assets (`refs.odin`) and schema-guided JSON
+Little-endian streams with varints (`stream.odin`), files with atomic writing (`file.odin`),
+binary schemas (`schema_binary.odin`), value image and migration (`value.odin`), paths
+(`path.odin`), references to entities and assets (`refs.odin`) and schema-guided JSON
 (`text.odin`).
 
 - `Writer` grows with its allocator or is fixed over a buffer; what does not fit is counted in
   `overflow`. `Reader` never reads outside: the first read that does not fit sets `failed` and the
-  following return zero; `read_count` rejects a count that the remaining input cannot back. The LZ4
-  decoder is safe against any input.
+  following return zero; `read_count` rejects a count that the remaining input cannot back.
 - `text_write` omits `Transient` fields by default; `omit_fields={}` includes everything for
   inspection and `{.Transient,.Hidden}` gives the public view of components, also inside structs and
   arrays. Binary persistence does not change.

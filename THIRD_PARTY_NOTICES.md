@@ -79,8 +79,6 @@ are kept here and, where the license asks for it, in the header of the file.
   upscaler, optical flow, frame interpolation and SPD headers) and the pass sequence of
   `plugins/fsr/runtime/framegen.odin`, translated from `ffx_opticalflow.cpp` and
   `ffx_frameinterpolation.cpp`. Game, with the `fsr` plugin.
-- **bc7e** (Apache-2.0; © 2018-2021 Binomial LLC), <https://github.com/richgel999/bc7enc_rdo>.
-  `cook/textures/bc7.odin`. Editor.
 
 The files derived from Apache-2.0 work state their changes in their header.
 

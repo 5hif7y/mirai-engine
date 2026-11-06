@@ -52,8 +52,9 @@ stored_thumbnails_last_until_their_asset_or_what_it_needs_changes :: proc(t:^tes
 
     image:=make([]u8,THUMBNAIL_SIZE*THUMBNAIL_SIZE*4,context.temp_allocator)
     for &value,at in image {value=u8(at%251)}
-    file,read:[dynamic]u8
-    defer {delete(file);delete(read)}
+    file:Thumbnail_File
+    read:[dynamic]u8
+    defer {thumbnail_file_destroy(&file);delete(read)}
     testing.expect(t,thumbnail_save(folder,material,THUMBNAIL_SIZE,key,image,&file))
     testing.expect(t,thumbnail_load(folder,material,THUMBNAIL_SIZE,key,&file,&read) && slice.equal(read[:],image))
     testing.expect(t,!thumbnail_load(folder,material,THUMBNAIL_LARGE,key,&file,&read))
@@ -112,7 +113,7 @@ stored_thumbnails_last_until_their_asset_or_what_it_needs_changes :: proc(t:^tes
 @(test)
 a_provider_image_is_drawn_between_frames_after_the_frame_that_asked :: proc(t:^testing.T) {
     p:Thumbnails
-    defer {delete(p.pixels);delete(p.image);delete(p.file)}
+    defer {delete(p.pixels);delete(p.image);thumbnail_file_destroy(&p.file)}
     assets:host.Assets
     assets.renderer=(^gpu.Renderer)(uintptr(16))
     app:host.App

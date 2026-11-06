@@ -21,7 +21,7 @@ import "mirai:std/serial"
 
 KIND :: asset.Fourcc(u32('F')|u32('O')<<8|u32('L')<<16|u32('I')<<24)
 EXTENSION :: ".foliage"
-VERSION :: 2
+VERSION :: 3
 CELL_SIZE :: f32(32)    // metres across x and z of a cell
 TYPES_MAX :: 1024
 CELLS_MAX :: 1 << 20
@@ -378,18 +378,20 @@ source_valid :: proc (s:^Source) -> bool {
 // record of the import it comes from.
 source_bytes :: proc(s:^Source,id:base.Asset_Id,types:^asset.Types,allocator:=context.allocator,import_info:^asset.Import_Info=nil) -> (data:[]u8,error:asset.Error) {
     if !source_valid(s) {return nil,.Invalid}
-    cells:=make([]Foliage_Cell,len(s.cells),context.temp_allocator)
     manual,overrides:=0,0
     for cell in s.cells {manual+=len(cell.manual);overrides+=len(cell.overrides)}
-    instances:=make([]Foliage_Instance,manual,context.temp_allocator)
-    changes:=make([]Foliage_Override,overrides,context.temp_allocator)
+    cells,e1:=make([]Foliage_Cell,len(s.cells),context.temp_allocator)
+    instances,e2:=make([]u8,manual*INSTANCE_BYTES,context.temp_allocator)
+    changes,e3:=make([]u8,overrides*OVERRIDE_BYTES,context.temp_allocator)
+    if e1!=nil || e2!=nil || e3!=nil {return nil,.Out_Of_Memory}
+    manual_planes:=Planes(INSTANCE_WORDS){data=instances,count=manual}
+    override_planes:=Planes(OVERRIDE_WORDS){data=changes,count=overrides}
     manual,overrides=0,0
     for cell,i in s.cells {
         cells[i]={coord=cell.coord,generate=cell.generate,manual_first=u32(manual),manual_count=u32(len(cell.manual)),override_first=u32(overrides),override_count=u32(len(cell.overrides))}
-        copy(instances[manual:],cell.manual[:])
-        copy(changes[overrides:],cell.overrides[:])
-        manual+=len(cell.manual)
-        overrides+=len(cell.overrides)
+        manual_planes.in_cell,override_planes.in_cell=false,false
+        for b in cell.manual {planes_put(&manual_planes,INSTANCE_CODES,manual,instance_words(b));manual+=1}
+        for o in cell.overrides {planes_put(&override_planes,OVERRIDE_CODES,overrides,override_words(o));overrides+=1}
     }
     document:asset.Document
     asset.document_init(&document,KIND,id,allocator)
@@ -399,10 +401,103 @@ source_bytes :: proc(s:^Source,id:base.Asset_Id,types:^asset.Types,allocator:=co
     asset.document_put_row(&document,types,"foliage",&info) or_return
     asset.document_put(&document,types,"types",s.types[:]) or_return
     asset.document_put(&document,types,"cells",cells) or_return
-    asset.document_put(&document,types,"manual",instances,{.Bulk},.LZ4) or_return
-    asset.document_put(&document,types,"overrides",changes,{.Bulk},.LZ4) or_return
+    asset.document_put(&document,types,"manual",instances,{.Bulk},.LZ) or_return
+    asset.document_put(&document,types,"overrides",changes,{.Bulk},.LZ) or_return
     asset.import_put(&document,types,import_info) or_return
     return asset.document_bytes(&document,allocator)
+}
+
+// How the file stores the manual instances and the overrides: the records of
+// each, cell after cell, as words of 4 bytes split into byte planes (byte j of
+// every record, then byte j+1), each word coded as its field compresses best.
+// Every bit pattern comes back as it was.
+@(private)
+Code :: enum u8 {
+    Plain,
+    Id,       // less that of the record before it in the file, zigzag: ids given in turn are 1 apart
+    Near,     // less that of the record before it in its cell, zigzag: neighbours share their high bits
+    Rotation, // quat_pack of 10 bits with the low bytes of its components apart from their high bits
+}
+INSTANCE_WORDS :: 10 // id, type, flags, position, rotation, scale, ground
+OVERRIDE_WORDS :: 3+INSTANCE_WORDS // type, point, kind, the instance
+INSTANCE_BYTES :: INSTANCE_WORDS*4
+OVERRIDE_BYTES :: OVERRIDE_WORDS*4
+@(private) INSTANCE_CODES :: [INSTANCE_WORDS]Code{.Id,.Plain,.Plain,.Near,.Near,.Near,.Rotation,.Plain,.Plain,.Plain}
+@(private) OVERRIDE_CODES :: [OVERRIDE_WORDS]Code{.Plain,.Near,.Plain,.Id,.Plain,.Plain,.Near,.Near,.Near,.Rotation,.Plain,.Plain,.Plain}
+
+@(private)
+Planes :: struct($N:int) {
+    data:[]u8,    // N*4 planes of count bytes
+    count:int,
+    last:[N]u32,  // the words of the record before, in the file
+    in_cell:bool, // that record is of the same cell
+}
+
+@(private)
+instance_words :: proc "contextless" (b:Foliage_Instance) -> [INSTANCE_WORDS]u32 {
+    return {b.id,b.type,b.flags,transmute(u32)b.position.x,transmute(u32)b.position.y,transmute(u32)b.position.z,b.rotation,transmute(u32)b.scale[0],transmute(u32)b.scale[1],transmute(u32)b.ground}
+}
+
+@(private)
+instance_of_words :: proc "contextless" (w:[]u32) -> Foliage_Instance {
+    return {id=w[0],type=w[1],flags=w[2],position={transmute(f32)w[3],transmute(f32)w[4],transmute(f32)w[5]},rotation=w[6],scale={transmute(f32)w[7],transmute(f32)w[8]},ground=transmute(f32)w[9]}
+}
+
+@(private)
+override_words :: proc "contextless" (o:Foliage_Override) -> (w:[OVERRIDE_WORDS]u32) {
+    w[0],w[1],w[2]=o.type,o.point,u32(o.kind)
+    instance:=instance_words(o.instance)
+    copy(w[3:],instance[:])
+    return
+}
+
+@(private)
+word_code :: proc "contextless" (code:Code,v,last:u32,in_cell:bool) -> u32 {
+    zigzag :: proc "contextless" (v:u32) -> u32 {s:=i32(v);return u32(s<<1~s>>31)}
+    switch code {
+    case .Plain:
+    case .Id: return zigzag(v-last)
+    case .Near: if in_cell {return zigzag(v-last)}
+    case .Rotation: return v&0xff|(v>>10&0xff)<<8|(v>>20&0xff)<<16|(v>>8&3)<<24|(v>>18&3)<<26|(v>>28)<<28
+    }
+    return v
+}
+
+@(private)
+word_decode :: proc "contextless" (code:Code,c,last:u32,in_cell:bool) -> u32 {
+    unzigzag :: proc "contextless" (c:u32) -> u32 {return c>>1~(0-(c&1))}
+    switch code {
+    case .Plain:
+    case .Id: return last+unzigzag(c)
+    case .Near: if in_cell {return last+unzigzag(c)}
+    case .Rotation: return c&0xff|(c>>24&3)<<8|(c>>8&0xff)<<10|(c>>26&3)<<18|(c>>16&0xff)<<20|(c>>28)<<28
+    }
+    return c
+}
+
+// Record i of the planes, from its words.
+@(private)
+planes_put :: proc "contextless" (p:^Planes($N),codes:[N]Code,i:int,words:[N]u32) {
+    codes:=codes
+    for w,k in words {
+        c:=word_code(codes[k],w,p.last[k],p.in_cell)
+        for b in 0..<4 {p.data[(k*4+b)*p.count+i]=u8(c>>(uint(b)*8))}
+    }
+    p.last,p.in_cell=words,true
+}
+
+// The words of record i of the planes, after the one before it.
+@(private)
+planes_get :: proc "contextless" (p:^Planes($N),codes:[N]Code,i:int) -> [N]u32 {
+    codes:=codes
+    words:[N]u32
+    for &w,k in words {
+        c:u32
+        for b in 0..<4 {c|=u32(p.data[(k*4+b)*p.count+i])<<(uint(b)*8)}
+        w=word_decode(codes[k],c,p.last[k],p.in_cell)
+    }
+    p.last,p.in_cell=words,true
+    return words
 }
 
 @(private)
@@ -420,18 +515,22 @@ source_read :: proc(s:^Source,file:^asset.Asset,types:^asset.Types,allocator:=co
     if error!=.None || info==nil {return}
     kinds:=rows_or_none(file,types,"types",Foliage_Type) or_return
     cells:=rows_or_none(file,types,"cells",Foliage_Cell) or_return
-    manual:=rows_or_none(file,types,"manual",Foliage_Instance) or_return
-    overrides:=rows_or_none(file,types,"overrides",Foliage_Override) or_return
-    if len(kinds)>TYPES_MAX || len(cells)>CELLS_MAX || len(manual)>INSTANCES_MAX || len(overrides)>INSTANCES_MAX {return}
-    // The ranges of the cells follow each other and cover every row once.
+    manual_bytes:=rows_or_none(file,types,"manual",u8) or_return
+    override_bytes:=rows_or_none(file,types,"overrides",u8) or_return
+    manual,overrides:=len(manual_bytes)/INSTANCE_BYTES,len(override_bytes)/OVERRIDE_BYTES
+    if manual*INSTANCE_BYTES!=len(manual_bytes) || overrides*OVERRIDE_BYTES!=len(override_bytes) {return}
+    if len(kinds)>TYPES_MAX || len(cells)>CELLS_MAX || manual>INSTANCES_MAX || overrides>INSTANCES_MAX {return}
+    // The ranges of the cells follow each other and cover every record once.
     next_manual,next_override:=u32(0),u32(0)
     for cell in cells {
         if cell.manual_first!=next_manual || cell.override_first!=next_override {return}
-        if u64(cell.manual_first)+u64(cell.manual_count)>u64(len(manual)) || u64(cell.override_first)+u64(cell.override_count)>u64(len(overrides)) {return}
+        if u64(cell.manual_first)+u64(cell.manual_count)>u64(manual) || u64(cell.override_first)+u64(cell.override_count)>u64(overrides) {return}
         next_manual+=cell.manual_count
         next_override+=cell.override_count
     }
-    if int(next_manual)!=len(manual) || int(next_override)!=len(overrides) {return}
+    if int(next_manual)!=manual || int(next_override)!=overrides {return}
+    manual_planes:=Planes(INSTANCE_WORDS){data=manual_bytes,count=manual}
+    override_planes:=Planes(OVERRIDE_WORDS){data=override_bytes,count=overrides}
     temporary:Source
     context.allocator=allocator
     temporary.info=info^
@@ -444,10 +543,19 @@ source_read :: proc(s:^Source,file:^asset.Asset,types:^asset.Types,allocator:=co
             source_destroy(&temporary)
             return
         }
-        append(&held.manual,..manual[cell.manual_first:][:cell.manual_count])
-        append(&held.overrides,..overrides[cell.override_first:][:cell.override_count])
-        slice.sort_by(held.overrides[:],proc(a,b:Foliage_Override) -> bool {return override_before(a,b.type,b.point)})
         append(&temporary.cells,held)
+        added:=&temporary.cells[len(temporary.cells)-1]
+        manual_planes.in_cell,override_planes.in_cell=false,false
+        for i in cell.manual_first..<cell.manual_first+cell.manual_count {
+            words:=planes_get(&manual_planes,INSTANCE_CODES,int(i))
+            append(&added.manual,instance_of_words(words[:]))
+        }
+        for i in cell.override_first..<cell.override_first+cell.override_count {
+            w:=planes_get(&override_planes,OVERRIDE_CODES,int(i))
+            if w[2]>u32(max(Override_Kind)) {source_destroy(&temporary);return}
+            append(&added.overrides,Foliage_Override{type=w[0],point=w[1],kind=Override_Kind(w[2]),instance=instance_of_words(w[3:])})
+        }
+        slice.sort_by(added.overrides[:],proc(a,b:Foliage_Override) -> bool {return override_before(a,b.type,b.point)})
     }
     if !source_valid(&temporary) {source_destroy(&temporary);return}
     source_destroy(s)

@@ -108,8 +108,12 @@ a_far_mesh_made_in_memory_carries_the_blocks_of_its_pages :: proc(t:^testing.T) 
     testing.expect(t,mesh_check({info=&info,geometry=far}),"it holds together as a mesh of a file")
     block:=make([]u32,MESH_PAGE_WORDS,context.temp_allocator)
     want:=make([]u32,MESH_PAGE_WORDS,context.temp_allocator)
+    decoder:Decoder
+    testing.expect_value(t,decoder_init(&decoder),Error.None)
+    defer decoder_destroy(&decoder)
+    scratch:=make([]u8,MESH_PAGE_SCRATCH_BYTES,context.temp_allocator)
     for page,at in far.pages {
-        if !testing.expectf(t,page.data_bytes>0 && mesh_page_decode(far.flags,page,far.page_data,block),"page %d decodes",at) {return}
+        if !testing.expectf(t,page.data_bytes>0 && mesh_page_decode(far.flags,page,far.page_data,scratch,block,&decoder.lz),"page %d decodes",at) {return}
         testing.expect(t,mesh_page_gather(far,page,want))
         testing.expectf(t,string(mem.slice_to_bytes(block[:page.words]))==string(mem.slice_to_bytes(want[:page.words])),"page %d decodes to its clusters",at)
     }

@@ -327,7 +327,8 @@ a_body_that_stands_leaves_out_every_clip_that_moves_and_one_that_moves_every_cli
 }
 
 // The clips of match_test_rig and a jump of a second, an entry of the air, whose feet leave the
-// ground and touch it again at .8 s, where its marker 0 is.
+// ground and touch it again at .8 s, where its marker 0 is; and the same jump marked by its own
+// marker 1 of that event, as each clip of a library names its landing.
 @(private="file")
 match_test_jump :: proc(t:^testing.T,library:^Library,db:^Match_Database) -> bool {
     rig,clips,ok:=match_test_rig(library)
@@ -337,8 +338,12 @@ match_test_jump :: proc(t:^testing.T,library:^Library,db:^Match_Database) -> boo
     land:=[1]Marker{{time=.8,id=0}}
     jump,error:=clip_add(library,{name=base.name_hash("jump"),tracks={{target=rig.skeleton.names[2],property=.Position,keys=left[:]},{target=rig.skeleton.names[3],property=.Position,keys=right[:]}},markers=land[:]})
     if error!=.None {return false}
-    all:=[4]Match_Clip{clips[0],clips[1],clips[2],{clips={0=jump},modes=1<<0,entry=true}}
-    return match_database_build(db,library,rig,all[:],30,event=0)==.None
+    again:=[1]Marker{{time=.8,id=1}}
+    other,other_error:=clip_add(library,{name=base.name_hash("jump again"),tracks={{target=rig.skeleton.names[2],property=.Position,keys=left[:]},{target=rig.skeleton.names[3],property=.Position,keys=right[:]}},markers=again[:]})
+    if other_error!=.None {return false}
+    all:=[5]Match_Clip{clips[0],clips[1],clips[2],{clips={0=jump},modes=1<<0,entry=true},{clips={0=other},modes=1<<0,entry=true}}
+    events:=[2]u32{0,1}
+    return match_database_build(db,library,rig,all[:],30,event=events[:])==.None
 }
 
 @(test)
@@ -347,8 +352,9 @@ an_event_searches_the_rows_that_reach_its_marker_in_time_at_the_rate_that_does :
     db:Match_Database;defer match_database_free(&db)
     if !testing.expect(t,match_test_jump(t,&library,&db)) {return}
     jump:=db.ranges[3]
-    testing.expect(t,len(db.events)==db.rows && match_database_size(db)==match_database_bytes(db.rows,4,true))
+    testing.expect(t,len(db.events)==db.rows && match_database_size(db)==match_database_bytes(db.rows,5,true))
     testing.expect(t,match_event_serves(&db,1<<0) && !match_event_serves(&db,1<<1),"the air has a clip that lands, the ground none")
+    testing.expect(t,match_event_ahead(&db,4,0)>0,"the clip marked by another marker of the event lands too")
     for frame in 0..<int(jump.count) {
         ahead:=db.events[int(jump.first)+frame];at:=f32(frame)/db.rate
         testing.expectf(t,abs(ahead-(.8-at))<1e-4 if at<=.8+1e-4 else ahead<0,"row %d of the jump is %.3f s from its marker",frame,ahead)

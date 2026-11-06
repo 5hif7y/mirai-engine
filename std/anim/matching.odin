@@ -4,6 +4,7 @@ import cmath "core:math"
 import "core:math/linalg"
 import "core:mem"
 import "core:simd"
+import "core:slice"
 import math "mirai:std/math"
 
 // Motion matching: every frame of a set of clips is a row of features (where
@@ -126,12 +127,13 @@ match_database_bytes :: proc "contextless" (rows,ranges:int,events:=false) -> in
 }
 
 // Samples every clip at about rate rows per second and keeps its features, refusing with
-// Memory_Limit a database that would keep more than limit bytes (0: any). event is the Marker.id
-// of an event (a landing; -1: none): when a clip that is not a blend has it, each row keeps the
+// Memory_Limit a database that would keep more than limit bytes (0: any). event holds the Marker.id
+// of each marker of an event (a landing; each clip names it with one of its own; empty: none):
+// when a clip that is not a blend has one, each row keeps the
 // seconds to the next one of its clip. A clip that does not move the skeleton or lasts a single
 // pose, a blend match_clip_duration refuses, or a rig without feet and hips gives Invalid; db is
 // empty after an error.
-match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips:[]Match_Clip,rate:f32,weights:=MATCH_WEIGHTS_DEFAULT,limit:=0,event:=i32(-1),allocator:=context.allocator) -> (error:Match_Build_Error) {
+match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips:[]Match_Clip,rate:f32,weights:=MATCH_WEIGHTS_DEFAULT,limit:=0,event:[]u32={},allocator:=context.allocator) -> (error:Match_Build_Error) {
     match_database_free(db)
     error=.Invalid
     n:=len(rig.skeleton.parents)
@@ -153,8 +155,8 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
             tracks:=0
             for clip,k in c.clips {if c.weights[k]>0 {tracks+=len(clip_tracks(lib,clip))}}
             blend_tracks=max(blend_tracks,tracks)
-        } else if event>=0 {
-            for marker in clip_markers(lib,c.clips[0]) {if marker.id==u32(event) {events=true}}
+        } else if len(event)>0 {
+            for marker in clip_markers(lib,c.clips[0]) {if slice.contains(event,marker.id) {events=true}}
         }
     }
     if limit>0 && match_database_bytes(total,len(clips),events)>limit {return .Memory_Limit}
@@ -247,7 +249,7 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
                 // A marker within half a row of a frame is at that frame.
                 if r.weights=={0=1} {
                     for marker in clip_markers(lib,c.clips[0]) {
-                        if marker.id!=u32(event) || marker.time<at-.5/rate {continue}
+                        if !slice.contains(event,marker.id) || marker.time<at-.5/rate {continue}
                         if ahead:=max(marker.time-at,0);next<0 || ahead<next {next=ahead}
                     }
                 }

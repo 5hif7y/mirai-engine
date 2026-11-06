@@ -257,20 +257,22 @@ match_fixture :: proc(t:^testing.T,f:^Match_Fixture,memory:u32=MATCH_INFO_DEFAUL
     lift_r:=[2]lib.Keyframe{{time=0,value={-.1,-.95,0,0}},{time=1,value={-.1,-.5,0,0}}}
     release:=[1]lib.Marker{{time=.35,id=0}}
     land:=[1]lib.Marker{{time=.8,id=1}}
+    // As a library keeps them: each clip's marker of its own, of the same name.
+    land_again:=[1]lib.Marker{{time=.8,id=2}}
     descs:=[6]lib.Clip_Desc{
         {name=base.name_hash("idle"),tracks={{target=left,property=.Position,keys=still[:]},{target=right,property=.Position,keys=other[:]}}},
         {name=base.name_hash("walk"),tracks={{target=left,property=.Position,keys=stride_l[:]},{target=right,property=.Position,keys=stride_r[:]}}},
         {name=base.name_hash("fall"),tracks={{target=left,property=.Position,keys=tucked[:]},{target=right,property=.Position,keys=other[:]}}},
         {name=base.name_hash("jump"),tracks={{target=left,property=.Position,keys=rise_l[:]},{target=right,property=.Position,keys=rise_r[:]}},markers=land[:]},
         {name=base.name_hash("vault"),tracks={{target=left,property=.Position,keys=over_l[:]},{target=right,property=.Position,keys=over_r[:]}},markers=release[:]},
-        {name=base.name_hash("leap"),tracks={{target=left,property=.Position,keys=lift_l[:]},{target=right,property=.Position,keys=lift_r[:]}},markers=land[:]},
+        {name=base.name_hash("leap"),tracks={{target=left,property=.Position,keys=lift_l[:]},{target=right,property=.Position,keys=lift_r[:]}},markers=land_again[:]},
     }
     f.content.id,f.content.generation={0x3a7c,3},1
     if !lib.library_init(&f.content.lib,{max_keys=64,max_tracks=16,max_clips=2*len(descs),max_markers=4}) {return false}
     for desc in descs {if _,error:=lib.clip_add(&f.content.lib,desc);error!=.None {return false}}
     if _,error:=lib.library_compress(&f.content.lib);error!=.None {return false}
     host.content_animation_loops(&f.content.lib,len(descs));f.content.clip_count=len(descs)
-    f.content.markers=make([]u64,2);f.content.markers[0],f.content.markers[1]=base.name_hash("release"),base.name_hash("land")
+    f.content.markers=make([]u64,3);f.content.markers[0],f.content.markers[1],f.content.markers[2]=base.name_hash("release"),base.name_hash("land"),base.name_hash("land")
     f.assets.registry.by_id=make(map[base.Asset_Id]u32)
     append(&f.assets.registry.files,asset.Registry_File{id=MATCH_TEST_ID,kind=MATCH_KIND,state=.Asset});f.assets.registry.by_id[MATCH_TEST_ID]=0
     f.app={assets=&f.assets,allocator=context.allocator}

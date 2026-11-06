@@ -371,12 +371,13 @@ match_database :: proc(content:^Match_Content,library:^host.Content_Animation,st
             }
             rig:=lib.Match_Rig{skeleton={parents=state.parents[:],names=state.targets[:],rest=rest},body=body,left_foot=i32(bones[0]),right_foot=i32(bones[1]),hips=i32(bones[2]),forward={0,0,1}}
             weights:=lib.Match_Weights{.Foot_Position=info.foot_position,.Foot_Velocity=info.foot_velocity,.Hip_Velocity=info.hip_velocity,.Body_Velocity=info.body_velocity,.Trajectory_Position=info.trajectory_position,.Trajectory_Direction=info.trajectory_direction}
-            event:=i32(-1)
+            // Each clip names its landing with a marker of its own: every one of that name.
+            event:=make([dynamic]u32,context.temp_allocator)
             if landing:=base.text_get(info.landing_marker[:]);landing!="" {
                 name:=base.name_hash(landing)
-                for marker,k in library.markers {if marker==name {event=i32(k);break}}
+                for marker,k in library.markers {if marker==name {append(&event,u32(k))}}
             }
-            built.error=lib.match_database_build(&built.database,&library.lib,rig,clips,info.rate,weights,int(info.memory)*1024,event,allocator)
+            built.error=lib.match_database_build(&built.database,&library.lib,rig,clips,info.rate,weights,int(info.memory)*1024,event[:],allocator)
         }
     }
     if append(&content.databases,built)!=1 {lib.match_database_free(&built.database);return nil,.Out_Of_Memory,{}}

@@ -122,7 +122,7 @@ set_mode :: proc(requests:^Locomotion_Requests,e:core.Entity,mode:Locomotion_Mod
 locomotion_step :: proc(
     characters:^core.Table(Character),moves:^core.Table(Character_Move),inputs:^core.Table(input.Move_Input),
     walks:core.Read(Walk),flights:core.Read(Fly),swims:core.Read(Swim),found:core.Read(Character_State),motions:core.Read(core.Motion),
-    worlds:core.Read(core.World_Transform),remotes:core.Read(core.Remote),physics:core.Ref(Physics_State),
+    locals:core.Read(core.Transform),parents:core.Read(core.Parent),remotes:core.Read(core.Remote),physics:core.Ref(Physics_State),
     paces:core.Read(core.Own_Pace),walk_actions:input.Input_Of(Walk_Action),requests:^Locomotion_Requests,time:core.Time,clock:core.Clock,problems:^core.Problems,
 ) {
     for asked in core.take(&requests.queue) {
@@ -156,16 +156,17 @@ locomotion_step :: proc(
         frame:=up_frame_of(physics,e)
         move_input:=core.get(inputs,e)
         if move_input==nil {
-            // Whoever drives it writes into the one it gets here, looking where it stands.
+            // Whoever drives it writes into the one it gets here, looking where it stands: by its
+            // Transform, since a body spawned in this tick has no World_Transform yet.
             first:input.Move_Input
-            if placed,ok:=core.get(worlds,e);ok {first.look_yaw=look_yaw_of(frame,placed.rotation)}
+            if placed,ok:=core.world_of(locals,parents,e);ok {first.look_yaw=look_yaw_of(frame,placed.rotation)}
             core.add(inputs,e,first)
             move_input=core.added(inputs,e)
             c.ready=true
         }
         if !c.ready {
             // It looks where it stands, where this end decides it.
-            if placed,ok:=core.get(worlds,e);ok && core.owned(remotes,e) {move_input.look_yaw=look_yaw_of(frame,placed.rotation)}
+            if placed,ok:=core.world_of(locals,parents,e);ok && core.owned(remotes,e) {move_input.look_yaw=look_yaw_of(frame,placed.rotation)}
             c.ready=true
         }
         given:input.Move_Input

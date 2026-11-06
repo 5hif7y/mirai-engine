@@ -11,6 +11,9 @@ Body_Test_Walk :: struct {
     sink:f32, // m the feet go under the floor while they stand
     jitter:f32, // m of noise on the pelvis
     clearance:f32, // m the foot rises while it swings; 0.1 when zero
+    // m the foot rises before and after it touches the floor halfway through pushing back,
+    // fastest there: a bouncy gait whose feet never stand
+    bounce:f32,
 }
 
 // The humanoid walking at 0.8 m/s, a cycle a second, its legs posed by IK.
@@ -47,6 +50,11 @@ body_test_walk :: proc(rig:Body_Test_Rig,map_:Body_Map,options:Body_Test_Walk) -
             target:math.Vec3
             if phase<.5 {
                 target={rest.x,rest.y-options.sink,.2-speed*phase}
+                if options.bounce>0 {
+                    s:=phase/.5
+                    target.y+=options.bounce*abs(cmath.cos(cmath.PI*s))
+                    target.z=.2-.4*(s-.8*cmath.sin(cmath.TAU*s)/cmath.TAU)
+                }
                 if side==0 {target.z+=options.slide*phase}
             } else {
                 s:=(phase-.5)/.5
@@ -120,6 +128,14 @@ clip_metrics_tell_travel_contacts_and_slide_of_a_walk :: proc(t:^testing.T) {
     shuffle,_:=body_test_walk(test_rig,map_,{loop=true,clearance=.01})
     metrics=body_test_metrics(rig,shuffle)
     testing.expectf(t,abs(metrics.travel.z-.8)<.05 && metrics.contacts>=2,"travel %v, %d contacts",metrics.travel,metrics.contacts)
+
+    // A bouncy gait whose feet never stand: the sweep of the feet under the hips gives the travel.
+    bouncy,_:=body_test_walk(test_rig,map_,{loop=true,bounce=.1,clearance=.25})
+    metrics=body_test_metrics(rig,bouncy)
+    testing.expectf(t,metrics.in_place && metrics.contacts==0 && abs(metrics.travel.z-.8)<.05 && abs(metrics.travel.x)<.05,"bouncy walk: travel %v, %d contacts",metrics.travel,metrics.contacts)
+    twice,_:=body_test_walk(test_rig,map_,{loop=true,bounce=.1,clearance=.25,duration=2})
+    metrics=body_test_metrics(rig,twice)
+    testing.expectf(t,abs(metrics.travel.z-.8)<.05,"two cycles of a bouncy walk: travel %v",metrics.travel)
 
     sliding,_:=body_test_walk(test_rig,map_,{root_motion=true,loop=true,slide=.15})
     metrics=body_test_metrics(rig,sliding)

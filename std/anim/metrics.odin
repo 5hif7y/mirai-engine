@@ -32,8 +32,9 @@ Metric_Request :: struct {
 }
 
 // How a clip moves. travel is the velocity of the body over the ground:
-// that of its root bone, or for a clip in place the one its feet push at,
-// which the game has to move the body by. Slide is the speed of a foot over
+// that of its root bone, or for a clip in place the one its feet push at
+// (when no foot stands, the one their sweep under the hips gives), which the
+// game has to move the body by. Slide is the speed of a foot over
 // the ground while it stands, penetration how far a foot or toe goes below
 // its height at rest, and jerk the change of acceleration of the parts. The
 // seam compares the last frame with the first relative to the root; its
@@ -129,18 +130,75 @@ frames_ground :: proc "contextless" (rig:Body_Rig,f:Frames,world:[]math.Transfor
         n:=int(votes[x][y])+int(votes[x+1][y])+int(votes[x][y+1])+int(votes[x+1][y+1])
         if n>most {most,best=n,{x,y}}
     }}
-    if most==0 {return ground,true}
-    estimate:=along*(f32(best.x-GRID/2+1)*cell)+across*(f32(best.y-GRID/2+1)*cell)
-    for _ in 0..<2 {
-        sum:math.Vec3;samples:int
-        for index in 0..<4*count {
-            v:=sample(rig,f,world,ground,parts,floors,index) or_continue
-            if linalg.length(v-estimate)<=cell {sum+=v;samples+=1}
+    if most>0 {
+        estimate:=along*(f32(best.x-GRID/2+1)*cell)+across*(f32(best.y-GRID/2+1)*cell)
+        for _ in 0..<2 {
+            sum:math.Vec3;samples:int
+            for index in 0..<4*count {
+                v:=sample(rig,f,world,ground,parts,floors,index) or_continue
+                if linalg.length(v-estimate)<=cell {sum+=v;samples+=1}
+            }
+            if samples>0 {estimate=sum/f32(samples)}
         }
-        if samples>0 {estimate=sum/f32(samples)}
+        ground.velocity,ground.travel=estimate,-estimate
     }
-    ground.velocity,ground.travel=estimate,-estimate
+    // No foot stands on that ground (a bouncy gait that barely touches the floor, or feet in the
+    // air): the travel comes from how far the feet sweep under the hips.
+    if frames_contacts(rig,f,world,ground,nil)==0 {
+        ground.travel=frames_sweep(rig,f,world,ground.up,along,across)
+        ground.velocity=-ground.travel
+    }
     return ground,true
+}
+
+// The travel of an in-place clip from the sweep of its feet relative to the pelvis: each foot
+// goes back and forth along the direction of travel, back while it is low. Standing half of
+// each cycle, a foot moves back over the ground as far as the body travels forward meanwhile,
+// so the body travels as far as the foot sweeps both ways.
+@(private)
+frames_sweep :: proc "contextless" (rig:Body_Rig,f:Frames,world:[]math.Transform,up,along,across:math.Vec3) -> math.Vec3 {
+    count:=frames_count(f)
+    pelvis:=rig.body.bones[.Pelvis]
+    feet:=[2]i32{rig.body.bones[.Foot_L],rig.body.bones[.Foot_R]}
+    if pelvis<0 || count<3 {return {}}
+    relative :: proc "contextless" (world:[]math.Transform,bones,frame:int,foot,pelvis:i32,along,across:math.Vec3) -> [2]f32 {
+        d:=world[frame*bones+int(foot)].position-world[frame*bones+int(pelvis)].position
+        return {linalg.dot(d,along),linalg.dot(d,across)}
+    }
+    // The axis the feet sweep along: the principal axis of their positions around their means.
+    xx,xy,yy:f32
+    for foot in feet {
+        if foot<0 {continue}
+        mean:[2]f32
+        for frame in 0..<count {mean+=relative(world,f.bones,frame,foot,pelvis,along,across)}
+        mean/=f32(count)
+        for frame in 0..<count {
+            d:=relative(world,f.bones,frame,foot,pelvis,along,across)-mean
+            xx+=d.x*d.x;xy+=d.x*d.y;yy+=d.y*d.y
+        }
+    }
+    angle:=.5*cmath.atan2(2*xy,xx-yy)
+    axis:=along*cmath.cos(angle)+across*cmath.sin(angle)
+    path,back:f32
+    feet_counted:=0
+    for foot in feet {
+        if foot<0 {continue}
+        top:=-max(f32)
+        for frame in 0..<count {top=max(top,linalg.dot(world[frame*f.bones+int(foot)].position,up))}
+        previous:=relative(world,f.bones,0,foot,pelvis,along,across)
+        for frame in 1..<count {
+            here:=relative(world,f.bones,frame,foot,pelvis,along,across)
+            step:=linalg.dot(here-previous,[2]f32{cmath.cos(angle),cmath.sin(angle)})
+            path+=abs(step)
+            back+=step*(top-linalg.dot(world[frame*f.bones+int(foot)].position,up))
+            previous=here
+        }
+        feet_counted+=1
+    }
+    if feet_counted==0 {return {}}
+    if back==0 {back=-linalg.dot(axis,rig.body.forward)}
+    speed:=path/f32(feet_counted)/frames_duration(f)
+    return -axis*speed if back>0 else axis*speed
 }
 
 // The floor under a foot joint in this clip, independent of its rest pose.

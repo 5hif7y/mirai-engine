@@ -114,9 +114,13 @@ ai_scene_outlines_follow_pending_authors_and_keep_selection_without_steady_alloc
         {.Edit,false,true},{.Simulate,false,true},{.Simulation_Paused,false,true},
         {.Play,false,false},{.Paused,false,false},{.Paused,true,false},{.Watch,false,false},
     }
+    m.scene_serial+=1
     for c in modes {
         session.mode,session.play_stepped=c.mode,c.stepped
         testing.expectf(t,ai_scene_figure_shown(&session,ref,&m.tasks[2])==c.shown,"figure shown in %v (stepped %v): %v",c.mode,c.stepped,c.shown)
+        if c.mode==.Watch {continue}
+        highlight_sync(&session,ref)
+        testing.expectf(t,(entity_level(&v,selected)!=0)==c.shown,"outline of an agent in %v (stepped %v): %v",c.mode,c.stepped,c.shown)
     }
     session.mode,session.play_stepped=.Edit,false
     m.task_count=2

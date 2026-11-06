@@ -323,7 +323,7 @@ effect_document :: proc(s:^editor.Session,p:^Effect_Document,app:^host.App,frame
         if ui.box(ctx,{width=ui.GROW,height=ui.GROW}) {
             if editor.asset_column_begin(ctx,ui.GROW,"Preview") {
                 editor.asset_image_show(s,&p.image)
-                editor.asset_playback_strip(s,&p.playback,shown,nil)
+                editor.asset_playback_strip(s,&p.playback,shown,nil,p.id)
                 editor.asset_column_end(ctx)
             }
             editor.asset_column_divider(ctx)

@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:math"
 import "mirai:core"
 import "mirai:editor"
+import "mirai:std/base"
 import erender "mirai:engine/render"
 import lib "mirai:std/anim"
 import mm "mirai:std/math"
@@ -361,8 +362,15 @@ strip_rows :: proc(s:^editor.Session,c:^Cinematic_Editor,w:core.World_Ref,lanes:
         ui.label(ctx,editor.entity_label(w,c.timeline),th.font_small,th.text,font=ui.FONT_SEMIBOLD)
         if current,_,ok:=shot_view(w,c.timeline,c.head);ok {ui.label(ctx,editor.entity_label(w,current.camera),th.font_small,th.text_muted)}
     }
-    clock:=editor.Timeline_Clock{frame=c.head,frames=duration,rate=tick_rate(s),playing=c.playing,loop=c.loop,speed=c.speed}
+    clock:=editor.Timeline_Clock{frame=c.head,frames=duration,rate=tick_rate(s),playing=c.playing,loop=c.loop,speed=c.speed,ask=editor.timeline_can_ask(s)}
     r:=editor.timeline_strip(s,&c.strip,clock,strip_lanes,ui.id(ctx,"timeline"))
+    if (r.ask || r.copy) && c.strip.range {
+        lo,hi:=editor.timeline_range(&c.strip,duration)
+        range:=editor.Ai_Range{kind=.Cinematic,from=u64(lo),to=u64(hi)}
+        if s.document!=nil {base.text_set(range.path[:],editor.document_path(s.document))}
+        base.text_set(range.name[:],editor.entity_label(w,c.timeline))
+        editor.timeline_range_use(s,r,range)
+    }
     if r.seek {c.head,c.playing,c.previewing=r.frame,false,true}
     if r.loop {c.loop=!c.loop}
     if r.speed>0 {c.speed=r.speed}

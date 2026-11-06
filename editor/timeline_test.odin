@@ -2,6 +2,7 @@ package editor
 
 import "core:strings"
 import "core:testing"
+import "mirai:std/base"
 import "mirai:ui"
 
 @(test)
@@ -82,8 +83,17 @@ the_ruler_asks_for_its_menu_at_a_frame_and_the_agent_button_needs_a_range :: pro
     testing.expect(t,found)
     at:=[2]f32{rect.x+TIMELINE_PAD+(rect.w-2*TIMELINE_PAD)*0.5,rect.y+rect.h*0.5}
     r:=frame(&s,&strip,clock,{size={800,200},pointer=at,pressed={.Right},down={.Right}})
-    testing.expect(t,r.ruler && strip.pointed==30,"The right button asks for the menu at its frame")
-    timeline_range_set(&strip,clock.frames,strip.pointed,clock.frame,true)
+    testing.expect(t,r.ruler && strip.pointed==30,"The right button opens the menu at its frame")
+    frame(&s,&strip,clock,idle);frame(&s,&strip,clock,idle)
+    ui.id_push(&ctx,ui.id(&ctx,"strip"))
+    end:=ui.id(&ctx,"range_end")
+    ui.id_pop(&ctx)
+    item,listed:=ui.widget_rect(&ctx,end)
+    testing.expect(t,listed,"Every strip has the menu of its range")
+    click:=[2]f32{item.x+item.w*0.5,item.y+item.h*0.5}
+    frame(&s,&strip,clock,{size={800,200},pointer=click,pressed={.Left},down={.Left}})
+    frame(&s,&strip,clock,{size={800,200},pointer=click,released={.Left}})
+    testing.expect(t,strip.range && strip.range_in==10 && strip.range_out==30,"Set range end ends it there, from the head")
     frame(&s,&strip,clock,idle);frame(&s,&strip,clock,idle)
     _,shown=ui.widget_rect(&ctx,ask)
     testing.expect(t,shown,"With a range the button asks the agent about it")
@@ -94,7 +104,7 @@ the_ruler_asks_for_its_menu_at_a_frame_and_the_agent_button_needs_a_range :: pro
 }
 
 @(test)
-copy_range_names_the_ticks_the_run_and_the_scene_and_nothing_else :: proc(t:^testing.T) {
+copy_range_names_the_time_and_what_plays_and_nothing_else :: proc(t:^testing.T) {
     document:Document
     s:=Session{document=&document}
     run:=Run{id=3}
@@ -104,10 +114,19 @@ copy_range_names_the_ticks_the_run_and_the_scene_and_nothing_else :: proc(t:^tes
     testing.expect(t,!off,"A range that is off is no range")
     r,ok:=play_range_of(&s,&run,&strip,120,1000)
     testing.expect(t,ok && r.from==1030 && r.to==1090,"Frames count from the oldest tick")
-    testing.expect_value(t,play_range_text(&r),"Range: ticks 1030 to 1090\nRun: 3\nScene: unsaved")
+    testing.expect_value(t,ai_range_text(&r),"Range: ticks 1030 to 1090\nRun: 3\nScene: unsaved")
     document_name(&document,"levels/arena.scene","C:/games/demo/assets/levels/arena.scene")
     r,_=play_range_of(&s,&run,&strip,120,1000)
-    testing.expect_value(t,play_range_text(&r),"Range: ticks 1030 to 1090\nRun: 3\nScene: levels/arena.scene")
+    testing.expect_value(t,ai_range_text(&r),"Range: ticks 1030 to 1090\nRun: 3\nScene: levels/arena.scene")
+    others:=[?]struct{range:Ai_Range,path,name,text:string}{
+        {{kind=.Asset,from=12,to=40,rate=30},"hero/moves.anim","jump","Range: frames 12 to 40 at 30 fps\nAsset: hero/moves.anim\nClip: jump"},
+        {{kind=.Asset,from=0,to=9,rate=30},"fx/smoke.particle","","Range: frames 0 to 9 at 30 fps\nAsset: fx/smoke.particle"},
+        {{kind=.Cinematic,from=60,to=120},"levels/arena.scene","Intro","Range: ticks 60 to 120\nCinematic: Intro\nScene: levels/arena.scene"},
+    }
+    for &c in others {
+        base.text_set(c.range.path[:],c.path);base.text_set(c.range.name[:],c.name)
+        testing.expect_value(t,ai_range_text(&c.range),c.text)
+    }
 }
 
 @(test)

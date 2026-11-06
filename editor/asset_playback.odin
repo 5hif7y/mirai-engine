@@ -1,6 +1,8 @@
 package editor
 
 import "core:math"
+import "mirai:asset"
+import "mirai:std/base"
 import "mirai:ui"
 
 // What the documents of assets that play share: the time inside a duration
@@ -36,12 +38,23 @@ asset_playback_advance :: proc(p:^Asset_Playback,duration,dt:f32) {
     p.time=clamp(p.time,0,duration)
 }
 
-// The time strip of a preview under it, with lanes of marks: what it asks of
-// the time and of play goes to p; what it asks of the marks is returned.
-asset_playback_strip :: proc(s:^Session,p:^Asset_Playback,duration:f32,lanes:[]Timeline_Lane) -> Timeline_Result {
+// The time strip of a preview of the asset under it, with lanes of marks:
+// what it asks of the time, of play and of its range goes to p and the
+// agent; what it asks of the marks is returned. part names the clip of an
+// asset with several.
+asset_playback_strip :: proc(s:^Session,p:^Asset_Playback,duration:f32,lanes:[]Timeline_Lane,subject:base.Asset_Id,part:="") -> Timeline_Result {
     frames:=max(duration,0)*ASSET_PLAYBACK_RATE
-    clock:=Timeline_Clock{frame=p.time*ASSET_PLAYBACK_RATE,frames=frames,rate=ASSET_PLAYBACK_RATE,playing=p.playing,loop=p.loop,speed=p.speed}
+    clock:=Timeline_Clock{frame=p.time*ASSET_PLAYBACK_RATE,frames=frames,rate=ASSET_PLAYBACK_RATE,playing=p.playing,loop=p.loop,speed=p.speed,ask=timeline_can_ask(s)}
     r:=timeline_strip(s,&p.strip,clock,lanes,ui.id(s.gui.ctx,"strip"))
+    if (r.ask || r.copy) && p.strip.range {
+        lo,hi:=timeline_range(&p.strip,frames)
+        range:=Ai_Range{kind=.Asset,from=u64(lo),to=u64(hi),rate=ASSET_PLAYBACK_RATE}
+        if a:=s.app.assets;a!=nil {
+            if file,found:=asset.registry_find(&a.registry,subject);found {base.text_set(range.path[:],file.path)}
+        }
+        base.text_set(range.name[:],part)
+        timeline_range_use(s,r,range)
+    }
     if r.seek {p.time,p.playing=r.frame/ASSET_PLAYBACK_RATE,false}
     if r.loop {p.loop=!p.loop}
     if r.speed>0 {p.speed=r.speed}

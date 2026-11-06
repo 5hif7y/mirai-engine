@@ -116,30 +116,30 @@ asking_the_agent_about_a_range_of_the_play_attaches_it_to_the_next_message :: pr
         ai_chat_content_build(s,280,560)
         ui.frame_end(s.gui.ctx)
     }
-    asked:=Ai_Play_Range{from=130,to=190,run=4}
-    base.text_set(asked.scene[:],"scenes/main.scene")
-    play_range_ask(&s,asked)
+    asked:=Ai_Range{from=130,to=190,run=4}
+    base.text_set(asked.path[:],"scenes/main.scene")
+    timeline_range_use(&s,{ask=true},asked)
     opened:=m.chat_open && m.focus && g.layout.left_open
     testing.expect(t,opened,"The chat opens with its composer focused")
-    attached:=m.play_range.from==130 && m.play_range.to==190
+    attached:=m.range.from==130 && m.range.to==190
     testing.expect(t,attached,"The range goes with the next message")
     frame(&s);frame(&s)
     chip:=ai_chat_test_paint(&ctx,"Ticks 130 to 190")
     testing.expect(t,chip!=nil,"The range is a chip over the composer")
     task:Ai_Task
-    task.play_range=m.play_range
+    task.range=m.range
     b:=strings.builder_make(context.temp_allocator)
-    ai_play_range_prompt(&task,&b)
+    ai_range_prompt(&task,&b)
     line:=strings.to_string(b)
     testing.expect(t,strings.contains(line,"ticks 130 to 190 of run 4, a Play of scenes/main.scene"),line)
     testing.expect(t,strings.contains(line,"`play.history` with `run` 4, `from` 130 and `to` 190"),line)
     testing.expect(t,!strings.contains(line,":/"),"No path outside the project")
-    ticks:=ai_context_ticks(&task.play_range)
-    testing.expect(t,ticks==Ai_Context_Ticks{130,190,4,"scenes/main.scene"},"context.json says what Copy range says")
+    said:=ai_context_range(&task.range)
+    testing.expect(t,said==Ai_Context_Range{"play",130,190,4,0,"scenes/main.scene",""},"context.json says what Copy range says")
     ai_chat_new(&s)
-    testing.expect(t,m.play_range=={},"A new chat takes no range")
-    play_range_ask(&s,{from=10,to=10})
-    testing.expect(t,m.play_range=={},"An empty range is not attached")
+    testing.expect(t,m.range=={},"A new chat takes no range")
+    timeline_range_use(&s,{ask=true},{from=10,to=10})
+    testing.expect(t,m.range=={},"An empty range is not attached")
 }
 
 @(test)

@@ -98,7 +98,7 @@ Ai_Context :: struct {
     asset:Ai_Context_Asset,
     references:[]string, // the images the user attached, in the folder of the turn
     assets:[]string,     // the assets the user dragged onto the chat, by their paths
-    ticks:Ai_Context_Ticks, // of the Play the user chose on its timeline; to<=from: none
+    range:Ai_Context_Range, // the time the user chose on a timeline; to<=from: none
 }
 
 // The part of a rectangle that is on the window. False when what is left is
@@ -311,7 +311,7 @@ ai_context_write :: proc(s:^Session,task:^Ai_Task,entities:[]Ai_Entity) -> bool 
     for &file,i in references {file=ai_reference_file(i+1)}
     context_value.references=references
     context_value.assets=ai_attachment_paths(s,task)
-    context_value.ticks=ai_context_ticks(&task.play_range)
+    context_value.range=ai_context_range(&task.range)
     context_value.entities=entities
     context_value.entities_in_region=task.entities_total
     if front!=nil {
@@ -393,7 +393,7 @@ ai_prompt_write :: proc(s:^Session,task:^Ai_Task,entities:[]Ai_Entity) -> bool {
         fmt.sbprintf(&b,"- The user attached %d reference image%s to this message, after its text, to show what they want the result to look like. Look at them before you start.\n",task.references,task.references>1?"s":"")
     }
     ai_attachments_prompt(s,task,&b)
-    ai_play_range_prompt(task,&b)
+    ai_range_prompt(task,&b)
     fmt.sbprintf(&b,"- %s has the region, the camera, the selection and the open scene.\n",ai_task_path(s,task,AI_FILE_CONTEXT))
     strings.write_string(&b,"- To let the user try a scene in Play, write a link to it in your response as `[What to try](play:path of the scene under the assets folder)`: the chat draws it as a button that opens the scene and plays it.\n")
     strings.write_string(&b,"- The tools of the server `mirai` are the basics of a scene. Every other method, of the editor or of a plugin (animation, terrain, navigation, physics, particles, interfaces and the rest), goes through the tool `call` with its name as `method` and its `params`; `engine_describe` with `methods` (several names at once), `prefix` or `plugin` gives their schemas. The methods named below by their tool name (such as `panel_save`) go through `call` too when they are not tools.\n")
@@ -643,7 +643,7 @@ ai_task_create :: proc(s:^Session,m:^Ai,region:ui.Rect,prompt,agent:string,conti
     task.references=ai_references_write(s,m,task)
     task.attachments=m.attachments
     task.attachment_count=m.attachment_count
-    task.play_range=m.play_range
+    task.range=m.range
     entities:=ai_entities_gather(s,task)
     if !ai_context_write(s,task,entities) || !ai_prompt_write(s,task,entities) || !ai_mcp_write(s,task) {
         ai_task_fail(task,"The files of the task could not be written")

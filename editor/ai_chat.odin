@@ -189,7 +189,7 @@ ai_chat_send :: proc(s:^Session) {
 ai_chat_new :: proc(s:^Session) {
     m:=s.ai
     m.selected,m.prompt_length,m.reference_count,m.attachment_count=0,0,0,0
-    m.play_range={}
+    m.range={}
     m.region,m.has_region={},false
     m.pending,m.scroll,m.stick=false,0,true
     m.review_open=false
@@ -586,7 +586,7 @@ ai_chat_empty_top :: proc(room:f32) -> f32 {return max(room*0.5-AI_EMPTY_RISE,AI
 ai_composer_context_rows :: proc(s:^Session,width:f32) -> int {
     rows:=ai_selection_context_rows(s,width-16)+ai_material_chip_rows(s,width-22)
     rows+=ai_reference_rows(s,width-22)+ai_attachment_rows(s,width-22)
-    return rows+ai_play_range_rows(s.ai)
+    return rows+ai_range_rows(s.ai)
 }
 
 // The message and what goes with it: over the field, up to context_rows of
@@ -609,7 +609,7 @@ ai_composer_build :: proc(s:^Session,width:f32,context_rows:int,fill,stroke:ui.C
         left:=context_rows-entity_rows-material_rows-reference_rows
         attachment_rows:=min(ai_attachment_rows(s,width-22),left)
         ai_attachments_build(s,width-22,attachment_rows)
-        ai_play_range_build(s,width-22,left-attachment_rows)
+        ai_range_build(s,width-22,left-attachment_rows)
         if m.focus {ui.edit_request(ctx,field);m.focus=false}
         result:=ui.text_field(ctx,field,m.prompt[:AI_MESSAGE_BYTES-1],&m.prompt_length,{live=true,keep_caret=true,placeholder="Message...",height=ai_prompt_height(s,width,size),size=size,bare=true,multiline=true})
         // Enter sends, Shift+Enter adds a line, and Enter with nothing

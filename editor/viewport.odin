@@ -181,7 +181,7 @@ viewport_exposure :: proc(v:^Viewport) -> core.View_Exposure {
 @(private)
 Highlight_Key :: struct {
     sources:[14]u64,
-    marquee,add,indicators,play:bool,
+    marquee,add,indicators,play,isolated:bool,
     rect:ui.Rect,
     view_projection:mm.Mat4,
     size:[2]f32,
@@ -927,7 +927,7 @@ highlight_sync :: proc(s:^Session,w:core.World_Ref) {
     play:=play_viewed(s) || camera_previewing(s)
     marquee:=v.capture==.Select && v.moved && !play
     ids:=core.world_table_of(w,core.Id)
-    key:=Highlight_Key{sources={s.selection.serial,u64(uintptr(w.data)),parents!=nil?parents.layout+parents.version:0,meshes!=nil?meshes.layout:0,u64(len(es.generation)),0,0,0,0,0,0,s.ai!=nil?s.ai.scene_serial:0,ids!=nil?ids.layout+ids.version:0,collab_highlights_key(s)},marquee=marquee,play=play}
+    key:=Highlight_Key{sources={s.selection.serial,u64(uintptr(w.data)),parents!=nil?parents.layout+parents.version:0,meshes!=nil?meshes.layout:0,u64(len(es.generation)),0,0,0,0,0,0,s.ai!=nil?s.ai.scene_serial:0,ids!=nil?ids.layout+ids.version:0,collab_highlights_key(s)},marquee=marquee,play=play,isolated=play_shown(s)}
     if marquee {
         transforms:=core.world_table_of(w,core.Transform)
         worlds:=core.world_table_of(w,core.World_Transform)
@@ -974,9 +974,12 @@ highlight_sync :: proc(s:^Session,w:core.World_Ref) {
             at=core.subtree_next(h,root,at)
         }
     }
-    collab_highlights(s,w,v.levels[:])
-    ai_scene_highlights(s,w,v.levels[:])
-    git_highlights(s,w,v.levels[:])
+    // The game shown is the user's alone: what others and agents work on is not outlined.
+    if !key.isolated {
+        collab_highlights(s,w,v.levels[:])
+        ai_scene_highlights(s,w,v.levels[:])
+        git_highlights(s,w,v.levels[:])
+    }
     if table==nil {return}
     for e,row in table.entities[:core.count(table)] {
         level:=entity_level(v,e)

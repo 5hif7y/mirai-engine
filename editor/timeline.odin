@@ -8,6 +8,8 @@ import "mirai:ui"
 // with its head, lanes of marks and a bar with what is in view. It does not
 // own the time: it reads a Timeline_Clock and returns what was asked, and the
 // document applies it to its data. Frames count from 0 to the duration.
+// The right button on the ruler opens its menu: an end of the range at a
+// frame and, for a document that can describe its range, Copy range.
 
 TIMELINE_TRANSPORT :: f32(40)
 TIMELINE_RULER :: f32(34)
@@ -40,7 +42,7 @@ Timeline_Clock :: struct {
     playing,loop:bool,
     speed:f32,  // 0: the document has no speed to choose
     here:bool,  // it can play on from the head, without what comes after it
-    ask:bool,   // a button asks the agent about the range while there is one
+    ask:bool,   // the document describes its range: a button asks the agent about it, and the menu copies it
 }
 
 // A row of marks on the time: markers of a clip, keys of a track.
@@ -69,6 +71,7 @@ Timeline_Result :: struct {
     ruler:bool,         // the right button went down on the ruler at Timeline.pointed
     anchor:ui.Rect,     // where the menu opens
     ask:bool,           // the button asks the agent about the range
+    copy:bool,          // the menu copies the range
 }
 
 TIMELINE_SPEED_LABELS :: [4]string{"0.25×","0.5×","1×","2×"}
@@ -193,6 +196,13 @@ timeline_strip :: proc(s:^Session,t:^Timeline,c:Timeline_Clock,lanes:[]Timeline_
             timeline_names(s,t,c,lanes,&r,empty)
             timeline_area(s,t,c,lanes,&r,empty)
         }
+    }
+    menu:=ui.id(ctx,"range_menu")
+    if r.ruler {ui.popup_open(ctx,menu,r.anchor)}
+    if ui.popup(ctx,menu,{min_width=ui.MENU_CHOICE_WIDTH}) {
+        if ui.menu_item(ctx,ui.id(ctx,"range_start"),"Set range start") {timeline_range_set(t,c.frames,t.pointed,c.frame,false)}
+        if ui.menu_item(ctx,ui.id(ctx,"range_end"),"Set range end") {timeline_range_set(t,c.frames,t.pointed,c.frame,true)}
+        if c.ask && ui.menu_item(ctx,ui.id(ctx,"range_copy"),"Copy range",{icon=.Sparkle,disabled=!t.range || t.range_out<=t.range_in}) {r.copy=true}
     }
     return
 }

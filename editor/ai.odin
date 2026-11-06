@@ -103,7 +103,7 @@ Ai_Task :: struct {
     references:int, // the reference images of the message, reference-<n>.jpg from 1
     attachments:[AI_ATTACHMENTS]base.Asset_Id, // the assets the message is about
     attachment_count:int,
-    play_range:Ai_Play_Range, // the ticks of the Play the message is about
+    range:Ai_Range, // the time chosen on a timeline the message is about
     reference_writes:[AI_REFERENCES]host.Png_Write,
     review:Ai_Review,
     anchor:[3]f32,  // where its figure stands
@@ -128,7 +128,7 @@ Ai_Document_State :: struct {
     reference_count:int,
     attachments:[AI_ATTACHMENTS]base.Asset_Id, // assets dragged onto the chat that the next message takes
     attachment_count:int,
-    play_range:Ai_Play_Range, // ticks of the Play the next message takes
+    range:Ai_Range, // the time chosen on a timeline the next message takes
     agent:[32]u8,
     focus:bool,
     scroll:f32,
@@ -341,7 +341,7 @@ ai_input :: proc(s:^Session,m:^Ai) {
             // From the empty chat the composer goes down to its place.
             if continuing==0 && m.composer_empty_y>0 && s.gui!=nil {m.composer_drop_at,m.composer_drop_from=max(s.gui.ctx.time,1e-6),m.composer_empty_y}
             m.prompt_length,m.reference_count,m.attachment_count=0,0,0
-            m.play_range={}
+            m.range={}
             ai_task_select(m,task)
         }
         m.focus=true

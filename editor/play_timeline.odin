@@ -1,6 +1,5 @@
 package editor
 
-import "core:fmt"
 import "core:math"
 import "mirai:core"
 import "mirai:platform"
@@ -12,9 +11,7 @@ import "mirai:ui"
 // Taking the head, or a step, asks to go to a tick; it is done between
 // frames (play_history_seek), never inside the loop that draws the strip.
 // Its Play plays the past again at the pace of the clock, the game still
-// paused; Play from here plays the game on from the head. The menu of the
-// ruler sets an end of the range at a tick and copies the range for a chat;
-// with a range, a button asks the agent of the editor about it.
+// paused; Play from here plays the game on from the head.
 PLAY_STRIP_WIDTH :: f32(720)
 
 History_Playback :: struct {
@@ -53,7 +50,7 @@ play_history_bar :: proc(s:^Session) {
     // game can also play on from there, edited or not, without what came after.
     p:=&s.history_playback
     clock:=Timeline_Clock{frame=f32(t.tick-min(t.tick,oldest)),frames=f32(max(newest,t.tick)-oldest),rate=rate,playing=p.playing,loop=p.loop,here=r.history.at<r.history.serial}
-    clock.ask=s.ai!=nil && s.has_project
+    clock.ask=timeline_can_ask(s)
     width:=min(PLAY_STRIP_WIDTH,max(ctx.size.x-2*th.margin,240))
     if ui.panel(ctx,shell_id(g,"play_history"),{width=ui.fixed(width),height=ui.FIT,anchor=.Bottom_Center,pivot=.Bottom_Center,offset={0,-th.margin}}) {
         result:=timeline_strip(s,&s.play_strip,clock,nil,shell_id(g,"play_history_strip"))
@@ -64,57 +61,21 @@ play_history_bar :: proc(s:^Session) {
         if result.loop {p.loop=!p.loop}
         if result.play {play_strip_toggle(s,r)}
         if result.here {s.requests+={.Resume_Here}}
-        strip:=&s.play_strip
-        menu:=shell_id(g,"play_history_menu")
-        if result.ruler {ui.popup_open(ctx,menu,result.anchor)}
-        if result.ask {
-            if range,found:=play_range_of(s,r,strip,clock.frames,oldest);found {
-                play_range_ask(s,range)
-            }
-        }
-        if ui.popup(ctx,menu,{min_width=ui.MENU_CHOICE_WIDTH}) {
-            if ui.menu_item(ctx,ui.id(ctx,"range_start"),"Set range start") {
-                timeline_range_set(strip,clock.frames,strip.pointed,clock.frame,false)
-            }
-            if ui.menu_item(ctx,ui.id(ctx,"range_end"),"Set range end") {
-                timeline_range_set(strip,clock.frames,strip.pointed,clock.frame,true)
-            }
-            range,found:=play_range_of(s,r,strip,clock.frames,oldest)
-            copy_item:=ui.Menu_Item{icon=.Sparkle,disabled=!found}
-            if ui.menu_item(ctx,ui.id(ctx,"range_copy"),"Copy range",copy_item) {
-                play_range_copy(s,&range)
-            }
+        if result.ask || result.copy {
+            if range,found:=play_range_of(s,r,&s.play_strip,clock.frames,oldest);found {timeline_range_use(s,result,range)}
         }
     }
 }
 
 // The ticks of the range of a strip whose frame 0 is the tick oldest, in the
 // run r of the scene open; none while the range is off.
-play_range_of :: proc(s:^Session,r:^Run,t:^Timeline,frames:f32,oldest:u64) ->
-    (range:Ai_Play_Range,ok:bool) {
+play_range_of :: proc(s:^Session,r:^Run,t:^Timeline,frames:f32,oldest:u64) -> (range:Ai_Range,ok:bool) {
     if !t.range || t.range_out<=t.range_in {return}
     lo,hi:=timeline_range(t,frames)
     if hi<=lo {return}
-    range.from,range.to,range.run=oldest+u64(lo),oldest+u64(hi),r.id
-    if s.document!=nil {base.text_set(range.scene[:],document_path(s.document))}
+    range.kind,range.from,range.to,range.run=.Play,oldest+u64(lo),oldest+u64(hi),r.id
+    if s.document!=nil {base.text_set(range.path[:],document_path(s.document))}
     return range,true
-}
-
-// The agent of the editor asked about a range: its chat, with the range as
-// context of the next message.
-play_range_ask :: proc(s:^Session,r:Ai_Play_Range) {
-    ai_ask(s)
-    ai_play_range_set(s,r)
-}
-
-@(private)
-play_range_copy :: proc(s:^Session,r:^Ai_Play_Range) {
-    if s.app==nil || s.app.platform==nil {return}
-    if !platform.clipboard_set(s.app.platform,play_range_text(r)) {
-        notify(s,"The range does not fit in the clipboard")
-        return
-    }
-    notify(s,fmt.tprintf("Copied ticks %d to %d",r.from,r.to))
 }
 
 // Goes to the tick the strip asked for, between frames, or plays the past

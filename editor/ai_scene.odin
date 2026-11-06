@@ -202,7 +202,7 @@ ai_scene_draw :: proc(s:^Session,w:core.World_Ref) {
     state:=core.world_storage_of(core.world_ref(s.editor_world,s.info,.Editor),Ai_Scene)
     if state==nil {return}
     presence_style(s)
-    ai_scene_ghosts(s,w,state)
+    if presence_in_scene(s) {ai_scene_ghosts(s,w,state)}
     for &task,index in m.tasks[:m.task_count] {
         if !ai_scene_figure_shown(s,w,&task) {continue}
         task.figure_shown=true

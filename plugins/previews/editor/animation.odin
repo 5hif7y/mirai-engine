@@ -586,7 +586,7 @@ animation_timeline :: proc(s:^editor.Session,p:^Animation,a:^host.Assets,clip:an
         for &marker,i in markers {marks[i]={frame=marker.time*editor.ASSET_PLAYBACK_RATE,name=base.text_get(marker.name[:])}}
     }
     lanes:=[1]editor.Timeline_Lane{{name="Markers",marks=marks,add=clip!=0}}
-    r:=editor.asset_playback_strip(s,&p.playback,duration,lanes[:])
+    r:=editor.asset_playback_strip(s,&p.playback,duration,lanes[:],p.chosen,clip!=0?base.text_get(p.clips[clip-1].name[:]):"")
     menu:=ui.id(ctx,"marker_menu")
     naming:=ui.id(ctx,"marker_name")
     field:=ui.id(ctx,"marker_name_field")

@@ -52,6 +52,28 @@ Content_Animation :: struct {
     roots:[]asset.Animation_Root,
     markers:[]u64, // name_hash of each marker: anim.Marker.id is its index
     names:[][asset.ANIMATION_NAME_CAPACITY]u8, // of each clip
+    morphs:[]Content_Morph, // its curves of morph weights, each once
+}
+// A curve "<path>/@morph/<target>": the name_hash of the curve and of the target, which binds a
+// mesh that names no path to the curve of each of its targets.
+Content_Morph :: struct {curve,target:u64}
+
+// The curves of morph weights of an animation, each once.
+content_animation_morphs :: proc(view:asset.Animation_View,allocator:runtime.Allocator) -> (morphs:[]Content_Morph,ok:bool) {
+    found:=make([dynamic]Content_Morph,context.temp_allocator)
+    for &track in view.tracks {
+        if track.property!=.Float || track.slot!=0 {continue}
+        text:=serial.text_field(track.target[:])
+        at:=strings.last_index(text,asset.ANIMATION_MORPH_PATH)
+        if at<0 || at+len(asset.ANIMATION_MORPH_PATH)==len(text) {continue}
+        morph:=Content_Morph{base.name_hash(text),base.name_hash(text[at+len(asset.ANIMATION_MORPH_PATH):])}
+        if !slice.contains(found[:],morph) {append(&found,morph)}
+    }
+    error:runtime.Allocator_Error
+    morphs,error=make([]Content_Morph,len(found),allocator)
+    if error!=nil {return nil,false}
+    copy(morphs,found[:])
+    return morphs,true
 }
 
 // Adds the looping copy of the first `count` clips of a library.
@@ -216,8 +238,8 @@ content_ui_free :: proc(c:^Content,entry:^Content_Ui) {
 @(private="file")
 content_animation_free :: proc(c:^Content,entry:^Content_Animation) {
     anim.library_destroy(&entry.lib)
-    delete(entry.markers,c.allocator);delete(entry.names,c.allocator);delete(entry.roots,c.allocator)
-    entry.markers,entry.names,entry.clip_count=nil,nil,0
+    delete(entry.markers,c.allocator);delete(entry.names,c.allocator);delete(entry.roots,c.allocator);delete(entry.morphs,c.allocator)
+    entry.markers,entry.names,entry.morphs,entry.clip_count=nil,nil,nil,0
 }
 // The mixer reads the file of a stream until its audio thread lets go of the
 // sound, which nothing reports: the file of a stream that is replaced stays
@@ -325,9 +347,10 @@ content_animation_load :: proc(app:^App,id:base.Asset_Id,entry:^Content_Animatio
     count:=len(view.clips)
     names,naming:=make([][asset.ANIMATION_NAME_CAPACITY]u8,count,c.allocator)
     roots,rooting:=make([]asset.Animation_Root,count,c.allocator)
-    if allocation!=nil || naming!=nil || rooting!=nil || count>0 && asset.animation_clips_add(view,&lib,.Once)==0 {
+    morphs,morphing:=content_animation_morphs(view,c.allocator)
+    if allocation!=nil || naming!=nil || rooting!=nil || !morphing || count>0 && asset.animation_clips_add(view,&lib,.Once)==0 {
         anim.library_destroy(&lib)
-        delete(markers,c.allocator);delete(names,c.allocator);delete(roots,c.allocator)
+        delete(markers,c.allocator);delete(names,c.allocator);delete(roots,c.allocator);delete(morphs,c.allocator)
         return false
     }
     content_animation_loops(&lib,count)
@@ -336,11 +359,11 @@ content_animation_load :: proc(app:^App,id:base.Asset_Id,entry:^Content_Animatio
     open :: proc(data:rawptr,id:base.Asset_Id,file:^asset.Asset) -> bool {return assets_file((^Assets)(data),id,asset.KIND_SKELETON,file)==.None}
     if _,compressed:=asset.animation_compress(view,&lib,&a.types,open,a);compressed!=.None {
         anim.library_destroy(&lib)
-        delete(markers,c.allocator);delete(names,c.allocator);delete(roots,c.allocator)
+        delete(markers,c.allocator);delete(names,c.allocator);delete(roots,c.allocator);delete(morphs,c.allocator)
         return false
     }
     content_animation_free(c,entry)
-    entry.lib,entry.clip_count,entry.markers,entry.names,entry.roots=lib,count,markers,names,roots
+    entry.lib,entry.clip_count,entry.markers,entry.names,entry.roots,entry.morphs=lib,count,markers,names,roots,morphs
     return true
 }
 

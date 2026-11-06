@@ -51,6 +51,18 @@ morph_weights_compose_the_mesh_the_default_the_curve_and_the_overrides_without_a
     morph_weight_clear(&config,"Smile")
     testing.expect(t,config.names[0]==0 && morph_bind(&state,&rig,config,"Face",21) && morph_compose(&state,&rig,config,nil) && state.current[0]==.4)
     testing.expect(t,!morph_weight_set(&config,"",1) && !morph_weight_set(&config,"Smile",transmute(f32)u32(0x7fc00000)))
+    // Without a path (a rig that shows its own mesh) each target takes the curve that ends in its
+    // name, whatever node path the importer gave it.
+    tracks:[3]asset.Animation_Track
+    for &track in tracks {track.property=.Float}
+    base.text_set(tracks[0].target[:],"Armature/Body/@morph/Smile");base.text_set(tracks[1].target[:],"Armature/Body/@morph/Smile");base.text_set(tracks[2].target[:],"Armature/Body/Weight")
+    morphs,listed:=host.content_animation_morphs({tracks=tracks[:]},context.allocator);defer delete(morphs)
+    testing.expect(t,listed && len(morphs)==1 && morphs[0]==host.Content_Morph{base.name_hash("Armature/Body/@morph/Smile"),base.name_hash("Smile")})
+    content:=host.Content_Animation{morphs=morphs}
+    named:=Morph_Playing{curve_count=-1};defer morph_playing_free(&named)
+    imported:=Playing{seen=4,curves_ready=true};defer delete(imported.curves)
+    append(&imported.curves,Curve_Output{target=base.name_hash("Armature/Body/@morph/Smile"),property=.Float,value={.6,0,0,0},weight=1})
+    testing.expect(t,morph_bind(&named,&rig,{},"",1) && named.by_name && morph_compose(&named,&rig,{},&imported,nil,&content) && abs(named.current[0]-.6)<1e-6)
     full:Morph_Weights
     for i in 0..<asset.MORPH_WEIGHTS {testing.expect(t,morph_weight_set(&full,fmt.tprintf("Shape %d",i),1))}
     testing.expect(t,!morph_weight_set(&full,"One more",1) && morph_weight_set(&full,"Shape 3",2))
@@ -91,7 +103,7 @@ morph_weights_report_unknown_targets_and_refuse_invalid_entries_keeping_their_we
 
 @(private="file")
 morph_test_step :: proc(meshes:^core.Table(erender.Mesh_Renderer),configs:^core.Table(Morph_Weights),animations:^core.Table(Animation),targets:^core.Table(Animation_Target),sources:^core.Table(Pose_Source),parents:^core.Table(core.Parent),playback:^Playback,cache:^Skin_Runtime,state:^Morph_Playback,app:^host.App) {
-    animation_morph(core.read(meshes),core.read(configs),core.read(animations),core.read(targets),core.read(sources),core.read(parents),{playback},{},cache,state,app,{playing=true},nil)
+    animation_morph(core.read(meshes),core.read(configs),core.read(animations),core.read(targets),core.read(sources),core.read(parents),{playback},{},cache,state,nil,app,{playing=true},nil)
 }
 
 @(test)

@@ -359,11 +359,14 @@ clip_edit :: proc(s:^editor.Session,call:^api.Call) {
     created:=false
     if path:=base.text_get(p.path[:]);path!="" {
         if record,found:=aa.registry_find_path(&s.app.assets.registry,path);found {
-            if record.kind!=aa.KIND_ANIMATION {authoring_failure(call,"path","Invalid_Asset","a new path, or an .anim",fmt.tprintf("kind %v",record.kind),"The path holds another kind of asset",fix="Pass a new path ending in .anim, or the path of an .anim");return}
-            if record.id!=p.asset {
-                view,opened:=authoring_clip_open(s,call,record.id,&other);if !opened {return}
+            // What the record says is copied: opening an asset may add files to the registry and
+            // move its records.
+            kind,there:=record.kind,record.id
+            if kind!=aa.KIND_ANIMATION {authoring_failure(call,"path","Invalid_Asset","a new path, or an .anim",fmt.tprintf("kind %v",kind),"The path holds another kind of asset",fix="Pass a new path ending in .anim, or the path of an .anim");return}
+            if there!=p.asset {
+                view,opened:=authoring_clip_open(s,call,there,&other);if !opened {return}
                 if !clip_same_skeleton(call,view,skeleton) {return}
-                target,target_view,id=other,view,record.id
+                target,target_view,id=other,view,there
             }
         } else {
             target,id,created=authoring_create_target(s,call,path,".anim");if !created {return}

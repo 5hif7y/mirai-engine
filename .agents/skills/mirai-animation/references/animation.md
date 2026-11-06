@@ -124,8 +124,8 @@ Per tick:
   on the `Character`'s entity faces its +Z, as the body does
   ([facing](../../mirai-physics/SKILL.md#library-invariants)): it is not turned by hand. Without
   physics, the game calls `match_goal` with what moves its rig.
-- With `lag` (for a body that stops or starts harder than its clips; `animation.character.setup`
-  sets it), the root of the pose follows the body by a critically damped spring of
+- With `lag` (for a body that stops or starts harder than its clips; off by default and in
+  `animation.character.setup`), the root of the pose follows the body by a critically damped spring of
   `lag_half_life`: a change of velocity the body makes at once the root takes in over the
   half-life, never farther than `lag` from the body nor into the wall of the goal, and returns onto
   the body. The bones right under the rig move by that offset after layers and warping. Matching,

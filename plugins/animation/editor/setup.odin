@@ -25,8 +25,6 @@ SETUP_GESTURES :: anim.ACTION_CAPACITY/3
 SETUP_CLIPS :: anim.MATCH_CLIPS+SETUP_GESTURES
 // m/s: a body slower than this stands, with the clips that do not travel.
 SETUP_STATIONARY_SPEED :: 0.15
-// m the root of the pose may stray from a body that stops or starts harder than its clips.
-SETUP_LAG :: 0.15
 Setup_Speed :: struct {clip:[64]u8 `mirai:"text"`,speed:f32 `mirai:"unit=m/s,label=Above 0"`}
 
 Setup_Params :: struct {
@@ -380,9 +378,7 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
         info:=anim.MATCH_INFO_DEFAULT;info.animation=library
         // A loop keeps its phase and a body that does not move stands: searching inside a loop
         // every tick, or walking against a wall, would restart the same frames and freeze the legs.
-        // The root of the pose takes in over a spring a stop or a start harder than the clips.
         info.keep_loop_phase,info.stationary_speed=true,SETUP_STATIONARY_SPEED
-        info.lag=SETUP_LAG
         info.left_foot,info.right_foot,info.hips=bone(skeleton,body,.Foot_L),bone(skeleton,body,.Foot_R),bone(skeleton,body,.Pelvis)
         sources:=make([]anim.Match_Source,len(clips.locomotion),call.allocator)
         for clip,i in clips.locomotion {

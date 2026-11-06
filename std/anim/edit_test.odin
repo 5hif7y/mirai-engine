@@ -248,7 +248,7 @@ hostile_edits_metrics_and_detection_return :: proc(t:^testing.T) {
     for _ in 0..<EDIT_HOSTILE_ROUNDS {
         range:=Time_Range{number(&state),number(&state)}
         edit:Clip_Edit
-        switch next(&state)%9 {
+        switch next(&state)%10 {
         case 0: edit=Retime{range,number(&state),number(&state)}
         case 1: edit=Hold{number(&state),number(&state)}
         case 2: edit=Extend{range,number(&state)}
@@ -258,6 +258,7 @@ hostile_edits_metrics_and_detection_return :: proc(t:^testing.T) {
         case 6: edit=Offset{Body_Part(next(&state)%20),Body_Direction(next(&state)%7),Body_Amount(next(&state)%4),range,number(&state)}
         case 7: edit=Lock_Feet{number(&state)}
         case 8: edit=Mirror{}
+        case 9: edit=Face_Rest{}
         }
         layout,error:=clip_edit_layout(edit,walk,4096)
         if error!=.None {continue}
@@ -274,4 +275,37 @@ hostile_edits_metrics_and_detection_return :: proc(t:^testing.T) {
         walk,rig=body_test_walk(test_rig,map_,{loop=true,duration=.25})
     }
     testing.expect(t,true)
+}
+
+@(test)
+face_rest_turns_the_root_back_to_its_rest_facing :: proc(t:^testing.T) {
+    test_rig,map_:=body_test_detected()
+    walk,rig:=body_test_walk(test_rig,map_,{loop=true})
+    root,pelvis:=body_test_bone(test_rig,"root"),map_.bones[.Pelvis]
+    // Turned sideways at its root, as a 2.5D game turns its body inside the clip, with a sway of
+    // the pelvis of its own.
+    sideways:=math.quat_axis_angle({0,1,0},cmath.PI/2)
+    for frame in 0..<frames_count(walk) {
+        pose:=frames_pose(walk,frame)
+        pose[root].rotation=sideways*pose[root].rotation
+        pose[pelvis].rotation=math.quat_axis_angle({0,1,0},.1*cmath.sin(f32(frame)/10))*pose[pelvis].rotation
+    }
+    turned:=body_test_metrics(rig,walk)
+    testing.expectf(t,abs(abs(turned.travel.x)-.8)<.05,"turned walk travels %v",turned.travel)
+    faced,result:=body_test_edit(rig,Face_Rest{},walk)
+    if !testing.expect_value(t,result.error,Edit_Error.None) {return}
+    metrics:=body_test_metrics(rig,faced)
+    testing.expectf(t,abs(metrics.travel.z-.8)<.05 && abs(metrics.travel.x)<.05,"faced walk travels %v",metrics.travel)
+    for frame in 0..<frames_count(walk) {
+        testing.expect(t,math.quat_angle(frames_pose(faced,frame)[root].rotation,rig.rest[root].rotation)<1e-4)
+        for value,bone in frames_pose(walk,frame) {if i32(bone)!=root {testing.expect(t,body_test_close(value,frames_pose(faced,frame)[bone]))}}
+    }
+    // Nothing turned: the clip stays as it was. Without a pelvis there is no root joint to find.
+    again,_:=body_test_edit(rig,Face_Rest{},faced)
+    for frame in 0..<frames_count(faced) {
+        for value,bone in frames_pose(faced,frame) {testing.expect(t,body_test_close(value,frames_pose(again,frame)[bone]))}
+    }
+    headless:=rig;headless.body.bones[.Pelvis]=-1
+    _,result=body_test_edit(headless,Face_Rest{},walk)
+    testing.expect(t,result.error==.Missing_Part && result.part==.Pelvis)
 }

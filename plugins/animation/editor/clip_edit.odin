@@ -11,7 +11,7 @@ import mm "mirai:std/math"
 import "mirai:std/serial"
 
 // What a clip edit does, as lib.Clip_Edit names them.
-Clip_Verb :: enum u8 {Retime,Hold,Extend,Smooth,Exaggerate,Make_Loop,Offset,Lock_Feet,Mirror}
+Clip_Verb :: enum u8 {Retime,Hold,Extend,Smooth,Exaggerate,Make_Loop,Offset,Lock_Feet,Mirror,Face_Rest}
 // Body regions by name, alone or together.
 Body_Group :: enum u8 {Body,Upper_Body,Lower_Body,Arms,Legs,Hips,Spine,Head,Arm_L,Arm_R,Leg_L,Leg_R}
 Body_Groups :: bit_set[Body_Group]
@@ -299,6 +299,7 @@ clip_step :: proc(call:^api.Call,step:Clip_Edit_Step,raw:string,index:int) -> (e
         edit=lib.Offset{target=target,direction=step.direction,amount=step.strength,range=range,fade=step.fade}
     case .Lock_Feet: edit=lib.Lock_Feet{step.blend}
     case .Mirror: edit=lib.Mirror{}
+    case .Face_Rest: edit=lib.Face_Rest{}
     }
     return edit,true
 }

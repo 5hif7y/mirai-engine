@@ -33,7 +33,12 @@ Offset :: struct {target:Offset_Target,direction:Body_Direction,amount:Body_Amou
 Lock_Feet :: struct {blend:f32}
 // Left becomes right: needs Body_Rig.mirror.
 Mirror :: struct {}
-Clip_Edit :: union {Retime,Hold,Extend,Exaggerate,Smooth,Make_Loop,Offset,Lock_Feet,Mirror}
+// The root joint keeps the rotation about up it has at rest, the rest of the pose as it was: a
+// body the clip turns sideways inside faces where it rests. The root joint is the highest of the
+// pelvis and its ancestors that the clip turns about up more than FACE_REST_TURN; without one
+// the clip stays as it was.
+Face_Rest :: struct {}
+Clip_Edit :: union {Retime,Hold,Extend,Exaggerate,Smooth,Make_Loop,Offset,Lock_Feet,Mirror,Face_Rest}
 
 Edit_Error :: enum u8 {
     None,
@@ -120,7 +125,7 @@ clip_edit_layout :: proc "contextless" (edit:Clip_Edit,f:Frames,max_count:int) -
 clip_edit_buffers :: proc "contextless" (edit:Clip_Edit,f:Frames) -> (transforms,contacts,heights:int) {
     #partial switch _ in edit {
     case Lock_Feet: return frames_scratch_size(f),frames_count(f)+4,2*frames_count(f)
-    case Offset,Mirror: return 2*max(f.bones,0),0,0
+    case Offset,Mirror,Face_Rest: return 2*max(f.bones,0),0,0
     }
     return 0,0,0
 }
@@ -231,6 +236,7 @@ clip_edit :: proc "contextless" (rig:Body_Rig,edit:Clip_Edit,input,output:Frames
     case Offset: return edit_offset(rig,e,input,output,buffers.world)
     case Lock_Feet: return edit_lock_feet(rig,e,input,output,buffers)
     case Mirror: return edit_mirror(rig,input,output,buffers.world)
+    case Face_Rest: return edit_face_rest(rig,input,output,buffers.world)
     }
     return {error=.Invalid_Amount}
 }

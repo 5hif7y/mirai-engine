@@ -348,3 +348,45 @@ edit_mirror :: proc "contextless" (rig:Body_Rig,input,output:Frames,scratch:[]ma
     }
     return {}
 }
+
+// A joint turned about up this far from its rest faces elsewhere; less is a sway of the body.
+FACE_REST_TURN :: math.PI/4
+
+@(private)
+edit_face_rest :: proc "contextless" (rig:Body_Rig,input,output:Frames,scratch:[]math.Transform) -> Edit_Result {
+    n:=input.bones
+    count:=frames_count(input)
+    copy(output.local,input.local);copy(output.values,input.values)
+    rest,world:=scratch[:n],scratch[n:2*n]
+    if !pose_world(rig.parents,rig.rest,rest) {return {error=.Numeric}}
+    up:=frames_up(rig)
+    // The turn about up of a bone from its rest, in the space of the clip.
+    heading :: proc "contextless" (world,rest:math.Transform,up:math.Vec3) -> math.Quat {
+        _,twist:=math.quat_swing_twist(world.rotation*conj(rest.rotation),up)
+        return twist
+    }
+    // The joints that carry the body: from the pelvis (or the root of the rig) up to the root of
+    // the skeleton. The highest that faces elsewhere is the one that turns it.
+    start:=rig.body.bones[.Pelvis]
+    if start<0 {start=rig.root}
+    if start<0 {return {error=.Missing_Part,part=.Pelvis}}
+    chain:[64]i32
+    depth:=0
+    for at:=start;at>=0 && depth<len(chain);at=rig.parents[at] {chain[depth]=at;depth+=1}
+    turned:=-1
+    for frame in 0..<count {
+        if !pose_world(rig.parents,frames_pose(input,frame),world) {return {error=.Numeric}}
+        for i in turned+1..<depth {
+            if math.quat_angle(heading(world[chain[i]],rest[chain[i]],up),1)>FACE_REST_TURN {turned=i}
+        }
+    }
+    if turned<0 {return {}}
+    joint:=chain[turned]
+    for frame in 0..<count {
+        local:=frames_pose(output,frame)
+        if !pose_world(rig.parents,local,world) {return {error=.Numeric}}
+        turn:=heading(world[joint],rest[joint],up)
+        if !edit_set_rotation(rig.parents,local,world,joint,conj(turn)*world[joint].rotation) || !anim_pose_valid(local) {return {error=.Numeric}}
+    }
+    return {}
+}

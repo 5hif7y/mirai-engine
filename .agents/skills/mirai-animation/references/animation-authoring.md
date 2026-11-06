@@ -95,7 +95,8 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
   of different durations fail with their path and a `fix`.
 - `min_rate`, `max_rate` and `trajectory_direction`, when given, replace those defaults of the
   `.match`: the rates a clip plays at to follow the body, and the weight of where the trajectory
-  faces (0 for a body that never turns, as one that walks sideways).
+  faces (0 for a body that never turns, as one that walks sideways). `landing_marker` (empty: no
+  landing) and `landing_rates` replace those of the [landing](animation.md#landing).
 - Capabilities (`want`): locomotion (a `.match` with those clips and a warping `.motion`; the
   `Animation` stays `In_Place` and `animation_physics` moves it; its loops keep their phase and a
   body that does not move, also against a wall, plays the loops that do not travel), look-at and hands (off until
@@ -141,7 +142,8 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
   evaluate gives `Program_Error`. In Play or Simulate `entity` names a rig by the handle
   `play.inspect` gives, the only name of one the game made; in Edit it takes `id`.
 - `animation.inspect` part `Match` lists the clips of the database and the candidates of its last
-  forced search with their costs per feature: why a jump or a start chose its clip is read there.
+  forced search with their costs per feature, then the best row of each clip it left out with its
+  `reason`: why a jump or a start chose its clip, or never picks one, is read there.
 - `animation.inspect` part `Pose` (only when asked, with `names`) places bones and sockets in the
   world and in the space of the entity from the pose its rig ended its last tick with: a pose,
   socket or root-motion problem is read as numbers, in a paused Play after `play.step`, instead of

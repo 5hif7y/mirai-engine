@@ -174,16 +174,18 @@ Instance_Match_Search :: struct {
     search:u32 `mirai:"label=Which of searches it was"`,
     mode:[32]u8 `mirai:"text"`,
     entry:bool `mirai:"label=It searched the starts of the entry clips of mode"`,
-    candidates:[1]Instance_Match_Candidate `mirai:"list,label=The best row of each clip, least cost first: the first is the one it chose"`,
+    time_to_land:f32 `mirai:"optional,unit=s,label=It searched the rows that reach their landing marker this many seconds ahead"`,
+    candidates:[1]Instance_Match_Candidate `mirai:"list,label=The best row of each clip it could pick, least cost first (the first is the one it chose), then that of each clip it left out with its reason"`,
 }
 // costs: of each kind of feature by its weight; they sum cost.
 Instance_Match_Candidate :: struct {
     range:u32 `mirai:"label=Its index in ranges"`,
     clip:[64]u8 `mirai:"text"`,
     time:f32 `mirai:"unit=s,label=Of the row in its clip"`,
-    rate:f32 `mirai:"label=It plays at to follow the trajectory"`,
+    rate:f32 `mirai:"label=It plays at to follow the trajectory, or to reach its landing marker"`,
     cost:f32,
     costs:Instance_Match_Costs,
+    reason:lib.Match_Reject `mirai:"label=None: the one it chose; Cost: it cost more; Mode, Entry, Stationary, Reselect, Event (no landing marker ahead) and Rate (its marker is not reached at a landing rate): why it was left out"`,
 }
 Instance_Match_Costs :: struct {foot_position,foot_velocity,hip_velocity,body_velocity,trajectory_position,trajectory_direction:f32}
 Instance_Pose :: struct {
@@ -454,12 +456,13 @@ instance_match :: proc(s:^editor.Session,call:^api.Call,world:core.World_Ref,ent
         name,named:=locomotion_mode_name(modes,searched.mode)
         api.write_key(out,"search");serial.text_write_raw(out,"{");api.write_uint(out,"search",u64(searched.search),true)
         api.write_text(out,"mode",name if named else fmt.tprintf("%d",searched.mode));api.write_bool(out,"entry",searched.entry)
+        if searched.time_to_land>0 {api.write_key(out,"time_to_land");api.write_number(out,searched.time_to_land)}
         api.write_key(out,"candidates");serial.write_u8(out,'[');written:=0
         for &candidate in searched.candidates.items[:clamp(searched.candidates.count,0,lib.MATCH_CANDIDATES)] {
             range:=lib.match_range_of(db,int(candidate.row));if range<0 {continue}
             if written>0 {serial.write_u8(out,',')};written+=1
             r:=db.ranges[range];c:=candidate.costs
-            row:=Instance_Match_Candidate{range=u32(range),clip=anim.source_clip_label(library,r.clips[0]),time=f32(int(candidate.row)-int(r.first))/db.rate,rate=candidate.rate,cost=candidate.cost}
+            row:=Instance_Match_Candidate{range=u32(range),clip=anim.source_clip_label(library,r.clips[0]),time=f32(int(candidate.row)-int(r.first))/db.rate,rate=candidate.rate,cost=candidate.cost,reason=candidate.reason}
             row.costs={c[.Foot_Position],c[.Foot_Velocity],c[.Hip_Velocity],c[.Body_Velocity],c[.Trajectory_Position],c[.Trajectory_Direction]}
             authoring_write_value(call,&row,type_info_of(Instance_Match_Candidate))
         }
@@ -523,7 +526,7 @@ match_inspect :: proc(s:^editor.Session,call:^api.Call,id:base.Asset_Id,offset,l
             for &built in content.databases {
                 if written>0 {serial.write_u8(out,',')};written+=1
                 row:=Asset_Match_Database{rows=u32(built.database.rows),error=built.error}
-                if built.error==.None {row.bytes=u64(lib.match_database_bytes(built.database.rows,len(built.database.ranges)))}
+                if built.error==.None {row.bytes=u64(lib.match_database_size(built.database))}
                 authoring_write_value(call,&row,type_info_of(Asset_Match_Database))
             }
         }

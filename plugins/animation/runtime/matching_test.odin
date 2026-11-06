@@ -211,8 +211,9 @@ matching_walks_mirai_avatar_with_its_feet_planted_without_pose_jumps_and_follows
 @(private="file") GROUND,AIR :: u16(1),u16(0)
 
 // Hips over two feet and a head, as the matching of std/anim: idle and walk on the ground, a fall
-// loop in the air and jump, the entry clip of the air. vault is not in the .match: only match_play
-// plays it, for two seconds, with a marker 'release' at .35 s.
+// loop in the air and jump, the entry clip of the air, whose marker 'land' is at .8 s. vault is not
+// in the .match: only match_play plays it, for two seconds, with a marker 'release' at .35 s. With
+// leap, leap is another entry of the air that lands at .8 s and travels at 3 m/s.
 @(private="file")
 Match_Fixture :: struct {
     entities:core.Entities,
@@ -233,7 +234,7 @@ Match_Fixture :: struct {
 }
 
 @(private="file")
-match_fixture :: proc(t:^testing.T,f:^Match_Fixture,memory:u32=MATCH_INFO_DEFAULT.memory) -> bool {
+match_fixture :: proc(t:^testing.T,f:^Match_Fixture,memory:u32=MATCH_INFO_DEFAULT.memory,leap:=false) -> bool {
     core.entities_init(&f.entities);f.rig=core.create(&f.entities)
     core.add(&f.transforms,f.rig,core.TRANSFORM_IDENTITY);core.table_settle(&f.transforms,&f.entities)
     Bone :: struct {name,path:string,at:mm.Vec3}
@@ -252,28 +253,34 @@ match_fixture :: proc(t:^testing.T,f:^Match_Fixture,memory:u32=MATCH_INFO_DEFAUL
     rise_r:=[2]lib.Keyframe{{time=0,value={-.1,-.95,0,0}},{time=1,value={-.1,-.5,.2,0}}}
     over_l:=[2]lib.Keyframe{{time=0,value={.1,-.3,.5,0}},{time=2,value={.1,-.3,-.5,0}}}
     over_r:=[2]lib.Keyframe{{time=0,value={-.1,-.3,.5,0}},{time=2,value={-.1,-.3,.5,0}}}
+    lift_l:=[2]lib.Keyframe{{time=0,value={.1,-.95,0,0}},{time=1,value={.1,-.5,0,0}}}
+    lift_r:=[2]lib.Keyframe{{time=0,value={-.1,-.95,0,0}},{time=1,value={-.1,-.5,0,0}}}
     release:=[1]lib.Marker{{time=.35,id=0}}
-    descs:=[5]lib.Clip_Desc{
+    land:=[1]lib.Marker{{time=.8,id=1}}
+    descs:=[6]lib.Clip_Desc{
         {name=base.name_hash("idle"),tracks={{target=left,property=.Position,keys=still[:]},{target=right,property=.Position,keys=other[:]}}},
         {name=base.name_hash("walk"),tracks={{target=left,property=.Position,keys=stride_l[:]},{target=right,property=.Position,keys=stride_r[:]}}},
         {name=base.name_hash("fall"),tracks={{target=left,property=.Position,keys=tucked[:]},{target=right,property=.Position,keys=other[:]}}},
-        {name=base.name_hash("jump"),tracks={{target=left,property=.Position,keys=rise_l[:]},{target=right,property=.Position,keys=rise_r[:]}}},
+        {name=base.name_hash("jump"),tracks={{target=left,property=.Position,keys=rise_l[:]},{target=right,property=.Position,keys=rise_r[:]}},markers=land[:]},
         {name=base.name_hash("vault"),tracks={{target=left,property=.Position,keys=over_l[:]},{target=right,property=.Position,keys=over_r[:]}},markers=release[:]},
+        {name=base.name_hash("leap"),tracks={{target=left,property=.Position,keys=lift_l[:]},{target=right,property=.Position,keys=lift_r[:]}},markers=land[:]},
     }
     f.content.id,f.content.generation={0x3a7c,3},1
-    if !lib.library_init(&f.content.lib,{max_keys=64,max_tracks=16,max_clips=2*len(descs),max_markers=2}) {return false}
+    if !lib.library_init(&f.content.lib,{max_keys=64,max_tracks=16,max_clips=2*len(descs),max_markers=4}) {return false}
     for desc in descs {if _,error:=lib.clip_add(&f.content.lib,desc);error!=.None {return false}}
     if _,error:=lib.library_compress(&f.content.lib);error!=.None {return false}
     host.content_animation_loops(&f.content.lib,len(descs));f.content.clip_count=len(descs)
-    f.content.markers=make([]u64,1);f.content.markers[0]=base.name_hash("release")
+    f.content.markers=make([]u64,2);f.content.markers[0],f.content.markers[1]=base.name_hash("release"),base.name_hash("land")
     f.assets.registry.by_id=make(map[base.Asset_Id]u32)
     append(&f.assets.registry.files,asset.Registry_File{id=MATCH_TEST_ID,kind=MATCH_KIND,state=.Asset});f.assets.registry.by_id[MATCH_TEST_ID]=0
     f.app={assets=&f.assets,allocator=context.allocator}
     Source :: struct {name:string,modes:u32,loop:bool}
-    clips:=make([]Match_Source,4)
-    for value,i in ([4]Source{{"idle",1<<GROUND,true},{"walk",1<<GROUND,true},{"fall",1<<AIR,true},{"jump",1<<AIR,false}}) {
+    clips:=make([]Match_Source,5 if leap else 4)
+    for value,i in ([5]Source{{"idle",1<<GROUND,true},{"walk",1<<GROUND,true},{"fall",1<<AIR,true},{"jump",1<<AIR,false},{"leap",1<<AIR,false}}) {
+        if i>=len(clips) {break}
         base.text_set(clips[i].clip[:],value.name);clips[i].modes,clips[i].loop,clips[i].entry=value.modes,value.loop,!value.loop
     }
+    if leap {clips[4].speed=3}
     info:=MATCH_INFO_DEFAULT;info.animation,info.memory=f.content.id,memory
     info.left_foot,info.right_foot,info.hips=bone_ref("foot_l"),bone_ref("foot_r"),bone_ref("hips")
     profile:=Match_Profile{info=info,clips=clips}
@@ -291,11 +298,11 @@ match_fixture_free :: proc(f:^Match_Fixture) {
     core.table_destroy(&f.transforms);core.entities_destroy(&f.entities)
 }
 // A tick of the rig with the body in mode: standing, or going at velocity, asked for desired,
-// against a wall of that normal.
+// against a wall of that normal, landing in time_to_land seconds.
 @(private="file")
-match_step :: proc(f:^Match_Fixture,dt:f32,mode:u16,plays:[]Match_Play={},velocity:=mm.Vec3{},desired:=mm.Vec3{},wall:=mm.Vec3{}) -> bool {
+match_step :: proc(f:^Match_Fixture,dt:f32,mode:u16,plays:[]Match_Play={},velocity:=mm.Vec3{},desired:=mm.Vec3{},wall:=mm.Vec3{},time_to_land:f32=0) -> bool {
     clear(&f.events.items);clear(&f.events.plays.items)
-    goals:=[1]Match_Goal{{rig=f.rig,mode=mode,velocity=velocity,desired=desired,facing={0,0,1},wall=wall,acceleration=20,braking=20}}
+    goals:=[1]Match_Goal{{rig=f.rig,mode=mode,velocity=velocity,desired=desired,facing={0,0,1},wall=wall,acceleration=20,braking=20,time_to_land=time_to_land}}
     copy(f.state.local[:],f.state.rest[:])
     output,programmed,ok:=program_resolve(f.state,f.animation,&f.app,nil,&f.graphs,dt,&f.events,&f.playback,&f.content,&f.problems,goals[:],plays)
     return ok && programmed && program_players(f.state,output,&f.content,f.animation,&f.events,&f.playback,dt,-1,nil) && program_pose(&f.playback,f.state,&f.content,f.animation,output,{})
@@ -435,11 +442,12 @@ a_new_mode_of_the_match_goal_enters_by_its_entry_clip :: proc(t:^testing.T) {
     searched:=f.state.program.match.searched
     if testing.expect(t,db!=nil) {
         candidates:=searched.candidates.items[:searched.candidates.count]
-        testing.expectf(t,searched.search==1 && searched.mode==GROUND && !searched.entry && len(candidates)==2,"the first search weighs idle and walk, not %v",searched)
+        reasons:=match_test_reasons(db,searched.candidates)
+        testing.expectf(t,searched.search==1 && searched.mode==GROUND && !searched.entry && len(candidates)==4 && reasons[2]==.Mode && reasons[3]==.Mode,"the first search weighs idle and walk and leaves out the air, not %v",searched)
         for candidate,i in candidates {
             sum:f32;for part in candidate.costs {sum+=part}
             testing.expectf(t,abs(sum-candidate.cost)<=1e-3*max(1,candidate.cost),"the kinds of feature sum %.4f, not its cost %.4f",sum,candidate.cost)
-            if i>0 {testing.expect(t,candidates[i-1].cost<=candidate.cost,"candidates go from the least cost")}
+            if i>0 && i<2 {testing.expect(t,candidates[i-1].cost<=candidate.cost,"candidates go from the least cost")}
         }
         if len(candidates)>0 {
             range:=lib.match_range_of(db,int(candidates[0].row))
@@ -456,11 +464,97 @@ a_new_mode_of_the_match_goal_enters_by_its_entry_clip :: proc(t:^testing.T) {
     value,_=animation_match(&f.playback,f.rig)
     testing.expectf(t,value.mode==AIR && value.clip==base.name_hash("jump") && value.time<=lib.MATCH_ENTRY_SPAN+dt+1e-4 && !value.forced,"entering the air starts its entry clip near its start, not %v",value)
     searched=f.state.program.match.searched
-    testing.expectf(t,searched.entry && searched.mode==AIR && searched.candidates.count==1 && searched.search==value.searches,"entering the air notes its entry search, not %v",searched)
+    reasons:=match_test_reasons(db,searched.candidates)
+    testing.expectf(t,searched.entry && searched.mode==AIR && reasons=={.Mode,.Mode,.Entry,.None,max(lib.Match_Reject)} && searched.search==value.searches,"entering the air notes its entry search, not %v",searched)
     testing.expectf(t,value.rate==1,"an entry clip plays at its own rate whatever the body moves, not %.2f",value.rate)
     for _ in 0..<120 {testing.expect(t,match_step(&f,dt,AIR))}
     value,_=animation_match(&f.playback,f.rig)
     testing.expectf(t,value.mode==AIR && value.clip==base.name_hash("fall"),"the entry clip hands the air over to its loop when it ends, not %v",value)
+}
+
+// Why the search noted each clip of the fixture left out, by range; max for one it did not note.
+@(private="file")
+match_test_reasons :: proc(db:^lib.Match_Database,noted:lib.Match_Candidates) -> (reasons:[5]lib.Match_Reject) {
+    for &reason in reasons {reason=max(lib.Match_Reject)}
+    for item,i in noted.items {
+        if i>=int(noted.count) {break}
+        if range:=lib.match_range_of(db,int(item.row));range>=0 && range<len(reasons) {reasons[range]=item.reason}
+    }
+    return
+}
+
+// Ticks of a body in the air from time_to_land down to its last tick before it lands, the
+// time to land told on each; at tick 10, the ground found later by later.
+@(private="file")
+match_test_fall :: proc(t:^testing.T,f:^Match_Fixture,dt,time_to_land:f32,later:f32=0,velocity:=mm.Vec3{},turn:=mm.Vec3{}) -> (clips:[dynamic]u64) {
+    clips.allocator=context.temp_allocator
+    left:=time_to_land
+    for tick:=0;left>dt*.5;tick+=1 {
+        if tick==10 {left+=later}
+        going:=velocity if tick<10 else turn
+        testing.expect(t,match_step(f,dt,AIR,velocity=going,desired=going,time_to_land=left))
+        value,_:=animation_match(&f.playback,f.rig)
+        if len(clips)==0 || clips[len(clips)-1]!=value.clip {append(&clips,value.clip)}
+        left-=dt
+    }
+    return
+}
+
+// Physics tells the rig in the air when it lands: the jump plays at the rate that puts its landing
+// marker there, follows a later landing, plays on after it lands until it ends, and off a ledge it
+// plays the part of the jump that lands in time.
+@(test)
+a_body_in_the_air_lands_on_the_landing_marker_of_its_clip_when_physics_says :: proc(t:^testing.T) {
+    dt:=f32(1.0/60)
+    {
+        f:Match_Fixture;defer match_fixture_free(&f)
+        if !testing.expect(t,match_fixture(t,&f)) {return}
+        for _ in 0..<10 {testing.expect(t,match_step(&f,dt,GROUND))}
+        testing.expect(t,match_step(&f,dt,AIR,time_to_land=.6))
+        value,_:=animation_match(&f.playback,f.rig)
+        start:=value.time-dt*value.rate
+        testing.expectf(t,value.clip==base.name_hash("jump") && start<=lib.MATCH_ENTRY_SPAN+1e-4 && abs(value.rate*.6-(.8-start))<1e-3,"the jump enters at %.3f s at the rate that lands its marker in .6 s, not %.3f",start,value.rate)
+        clips:=match_test_fall(t,&f,dt,.6-dt,later=.2)
+        value,_=animation_match(&f.playback,f.rig)
+        testing.expectf(t,len(clips)==1 && clips[0]==base.name_hash("jump") && abs(value.time-.8)<.01,"the jump reaches its marker when the body lands later, at %.3f s",value.time)
+        testing.expect(t,match_step(&f,dt,GROUND))
+        value,_=animation_match(&f.playback,f.rig)
+        testing.expectf(t,value.clip==base.name_hash("jump") && value.mode==GROUND && !value.forced && value.rate==1,"landed, the jump plays on on the ground: %v",value)
+        ticks:=1
+        for ;ticks<30 && value.clip==base.name_hash("jump");ticks+=1 {
+            testing.expect(t,match_step(&f,dt,GROUND))
+            value,_=animation_match(&f.playback,f.rig)
+        }
+        testing.expectf(t,value.clip!=base.name_hash("jump") && f32(ticks)*dt<=.2+3*dt,"the ground takes over by the end of the jump, not after %d ticks",ticks)
+    }
+    {
+        // Off a ledge .25 s above the ground no start lands in time: a row of the jump that does.
+        f:Match_Fixture;defer match_fixture_free(&f)
+        if !testing.expect(t,match_fixture(t,&f)) {return}
+        for _ in 0..<10 {testing.expect(t,match_step(&f,dt,GROUND))}
+        testing.expect(t,match_step(&f,dt,AIR,time_to_land=.25))
+        value,_:=animation_match(&f.playback,f.rig)
+        db:=animation_match_database(&f.graphs,&f.content,f.state)
+        searched:=f.state.program.match.searched
+        if !testing.expect(t,db!=nil) {return}
+        reasons:=match_test_reasons(db,searched.candidates)
+        testing.expectf(t,value.clip==base.name_hash("jump") && value.time>=.3 && searched.time_to_land==.25 && reasons[2]==.Event && reasons[3]==.None,"off a ledge the jump plays from %.3f s; the fall has no marker: %v",value.time,reasons)
+        clips:=match_test_fall(t,&f,dt,.25-dt)
+        value,_=animation_match(&f.playback,f.rig)
+        testing.expectf(t,len(clips)==1 && abs(value.time-.8)<.01,"and reaches its marker as it lands, at %.3f s",value.time)
+    }
+    {
+        // A body that starts to move in the air goes on with the jump that travels, on time.
+        f:Match_Fixture;defer match_fixture_free(&f)
+        if !testing.expect(t,match_fixture(t,&f,leap=true)) {return}
+        for _ in 0..<10 {testing.expect(t,match_step(&f,dt,GROUND))}
+        testing.expect(t,match_step(&f,dt,AIR,time_to_land=.8))
+        value,_:=animation_match(&f.playback,f.rig)
+        testing.expectf(t,value.clip==base.name_hash("jump"),"standing, the jump in place, not %v",value)
+        clips:=match_test_fall(t,&f,dt,.8-dt,turn={0,0,3})
+        value,_=animation_match(&f.playback,f.rig)
+        testing.expectf(t,len(clips)==2 && clips[1]==base.name_hash("leap") && abs(value.time-.8)<.01,"moving, the leap takes over and lands at %.3f s",value.time)
+    }
 }
 
 @(test)

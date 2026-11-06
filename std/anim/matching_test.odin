@@ -18,7 +18,7 @@ match_test_rig :: proc(library:^Library) -> (rig:Match_Rig,clips:[3]Match_Clip,o
     body:=body_map_empty();body.forward,body.up={0,0,1},{0,1,0}
     body.bones[.Pelvis],body.bones[.Foot_L],body.bones[.Foot_R],body.bones[.Head]=1,2,3,4
     rig={skeleton={parents[:],names[:],rest[:]},body=body,left_foot=2,right_foot=3,hips=1,forward={0,0,1}}
-    if !library_init(library,{max_keys=64,max_tracks=16,max_clips=8}) {return}
+    if !library_init(library,{max_keys=64,max_tracks=16,max_clips=8,max_markers=2}) {return}
     still:=[2]Keyframe{{time=0,value={.1,-.95,0,0}},{time=1,value={.1,-.95,0,0}}}
     other:=[2]Keyframe{{time=0,value={-.1,-.95,0,0}},{time=1,value={-.1,-.95,0,0}}}
     left:=[4]Keyframe{{time=0,value={.1,-.95,.375,0}},{time=.5,value={.1,-.95,-.375,0}},{time=.75,value={.1,-.8,0,0}},{time=1,value={.1,-.95,.375,0}}}
@@ -284,6 +284,17 @@ a_clip_shorter_than_the_trajectory_keeps_its_last_rows_out_of_the_search :: proc
     testing.expectf(t,best<int(r.first+r.count)-tail,"its last rows are not entered, not row %d of %d",best-int(r.first),r.count)
 }
 
+@(private="file")
+match_test_reasons :: proc(db:^Match_Database,noted:Match_Candidates) -> (reasons:[4]Match_Reject) {
+    for &reason in reasons {reason=max(Match_Reject)}
+    for item,i in noted.items {
+        if i>=int(noted.count) {break}
+        if range:=match_range_of(db,int(item.row));range>=0 && range<4 {reasons[range]=item.reason}
+    }
+    return
+}
+
+// Noted, the clips it leaves out say why, after those it could pick, each part least cost first.
 @(test)
 a_body_that_stands_leaves_out_every_clip_that_moves_and_one_that_moves_every_clip_that_stands :: proc(t:^testing.T) {
     library:Library;defer library_destroy(&library)
@@ -291,9 +302,76 @@ a_body_that_stands_leaves_out_every_clip_that_moves_and_one_that_moves_every_cli
     if !testing.expect(t,match_test_steps(t,&library,&db)) {return}
     row:=int(db.ranges[3].first)+2
     request:=Match_Request{query=match_features(&db,row),trajectory=match_row_trajectory(&db,row),modes=1<<1,filter_stationary=true,moving=true}
-    best,_,_:=match_search(&db,request)
+    noted:Match_Candidates
+    best,_,_:=match_search(&db,request,candidates=&noted)
     testing.expect_value(t,best,row)
-    request.moving=false
+    reasons:=match_test_reasons(&db,noted)
+    testing.expectf(t,int(noted.items[0].row)==best && reasons=={.Stationary,.Cost,.Mode,.None},"a moving body leaves out idle and the fall: %v",reasons)
+    for item,i in noted.items[1:noted.count] {
+        before:=noted.items[i]
+        testing.expect(t,(before.reason>.Cost)==(item.reason>.Cost) && before.cost<=item.cost || before.reason<=.Cost && item.reason>.Cost,"those it could pick go first, each part least cost first")
+    }
+    // The step playing, searched whole, is left out by the reselect.
+    request.filter_stationary=false
+    best,_,_=match_search(&db,request,row,true,.1,nil,&noted)
+    reasons=match_test_reasons(&db,noted)
+    testing.expectf(t,best!=row && reasons[3]==.Reselect,"the step playing is left out by the reselect: %v",reasons)
+    request.filter_stationary,request.moving=true,false
     best,_,_=match_search(&db,request)
     testing.expectf(t,match_range_of(&db,best)==0,"a body that stands plays the clip that stands, not one that walks once (range %d)",match_range_of(&db,best))
+}
+
+// The clips of match_test_rig and a jump of a second, an entry of the air, whose feet leave the
+// ground and touch it again at .8 s, where its marker 0 is.
+@(private="file")
+match_test_jump :: proc(t:^testing.T,library:^Library,db:^Match_Database) -> bool {
+    rig,clips,ok:=match_test_rig(library)
+    if !ok {return false}
+    left:=[4]Keyframe{{time=0,value={.1,-.95,0,0}},{time=.4,value={.1,-.5,0,0}},{time=.8,value={.1,-.95,0,0}},{time=1,value={.1,-.95,0,0}}}
+    right:=[4]Keyframe{{time=0,value={-.1,-.95,0,0}},{time=.4,value={-.1,-.5,0,0}},{time=.8,value={-.1,-.95,0,0}},{time=1,value={-.1,-.95,0,0}}}
+    land:=[1]Marker{{time=.8,id=0}}
+    jump,error:=clip_add(library,{name=base.name_hash("jump"),tracks={{target=rig.skeleton.names[2],property=.Position,keys=left[:]},{target=rig.skeleton.names[3],property=.Position,keys=right[:]}},markers=land[:]})
+    if error!=.None {return false}
+    all:=[4]Match_Clip{clips[0],clips[1],clips[2],{clips={0=jump},modes=1<<0,entry=true}}
+    return match_database_build(db,library,rig,all[:],30,event=0)==.None
+}
+
+@(test)
+an_event_searches_the_rows_that_reach_its_marker_in_time_at_the_rate_that_does :: proc(t:^testing.T) {
+    library:Library;defer library_destroy(&library)
+    db:Match_Database;defer match_database_free(&db)
+    if !testing.expect(t,match_test_jump(t,&library,&db)) {return}
+    jump:=db.ranges[3]
+    testing.expect(t,len(db.events)==db.rows && match_database_size(db)==match_database_bytes(db.rows,4,true))
+    testing.expect(t,match_event_serves(&db,1<<0) && !match_event_serves(&db,1<<1),"the air has a clip that lands, the ground none")
+    for frame in 0..<int(jump.count) {
+        ahead:=db.events[int(jump.first)+frame];at:=f32(frame)/db.rate
+        testing.expectf(t,abs(ahead-(.8-at))<1e-4 if at<=.8+1e-4 else ahead<0,"row %d of the jump is %.3f s from its marker",frame,ahead)
+    }
+    // Entering the air .6 s before it lands: the start of the jump, at the rate that lands it then.
+    request:=Match_Request{query=match_features(&db,int(db.ranges[0].first)),modes=1<<0,entry=true,event=.6,event_rates={.5,2}}
+    best,_,rate:=match_search(&db,request)
+    start:=best-int(jump.first)
+    testing.expectf(t,match_range_of(&db,best)==3 && start<=int(cmath.ceil(MATCH_ENTRY_SPAN*db.rate)) && abs(rate*request.event-db.events[best])<1e-4,"the jump starts at row %d at rate %.3f",start,rate)
+    // .25 s before it lands no start reaches the marker below twice its rate: off a ledge, any row
+    // of the air that does, at the rate that does.
+    request.event=.25
+    best,_,_=match_search(&db,request)
+    testing.expect(t,best<0,"no start lands in .25 s")
+    request.entry=false
+    best,_,rate=match_search(&db,request)
+    ahead:=db.events[best] if best>=0 else -1
+    testing.expectf(t,match_range_of(&db,best)==3 && ahead>=.125 && ahead<=.5 && abs(rate*.25-ahead)<1e-4,"a row of the jump .125 to .5 s from its marker, not %.3f s at rate %.3f",ahead,rate)
+    // Ten seconds before it lands no row reaches it: the jump lands too soon (Rate), the fall loop
+    // has no marker (Event) and the ground serves another mode.
+    noted:Match_Candidates
+    request.event=10
+    best,_,_=match_search(&db,request,candidates=&noted)
+    reasons:=match_test_reasons(&db,noted)
+    testing.expectf(t,best<0 && reasons=={.Mode,.Mode,.Event,.Rate},"nothing lands in 10 s: %v",reasons)
+    // Without an event the entry jump is left out of the steady search of the air.
+    request.event=0
+    best,_,_=match_search(&db,request,candidates=&noted)
+    reasons=match_test_reasons(&db,noted)
+    testing.expectf(t,match_range_of(&db,best)==2 && reasons=={.Mode,.Mode,.None,.Entry},"the steady search of the air: %v",reasons)
 }

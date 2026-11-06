@@ -45,6 +45,11 @@ temporal state. The world integration and the authoring are in
   first `MATCH_ENTRY_SPAN` seconds and only with `Match_Request.entry`; the continuous search leaves
   them out. With `Match_Candidates` it also notes the best row of each clip, least cost first, with
   its cost per kind of feature, and gives the same row: each clip is bounded by its own best row.
+  The clips it leaves out follow, each by its best row and its `Match_Reject`.
+- An event (a landing): `match_database_build` keeps per row the seconds to the next marker of the
+  event in its clip, and a request with `event` searches only the rows that reach it at a rate of
+  `event_rates`, scored as usual and given at that rate; entry or not, without tail or stationary
+  filter unless it enters.
 - A database of more than `MATCH_LINEAR_ROWS` rows stores the minimum and maximum of its features
   per runs of rows, small and large; the search skips a run whose bound does not improve the best
   row found and gives the same row as the full walk. Without bounds, the walk is linear with

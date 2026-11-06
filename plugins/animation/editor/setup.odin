@@ -48,6 +48,8 @@ Setup_Params :: struct {
     min_rate:f32 `mirai:"optional,min=0,label=The least share of its own speed a locomotion clip plays at to follow the body; omitted is the default of a .match"`,
     max_rate:f32 `mirai:"optional,min=0,label=The most share of its own speed a locomotion clip plays at, at least min_rate"`,
     trajectory_direction:f32 `mirai:"optional,min=0,label=Weight of where the body faces along its trajectory; 0 for a body that never turns, as one that walks sideways"`,
+    landing_marker:[64]u8 `mirai:"text,optional,label=The marker of first contact on the clips that land (a jump), played to reach it when the body lands; omitted is the default of a .match, empty plays no landing"`,
+    landing_rates:[2]f32 `mirai:"optional,min=0,label=The least and most rate a clip plays at to reach its landing marker when the body lands; omitted is the default of a .match"`,
     want:Setup_Wants `mirai:"optional,label=Locomotion (a .match of the clips told apart by name: idle and walk to sprint walk, a fall or air loop falls, jump and land enter falling and walking, swim and fly; the physics plugin moves it); Look (head); Foot_Ik (grounding); Hand_Ik (reach); Gestures (an .action that plays each clip that is not locomotion over the upper body or one arm). Omitted is all of them"`,
     folder:[1024]u8 `mirai:"text,optional,label=Folder of the assets; empty puts them by the clips"`,
     name:[64]u8 `mirai:"text,optional,label=Base name of the files; empty takes the skeleton's"`,
@@ -432,6 +434,9 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
         if authoring_field_present(call,"min_rate") {rates[0]=p.min_rate}
         if authoring_field_present(call,"max_rate") {rates[1]=p.max_rate}
         if !(rates[0]>0) || !(rates[0]<=rates[1]) {authoring_failure(call,"min_rate","Invalid_Rate","0 < min_rate <= max_rate",fmt.tprintf("min_rate %v, max_rate %v",rates[0],rates[1]),"A clip plays between a positive least and a greater most share of its speed",fix="Pass min_rate above 0 and max_rate at least min_rate; 1 plays a clip at its own speed");return}
+        if authoring_field_present(call,"landing_rates") && !(p.landing_rates[0]>0 && p.landing_rates[0]<=p.landing_rates[1]) {
+            authoring_failure(call,"landing_rates","Invalid_Rate","0 < landing_rates[0] <= landing_rates[1]",fmt.tprintf("%v",p.landing_rates),"A clip reaches its landing marker between a positive least and a greater most rate",fix="Pass [least, most] with least above 0, as [0.5, 2]");return
+        }
         still,moving:=false,false
         for value in clips.locomotion {if value.class==.Walking && value.loop {if value.speed<.15 {still=true} else {moving=true}}}
         detail:=setup_locomotion_detail(clips.locomotion[:],modes)
@@ -490,6 +495,8 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
         info.left_foot,info.right_foot,info.hips=bone(skeleton,body,.Foot_L),bone(skeleton,body,.Foot_R),bone(skeleton,body,.Pelvis)
         info.min_rate,info.max_rate=rates[0],rates[1]
         if authoring_field_present(call,"trajectory_direction") {info.trajectory_direction=p.trajectory_direction}
+        if authoring_field_present(call,"landing_marker") {info.landing_marker=p.landing_marker}
+        if authoring_field_present(call,"landing_rates") {info.landing_rates=p.landing_rates}
         sources:=make([dynamic]anim.Match_Source,call.allocator)
         samples:=make([dynamic]anim.Match_Sample,call.allocator)
         for clip in clips.locomotion {

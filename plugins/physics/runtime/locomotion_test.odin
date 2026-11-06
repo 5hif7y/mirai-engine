@@ -100,6 +100,37 @@ walking_toward_plus_x_turns_the_front_of_the_body_to_plus_x_and_keeps_the_look :
     testing.expectf(t,near(look_yaw_of(mm.QUAT_IDENTITY,rotation),look,1e-4),"the look taken from the body %v",look_yaw_of(mm.QUAT_IDENTITY,rotation))
 }
 
+// From 3 m up it lands on flat ground or on a ledge below whose top is 1.5 m up, when and as fast
+// as predicted from the start and again in the middle of the fall; with no ground nothing is.
+@(test)
+a_falling_character_predicts_when_and_how_fast_it_lands_on_the_ground_below :: proc(t:^testing.T) {
+    Case :: struct {ground,ledge:bool,height:f32}
+    for c in ([3]Case{{ground=true,height=3},{ground=true,ledge=true,height=1.5},{}}) {
+        f:Loco_Test
+        if !testing.expect(t,loco_test_init(&f,{0,3,0},c.ground)) {continue}
+        defer sim.world_destroy(&f.w)
+        if c.ledge {loco_test_box(&f,{1,.25,1},{0,1.25,0})}
+        g:=-f.w.gravity.y
+        time,speed:=character_landing(&f.w,f.ch,f.w.gravity)
+        if !c.ground {
+            testing.expectf(t,time==0 && speed==0,"with no ground below nothing lands, not %.3f s",time)
+            continue
+        }
+        expected:=cmath.sqrt(2*c.height/g)
+        testing.expectf(t,near(time,expected,.02) && near(speed,g*expected,.2),"from %.1f m it lands in %.3f s at %.2f m/s, not %.3f s at %.2f m/s",c.height,expected,g*expected,time,speed)
+        ticks:=0
+        for ; ticks<240; ticks+=1 {
+            if .Standing in sim.character_state(&f.w,f.ch).ground {break}
+            loco_test_tick(&f,{})
+            if ticks==20 {
+                left,_:=character_landing(&f.w,f.ch,f.w.gravity)
+                testing.expectf(t,near(left,expected-21.0/60,.03),"in the middle of the fall it lands in %.3f s, not %.3f s",expected-21.0/60,left)
+            }
+        }
+        testing.expectf(t,near(f32(ticks)/60,time,3.0/60),"it lands after %.3f s, as predicted %.3f s",f32(ticks)/60,time)
+    }
+}
+
 @(test)
 a_jump_reaches_the_height_of_the_locomotion_once_per_press :: proc(t:^testing.T) {
     for height in ([2]f32{0.6,1.5}) {

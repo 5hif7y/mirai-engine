@@ -1103,6 +1103,9 @@ poses_write :: proc(s:^Sync) {
             if !sim.character_valid(w,l.character) {continue}
             if row:=core.row_of(s.character_states,e);row>=0 {
                 next:=character_state_of(sim.character_state(w,l.character))
+                if c,ok:=core.get(s.characters,e);ok && c.mode==MODE_FALLING {
+                    next.land_time,next.land_speed=character_landing(w,l.character,sim.body_gravity(w,sim.character_body(w,l.character))*c.gravity_scale)
+                }
                 if s.character_states.values[row]!=next {core.at(s.character_states,row)^=next}
             }
             body:=sim.character_body(w,l.character)

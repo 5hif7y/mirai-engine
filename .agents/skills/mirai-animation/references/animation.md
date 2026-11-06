@@ -125,7 +125,7 @@ locomotion blend space.
 Per tick:
 
 - `match_goal` says the mode, the velocity of the body, the desired one with its acceleration and
-  braking, where it turns and the wall it leans on. With physics, the automatic plugin
+  braking, where it turns, the wall it leans on and when it lands ([landing](#landing)). With physics, the automatic plugin
   `animation_physics` says it for each `Character` with `Animation` (the `Character` is the only
   writer of the mode, and its `Character_State` of the wall; animation keeps no copy) and asks for
   the warping of `Animation.motion` while it walks: the game writes no locomotion code. The model
@@ -180,6 +180,22 @@ with inertialization of `fade`:
 - `Animation_Events.plays` receives Entered (with the one that interrupted), Exited (with the one
   that interrupts it, or 0 if it returns to the matching) and Finished (once, when its clip reaches
   the end).
+
+### Landing
+
+A jump lands on time with no game code: its clips carry the marker `landing_marker` of the
+`.match` at first contact, and physics publishes `time_to_land` of the goal (the `Character_State`
+of a falling `Character`).
+
+- With a time to land and clips of the mode that have the marker, every search (on entering the
+  mode, and each `interval` in the air) weighs only rows whose next marker is reached at a rate of
+  `landing_rates`, at their own rate, and plays the chosen one at that rate: entering, the entry
+  starts first, then (off a ledge, a short fall) any row of the clips of the mode, entry or not. A
+  body whose velocity changes in the air moves to the clip that fits, its marker still on time.
+- Each tick the rate follows the time to land physics gives; the clip searches again only when no
+  landing rate reaches its marker. Without a marker or a prediction it matches as before.
+- A clip at or past its marker when the body changes mode plays on in the new mode, its tail
+  bound only by the clip: until it ends or a periodic search leaves it.
 
 ## Composition graphs and additive spaces
 

@@ -27,7 +27,8 @@ automatic plugin `animation_physics` feeds the locomotion of each `Character`.
   [workflow](#character-workflow) and
   [what replaces the FSM](references/animation.md#what-replaces-the-state-machine).
 - Motion matching (`.match`, modes, entry clips, `match_goal`, `match_play` and its events):
-  [locomotion](references/animation.md#locomotion-by-motion-matching); its search and features:
+  [locomotion](references/animation.md#locomotion-by-motion-matching), a jump that lands on time
+  by its marker: [landing](references/animation.md#landing); its search and features:
   [anim-motion](../mirai-std/references/anim-motion.md#motion-matching-matchingodin).
 - Composition graphs, layers, masks, additives and aim offsets (`.agraph`, `.blend`):
   [composition](references/animation.md#composition-graphs-and-additive-spaces).

@@ -121,7 +121,7 @@ inspecting_a_rig_the_game_made_names_it_by_its_handle_and_reads_the_last_search_
     result=authoring_test_execute(a,"instance",fmt.tprintf(`{{"entity":"%s","parts":["Rig","Match"]}}`,handle))
     if !testing.expectf(t,result.code==0,"%s %s",result.message,result.data) {return}
     text:=string(serial_bytes(a))
-    for needle in ([]string{fmt.tprintf(`"entity":"%s"`,handle),`"rig":{"clips"`,`"match":{"available": true`,`"ranges":[{"clip":"Idle"`,`"modes":["WALKING"]`,`"travel":[`,`"search":{"search":1,"mode":"WALKING","entry":false,"candidates":[{"range": `,`"costs": {"foot_position": `}) {
+    for needle in ([]string{fmt.tprintf(`"entity":"%s"`,handle),`"rig":{"clips"`,`"match":{"available": true`,`"ranges":[{"clip":"Idle"`,`"modes":["WALKING"]`,`"travel":[`,`"search":{"search":1,"mode":"WALKING","entry":false,"candidates":[{"range": `,`"costs": {"foot_position": `,`"reason": "None"`,`"reason": "Stationary"`}) {
         testing.expectf(t,strings.contains(text,needle),"inspect lacks %s in %s",needle,text)
     }
     testing.expect_value(t,result_shape_mismatch(Instance_Inspect_Result,text),"")

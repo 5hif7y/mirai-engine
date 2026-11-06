@@ -125,7 +125,7 @@ Per tick:
   clip that travels is compared with the trajectory scaled by the rate at which it would play
   (`min_rate`..`max_rate`), so a few clips cover the velocities between theirs. It jumps only if it
   saves `bias` over continuing; a clip without a loop that ends, or that enters its last trajectory
-  window, is left without that option, because its still pose would win all the searches. With
+  window, is left whole, because its still pose, or its tail again, would win all the searches. With
   `stationary_speed`, a body that starts or stops while its loop does not move as it does searches
   in that tick, without waiting for the interval or the bias. Only a loop follows the speed of the
   body with its rate; a clip that plays once (a jump, a landing) keeps its own.

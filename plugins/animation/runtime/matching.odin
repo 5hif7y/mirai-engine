@@ -364,6 +364,8 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
             if row>=0 && !entering && !ending {query,weights,_:=lib.match_query(db,request,current);playing_on=lib.match_cost(db,row,query,weights)}
             reach:=int(info.interval*db.rate)+1
             if info.keep_loop_phase && current>=0 && db.ranges[current].loop {reach=int(db.ranges[current].count)}
+            // A clip that ends is left: a row of it a little earlier would play its tail again.
+            if ending {reach=int(db.ranges[current].count)}
             best,cost,_:=lib.match_search(db,request,current,row,reach)
             m.searches+=1;m.cost=min(cost,playing_on)
             if best>=0 && (entering || ending || incompatible || playing_on==max(f32) || cost<playing_on-info.bias) {

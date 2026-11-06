@@ -88,7 +88,8 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
   ([metrics](../../mirai-std/references/anim-body.md#metrics-metricsodin)); `speeds` sets that of a
   locomotion clip by hand and the `.match` keeps it.
 - Capabilities (`want`): locomotion (a `.match` with those clips and a warping `.motion`; the
-  `Animation` stays `In_Place` and `animation_physics` moves it), look-at and hands (off until
+  `Animation` stays `In_Place` and `animation_physics` moves it; its loops keep their phase and a
+  body that does not move, also against a wall, plays the loops that do not travel), look-at and hands (off until
   requested), feet (grounding: needs physics) and gestures (`.action` on the upper body and per arm,
   in layers 1 to 3). The IK pole of each arm is a fixed point of the world: with the character
   turned the elbows do not follow it. Idle and walk are enough: the locomotion is `Ready`, and
@@ -98,7 +99,8 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
   previous parameters.
 - A clip turned sideways inside (a root joint rotated about up, as a 2.5D game does) travels to the
   side; `animation.clip.edit` with `Face_Rest` turns it back to the rest facing of the body, which
-  the `Character` then turns.
+  the `Character` then turns. The body faces where the joint that carries the pelvis does, so a
+  turn split between it and the joints above (a stop that turns toward a camera) goes whole.
 - With the body saved in the `.skeleton`, the assets name
   [parts and regions](animation.md#components-and-shared-data) (`@head`, `@upper_body`) and
   serve another skeleton with a body; with a detected unsaved one they name bones. The warping spine

@@ -23,6 +23,8 @@ Setup_Status :: enum u8 {Ready,Partial,Missing,Skipped}
 // Each gesture plays over the upper body and over each arm.
 SETUP_GESTURES :: anim.ACTION_CAPACITY/3
 SETUP_CLIPS :: anim.MATCH_CLIPS+SETUP_GESTURES
+// m/s: a body slower than this stands, with the loops that do not travel.
+SETUP_STATIONARY_SPEED :: 0.15
 Setup_Speed :: struct {clip:[64]u8 `mirai:"text"`,speed:f32 `mirai:"unit=m/s,label=Above 0"`}
 
 Setup_Params :: struct {
@@ -374,6 +376,9 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
         match_file,planned:=plan(s,call,&files,folder,name,"Match",".match",p.replace);if !planned {return}
         match_id=match_file.id
         info:=anim.MATCH_INFO_DEFAULT;info.animation=library
+        // A loop keeps its phase and a body that does not move stands: searching inside a loop
+        // every tick, or walking against a wall, would restart the same frames and freeze the legs.
+        info.keep_loop_phase,info.stationary_speed=true,SETUP_STATIONARY_SPEED
         info.left_foot,info.right_foot,info.hips=bone(skeleton,body,.Foot_L),bone(skeleton,body,.Foot_R),bone(skeleton,body,.Pelvis)
         sources:=make([]anim.Match_Source,len(clips.locomotion),call.allocator)
         for clip,i in clips.locomotion {

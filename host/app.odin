@@ -163,6 +163,10 @@ App :: struct {
 
     tick_dt:f32,
     max_ticks:int,
+    // The worlds whose game loop ran in this frame and its phases: over them the editor loop runs
+    // only its own functions in those phases.
+    played:[GAME_FRAMES_KEPT]Played_World,
+    played_count:int,
 
     device:^rhi.Device,
     gpu_failure:[GPU_FAILURE_TEXT]u8, // what app_gpu_failure says once the device failed
@@ -470,6 +474,8 @@ app_editor_free :: proc(app:^App,data:rawptr) {world_free(app,data,.Editor)}
 // out larger grows it into, where it is (app_worlds_migrate). Only what it
 // holds takes memory.
 WORLD_RESERVE :: 256<<20
+GAME_FRAMES_KEPT :: 8 // the user's run and those of the agents that step in one frame
+Played_World :: struct {world:rawptr,phases:core.Phases}
 
 @(private)
 world_alloc :: proc(app:^App,place:core.Place) -> rawptr {

@@ -201,6 +201,7 @@ app_frame_begin :: proc(app:^App) -> bool {
     app_shaders_watch(app)
     app.ui_input=ui_input_from_platform(frame)
     ui_input_camera(&app.ui_input,app.camera,app_scene_points(app))
+    app.played_count=0
     app.stats.watch_ms=f32(time.duration_milliseconds(time.tick_since(polled)))
     if frame.window.close_requested {app.quit=true}
     return !app.quit
@@ -279,6 +280,7 @@ app_game_frame :: proc(app:^App,world:rawptr,phases:=ALL_PHASES,step:=false,dt:=
     }
     if record!=nil && input!=nil {record.input=input^}
     t.playing,f.dt=true,f32(lasted)
+    if app.played_count<len(app.played) {app.played[app.played_count]={world,phases};app.played_count+=1}
     run_phase(app,loop,.Input,phases,world,nil)
     for tick in 0..<due {
         if input!=nil && tick>0 {input_settle(input)}
@@ -318,8 +320,17 @@ app_editor_frame :: proc(app:^App,world,editor:rawptr,played:=false) {
     defer base.profile_end(zone)
     loop:=core.Loop.Editor
     if played {
+        // A function of both loops already ran in the phases the game ran this frame: again, it
+        // would see its own work as a change (a source that moved by nothing) and the frame would
+        // not repeat when the game replays its record. Render is the editor's alone.
+        ran:core.Phases
+        for played in app.played[:app.played_count] {if played.world==world {ran+=played.phases}}
         for phase in core.Phase {
-            if phase!=.Fixed {run_phase(app,loop,phase,ALL_PHASES,world,editor)}
+            switch {
+            case phase==.Fixed:
+            case phase in ran && phase!=.Render: run_editor_only(app,phase,world,editor)
+            case: run_phase(app,loop,phase,ALL_PHASES,world,editor)
+            }
         }
         return
     }
@@ -336,6 +347,20 @@ app_editor_frame :: proc(app:^App,world,editor:rawptr,played:=false) {
         input^=tick
     }
     for phase in core.Phase {run_phase(app,loop,phase,ALL_PHASES,world,editor)}
+}
+
+// The functions of the editor loop in a phase that the game loop does not also call, in order.
+@(private)
+run_editor_only :: proc(app:^App,phase:core.Phase,world,editor:rawptr) {
+    info:=app.info
+    if info==nil {return}
+    if f:=core.world_storage_of(app_world_ref(app,world),core.Frame_Time);f!=nil {f.phase=phase}
+    for index in info.order[.Editor][phase] {
+        if index<0 || int(index)>=len(info.steps) {continue}
+        step:=info.steps[index]
+        if .Game in step.loops || step.call==nil {continue}
+        step.call(world,app.shared,editor,app,0)
+    }
 }
 
 @(private)

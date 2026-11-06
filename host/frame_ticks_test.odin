@@ -93,3 +93,43 @@ a_frame_runs_the_ticks_its_time_completes_up_to_its_limit_and_a_record_runs_them
     for _ in 0..<8 {ticks_test_frame(&app,&w,dt=tick)}
     testing.expect_value(t,tracking.total_allocation_count,i64(0))
 }
+
+@(private="file")
+Loops_Test_World :: struct {
+    time:core.Time,
+    frame_time:core.Frame_Time,
+    shared,own:int,
+}
+
+// Over a World the game loop already ran in this frame, the editor loop calls only its own
+// functions in the phases the game ran: one of both loops runs once. In a frame the game did not
+// run (a paused game), the editor loop calls both.
+@(test)
+the_editor_loop_does_not_call_again_what_the_game_loop_ran_on_a_world_in_the_frame :: proc(t:^testing.T) {
+    p,error:=platform.create({headless=true,fixed_dt=1.0/60,pacing=platform.Frame_Pacing{}})
+    testing.expect_value(t,error,platform.Error.None)
+    if p==nil {return}
+    defer platform.destroy(p)
+    storages:=[2]core.Storage_Info{
+        {name="Time",type=core.Time,info=type_info_of(core.Time),offset=offset_of(Loops_Test_World,time)},
+        {name="Frame_Time",type=core.Frame_Time,info=type_info_of(core.Frame_Time),offset=offset_of(Loops_Test_World,frame_time)},
+    }
+    shared_step :: proc(world,_,_,_:rawptr,_:int) {(cast(^Loops_Test_World)world).shared+=1}
+    own_step :: proc(world,_,_,_:rawptr,_:int) {(cast(^Loops_Test_World)world).own+=1}
+    steps:=[2]core.Step_Info{{name="both",phases={.Frame},loops={.Game,.Editor},call=shared_step},{name="own",phases={.Frame},loops={.Editor},call=own_step}}
+    game_order,editor_order:=[1]i32{0},[2]i32{0,1}
+    info:=core.World_Info{storages=storages[:],steps=steps[:]}
+    info.order[.Game][.Frame],info.order[.Editor][.Frame]=game_order[:],editor_order[:]
+    info.loops[.Game][.Frame]=proc(world,shared,editor,app:rawptr) {shared_step(world,shared,editor,app,0)}
+    info.loops[.Editor][.Frame]=proc(world,shared,editor,app:rawptr) {shared_step(world,shared,editor,app,0);own_step(world,shared,editor,app,0)}
+    app:=App{info=&info,platform=p,tick_dt=1.0/60,max_ticks=4}
+    defer delete(app.worlds)
+    w:=Loops_Test_World{frame_time=core.FRAME_TIME_DEFAULT}
+    app_frame_begin(&app)
+    app_game_frame(&app,&w,ALL_PHASES-{.Render})
+    app_editor_frame(&app,&w,nil,played=true)
+    testing.expectf(t,w.shared==1 && w.own==1,"a frame the game ran calls each once: %d and %d",w.shared,w.own)
+    app_frame_begin(&app)
+    app_editor_frame(&app,&w,nil,played=true)
+    testing.expectf(t,w.shared==2 && w.own==2,"a frame without the game calls both: %d and %d",w.shared,w.own)
+}

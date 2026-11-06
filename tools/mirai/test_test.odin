@@ -200,3 +200,15 @@ the_state_changes_are_asked_unless_a_flag_decides :: proc(t:^testing.T) {
     added,seen=test_states_asked({"-define:ODIN_TEST_LOG_LEVEL=warning"})
     testing.expect(t,added && !seen)
 }
+
+// The threads of a test executable reserve 8 MB of stack on every system, unless the call passes
+// linker flags of its own.
+@(test)
+the_threads_of_a_test_executable_get_the_stack_of_the_system_with_the_most :: proc(t:^testing.T) {
+    when ODIN_OS==.Windows {
+        testing.expect_value(t,test_link_flag({"-debug"}),"-extra-linker-flags:/STACK:8388608")
+    } else {
+        testing.expect_value(t,test_link_flag({"-debug"}),"")
+    }
+    testing.expect_value(t,test_link_flag({"-extra-linker-flags:/DEBUG"}),"")
+}

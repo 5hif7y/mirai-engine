@@ -484,6 +484,8 @@ package.
 - Each package has its executable in `bin/tests/`, which is compiled with the turn only if its
   sources changed (the engine's, the project's and the `_test.odin` of the package), the flags or
   the compiler. A package that does not compile is named and the others run.
+- Its threads reserve 8 MB of stack on every system (`TEST_STACK_FLAG`: Windows gives 1 MB),
+  unless the flags of the call bring linker flags of their own.
 - If no test starts or ends within `--timeout` (`TEST_TIMEOUT`; 0 does not watch; a benchmark only
   with `--timeout`), `mirai test` kills the executable and names the ones that were running; also
   if it crashes before the summary. It knows it through `ODIN_TEST_LOG_STATE_CHANGES`: a flag that

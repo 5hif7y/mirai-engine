@@ -323,6 +323,13 @@ test_executable :: proc(root,folder:string) -> string {
     return join(root,"bin","tests",fmt.aprintf("%s%s",test_name(root,folder),EXE))
 }
 
+// The flag that gives the threads of a test executable the stack of the system with the most:
+// none when the flags of the call already pass the linker flags of their own.
+test_link_flag :: proc(flags:[]string) -> string {
+    for flag in flags {if strings.has_prefix(flag,"-extra-linker-flags:") {return ""}}
+    return TEST_STACK_FLAG
+}
+
 // Compiles the test executable of a package when what it was built from changed.
 @(private="file")
 test_build :: proc(root,path,folder,executable,optimization:string,flags:[]string,times:^Test_Times) -> bool {
@@ -337,6 +344,7 @@ test_build :: proc(root,path,folder,executable,optimization:string,flags:[]strin
     if !collections_ok {return false}
     append(&command,..collections)
     append(&command,..flags)
+    if stack:=test_link_flag(flags);stack!="" {append(&command,stack)}
     // What the build is made from besides its sources: the command and the compiler.
     key:=strings.builder_make()
     for argument in command {fmt.sbprintln(&key,argument)}

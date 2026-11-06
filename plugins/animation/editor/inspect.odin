@@ -33,7 +33,7 @@ INSTANCE_PARTS_DEFAULT :: Instance_Parts{.Rig,.Match,.Modifiers,.Actions,.Motion
 POSE_NAMES :: 16
 Instance_Inspect_Params :: struct {
     id:base.Entity_Id `mirai:"optional,label=The id of the entity as scene.inspect gives it; give id or entity"`,
-    entity:[16]u8 `mirai:"text,optional,label=Play or Simulate: the handle of an entity of the game as play.inspect gives it in entity, also of one the game made, which has no id"`,
+    entity:[18]u8 `mirai:"text,optional,label=Play or Simulate: the handle of an entity of the game as play.inspect gives it in entity, also of one the game made, which has no id"`,
     parts:Instance_Parts `mirai:"optional,label=Omitted is all of them but Pose, which needs names"`,
     names:[POSE_NAMES][aa.NODE_PATH_CAPACITY]u8 `mirai:"text,optional,label=Pose: the bones and sockets to place; a bone by path or name or as a part of the body (@hand_r) and a socket by its name"`,
     offset:u32 `mirai:"optional,label=First bone; rig operation or morph target"`,
@@ -137,7 +137,7 @@ Asset_Window :: struct {
 // Each part asked; one the entity lacks holds only available, code and reason.
 Instance_Inspect_Result :: struct {
     id:base.Entity_Id `mirai:"optional"`,
-    entity:[16]u8 `mirai:"text,optional,label=The handle asked"`,
+    entity:[18]u8 `mirai:"text,optional,label=The handle asked"`,
     rig:Instance_Rig `mirai:"optional,label=Clips and bones with their mirror"`,
     match:Instance_Match `mirai:"optional,label=What the motion matching of its .match plays in Play, Simulation or the preview of the editor, the clips it searches and its last search"`,
     modifiers:Instance_Modifiers `mirai:"optional,label=Rig operations and their influence"`,
@@ -361,7 +361,7 @@ instance_inspect :: proc(s:^editor.Session,call:^api.Call) {
     if .Pose in parts {query=pose_query(s,call,w,e,&p.names);if call.failed {return}}
     out:=call.out
     serial.text_write_raw(out,"{");api.write_key(out,"id",true);api.write_id(out,p.id)
-    if handle!="" {api.write_text(out,"entity",fmt.tprintf("%016x",u64(e)))}
+    if handle!="" {api.write_text(out,"entity",fmt.tprintf("0x%016x",u64(e)))}
     for part in parts {
         api.write_key(out,strings.to_lower(fmt.tprintf("%v",part),call.allocator))
         mark:=out.count
@@ -397,8 +397,9 @@ instance_subject :: proc(s:^editor.Session,call:^api.Call,id:base.Entity_Id,hand
     case handle=="": return subject(s,call,id)
     }
     if s.mode==.Edit {authoring_failure(call,"entity","Not_Playing","Play or Simulate","Edit","entity is a handle of the game, which runs only in Play or Simulate",fix="In Edit give id as scene.inspect gives it");return}
-    value,parsed:=serial.text_parse_hex(handle)
-    if !parsed || len(handle)!=16 {authoring_failure(call,"entity","Invalid_Handle","the 16 hexadecimal digits play.inspect gives in entity",handle,"entity is not a handle",fix="Give the handle play.inspect gives in entity");return}
+    digits:=strings.trim_prefix(handle,"0x")
+    value,parsed:=serial.text_parse_hex(digits)
+    if !parsed || len(digits)!=16 {authoring_failure(call,"entity","Invalid_Handle","the 16 hexadecimal digits play.inspect gives in entity, with or without 0x",handle,"entity is not a handle",fix="Give the handle play.inspect gives in entity");return}
     w,e=editor.shown_world(s),core.Entity(value)
     if !core.alive(core.world_entities(w),e) {authoring_failure(call,"entity","Missing_Entity","an entity alive in the game",handle,"The entity is not alive in the game",fix="play.inspect lists the entities alive with their handles");return}
     return w,e,true

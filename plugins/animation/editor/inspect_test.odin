@@ -101,7 +101,8 @@ inspecting_a_rig_the_game_made_names_it_by_its_handle_and_reads_the_last_search_
     if !testing.expectf(t,result.code==0,"%s %s",result.message,result.data) {return}
     // Without its id the rig is as one the game made: only its handle names it.
     core.remove(&f.world.ids,f.rig);pose_bake_test_settle(&f.world,nil,nil)
-    handle:=fmt.tprintf("%016x",u64(f.rig))
+    // As play.inspect gives it.
+    handle:=fmt.tprintf("0x%016x",u64(f.rig))
     Refusal :: struct {request,code,fix:string}
     refused :: proc(t:^testing.T,a:^Authoring_Test,cases:[]Refusal,loc:=#caller_location) {
         for c in cases {

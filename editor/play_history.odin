@@ -63,6 +63,7 @@ History_Slot :: struct {
     tick:u64,
     seconds:f64,
     accumulator:f64, // Frame_Time.accumulator, which the copy does not carry
+    edited:bool,     // made from an edit while paused: the frames before it do not lead to it
 }
 
 @(private)
@@ -90,6 +91,8 @@ history_of :: proc(s:^Session,r:^Run) -> ^Run_History {
         return nil
     }
     h.limit,h.interval=keys,1
+    // A run paused before its first frame, as play.step pauses it, holds from then on.
+    h.held=play_paused(s)
     h.budget=i64(max(p.megabytes,1))*1024*1024
     mem.tracking_allocator_init(&h.tracker,s.app.allocator,s.app.allocator)
     r.history=h
@@ -177,7 +180,7 @@ history_before :: proc(s:^Session,r:^Run) {
     if fingerprint==h.fingerprint || f==nil || t==nil {return}
     history_branch(h)
     if h.count>0 && history_at(h,h.count-1).frame==h.at {h.count-=1}
-    history_key(s,h,w,t)
+    history_key(s,h,w,t,edited=true)
     f.hash=history_hash(w)
     h.fingerprint=fingerprint
 }
@@ -225,7 +228,7 @@ history_frame :: proc(s:^Session,r:^Run,record:^host.Frame_Record) {
 
 // Copies the World of a run as the keyframe of the frame it is at.
 @(private)
-history_key :: proc(s:^Session,h:^Run_History,w:core.World_Ref,t:^core.Time) {
+history_key :: proc(s:^Session,h:^Run_History,w:core.World_Ref,t:^core.Time,edited:=false) {
     zone:base.Profile_Scope
     if host.profile_active(s.app) {zone=base.profile_begin(&s.app.profiler.profile,host.PROFILE_MAIN,"history")}
     defer base.profile_end(zone)
@@ -261,7 +264,7 @@ history_key :: proc(s:^Session,h:^Run_History,w:core.World_Ref,t:^core.Time) {
         h.failed=true
         return
     }
-    slot.frame,slot.tick,slot.seconds=h.serial,t.tick,t.seconds
+    slot.frame,slot.tick,slot.seconds,slot.edited=h.serial,t.tick,t.seconds,edited
     if f:=core.world_storage_of(w,core.Frame_Time);f!=nil {slot.accumulator=f.accumulator}
     h.count+=1
     if !h.measured {
@@ -325,37 +328,97 @@ history_seek :: proc(s:^Session,r:^Run,serial:u64) -> (result:History_Seek) {
         if slot:=history_at(h,n);slot.frame<=serial {key=slot;break}
     }
     if key==nil {return}
+    if (h.at<key.frame || h.at>serial) && !history_load(s,r,key) {return}
     w:=run_ref(s,r)
-    if h.at<key.frame || h.at>serial {
-        if !host.app_world_replace(s.app,r.world,key.world) {return}
-        for n in 0..<h.count {
-            if other:=history_at(h,n);other!=key {core.copy_marks_follow(w,key.marks,other.marks)}
-        }
-        core.copy_marks_follow(w,key.marks,key.marks)
-        if f:=core.world_storage_of(w,core.Frame_Time);f!=nil {f.accumulator=key.accumulator}
-        h.at=key.frame
-    }
-    app:=s.app
-    t:=core.world_storage_of(w,core.Time)
-    kept:=extras_mark(app)
-    phases:=host.ALL_PHASES-{.Render}
-    for h.at<serial && t!=nil {
+    kept:=extras_mark(s.app)
+    for h.at<serial {
         f:=history_frame_of(h,h.at+1)
-        if f==nil {break}
-        // Played again: no sound, no message to the network, no problem counted twice.
-        t.resimulating=true
-        host.app_game_frame(app,r.world,phases,replay=&f.record)
-        t.resimulating=false
-        h.at+=1
+        if f==nil || !history_replay(s,r,f) {break}
         result.replayed+=1
     }
-    extras_drop(app,kept)
+    extras_drop(s.app,kept)
     s.view_cut=true
     h.fingerprint=history_fingerprint(w)
     result.ok=h.at==serial
     reached:=history_frame_of(h,h.at)
     result.matches=result.ok && (reached==nil || reached.hash==history_hash(w))
     return
+}
+
+// The World of a run becomes the keyframe; false without memory, and then it stays as it was.
+@(private)
+history_load :: proc(s:^Session,r:^Run,key:^History_Slot) -> bool {
+    h:=r.history
+    w:=run_ref(s,r)
+    if !host.app_world_replace(s.app,r.world,key.world) {return false}
+    for n in 0..<h.count {
+        if other:=history_at(h,n);other!=key {core.copy_marks_follow(w,key.marks,other.marks)}
+    }
+    core.copy_marks_follow(w,key.marks,key.marks)
+    if f:=core.world_storage_of(w,core.Frame_Time);f!=nil {f.accumulator=key.accumulator}
+    h.at=key.frame
+    return true
+}
+
+// The frame after the one the World of a run is at, played again: no sound,
+// no message to the network, no problem counted twice. What it adds to the
+// frame of the editor is the caller's to drop.
+@(private)
+history_replay :: proc(s:^Session,r:^Run,f:^History_Frame) -> bool {
+    t:=core.world_storage_of(run_ref(s,r),core.Time)
+    if t==nil {return false}
+    t.resimulating=true
+    host.app_game_frame(s.app,r.world,host.ALL_PHASES-{.Render},replay=&f.record)
+    t.resimulating=false
+    r.history.at+=1
+    return true
+}
+
+// The World of a run and where its history was, kept while its past is
+// looked at on it and put back after.
+History_Saved :: struct {
+    world:rawptr,
+    at:u64,
+    edited:bool, // an edit since the frame it is at that the next frame keeps
+    frame:core.Frame_Time,
+    view_cut:bool,
+}
+
+// Copies the World of a run to look at its past and put it back after with
+// history_restore; false without memory, and then nothing changed.
+history_save :: proc(s:^Session,r:^Run) -> (saved:History_Saved,ok:bool) {
+    h:=r.history
+    if h==nil {return}
+    allocator:=s.app.allocator
+    context.allocator=allocator
+    data,error:=mem.alloc(max(s.info.sizes[.World],1),max(s.info.aligns[.World],1),allocator)
+    if error!=nil || data==nil {return}
+    if !s.info.init[.World](data,allocator) || !s.info.copy(data,r.world) {
+        s.info.destroy[.World](data)
+        mem.free(data,allocator)
+        return
+    }
+    w:=run_ref(s,r)
+    saved={world=data,at=h.at,edited=history_fingerprint(w)!=h.fingerprint,view_cut=s.view_cut}
+    if f:=core.world_storage_of(w,core.Frame_Time);f!=nil {saved.frame=f^}
+    return saved,true
+}
+
+// Puts back the World history_save kept, without allocating.
+history_restore :: proc(s:^Session,r:^Run,saved:^History_Saved) {
+    if saved.world==nil {return}
+    s.info.swap(r.world,saved.world)
+    s.info.destroy[.World](saved.world)
+    mem.free(saved.world,s.app.allocator)
+    w:=run_ref(s,r)
+    if f:=core.world_storage_of(w,core.Frame_Time);f!=nil {f^=saved.frame}
+    h:=r.history
+    h.at=saved.at
+    // The swap gave the tables new versions: what says an edit is still there is kept as it was.
+    h.fingerprint=history_fingerprint(w)
+    if saved.edited {h.fingerprint=~h.fingerprint}
+    s.view_cut=saved.view_cut
+    saved.world=nil
 }
 
 // What the history of a run spans: the oldest tick it can go to and the

@@ -84,6 +84,16 @@ probe_copy :: proc(dst,src:rawptr) -> bool {
 }
 
 @(private="file")
+probe_swap :: proc(a,b:rawptr) {
+    x,y:=cast(^Probe_World)a,cast(^Probe_World)b
+    x.entities,y.entities=y.entities,x.entities
+    core.table_swap(&x.ids,&y.ids);core.table_swap(&x.names,&y.names);core.table_swap(&x.transforms,&y.transforms)
+    core.table_swap(&x.parents,&y.parents);core.table_swap(&x.health,&y.health);core.table_swap(&x.seats,&y.seats)
+    x.time,y.time=y.time,x.time;x.input,y.input=y.input,x.input;x.score,y.score=y.score,x.score
+    x.players,y.players=y.players,x.players;x.bindings,y.bindings=y.bindings,x.bindings
+}
+
+@(private="file")
 probe_settle :: proc(data,shared,editor:rawptr) {
     w:=cast(^Probe_World)data
     core.table_settle(&w.ids,&w.entities);core.table_settle(&w.names,&w.entities)
@@ -153,7 +163,7 @@ probe_open :: proc(t:^testing.T,f:^Probe) -> bool {
         {name="Hold_Requests",type=input.Hold_Requests,info=type_info_of(input.Hold_Requests),offset=offset_of(Probe_World,holds)},
     }
     f.names={{type=input.Action,value=i64(PROBE_MOVE),name="move"},{type=input.Action,value=i64(PROBE_JUMP),name="jump"}}
-    f.info={tables=f.tables[:],storages=f.storages[:],names=f.names[:],copy=probe_copy,settle=probe_settle,entities=offset_of(Probe_World,entities)}
+    f.info={tables=f.tables[:],storages=f.storages[:],names=f.names[:],copy=probe_copy,swap=probe_swap,settle=probe_settle,entities=offset_of(Probe_World,entities)}
     f.info.sizes[.World],f.info.aligns[.World]=size_of(Probe_World),align_of(Probe_World)
     f.info.init[.World],f.info.destroy[.World]=probe_init,probe_free
     f.info.loops[.Game][.Fixed]=probe_tick
@@ -192,6 +202,7 @@ probe_close :: proc(f:^Probe) {
     edits_free(&f.edits)
     delete(f.selection.entities)
     delete(f.s.edit_selection.entities)
+    host.app_world_scratch_free(&f.app)
     host.app_world_free(&f.app,f.data)
     delete(f.app.worlds)
     platform.destroy(f.p)
@@ -503,4 +514,127 @@ a_filmstrip_cell_comes_before_the_first_tick_and_every_every_ticks_around_its_en
         error,_:=probe_call(f,"play.capture",c.params)
         testing.expectf(t,error.code==api.INVALID_PARAMS && strings.contains(error.message,c.says),"%s: %v",c.params,error)
     }
+}
+
+// Steps the run of the user ticks times, sampling every tick into trace when given.
+@(private="file")
+probe_steps :: proc(f:^Probe,ticks:int,trace:^Api_Trace=nil) -> bool {
+    run:=Api_Step_Run{timeline=[]Api_Step_Input{{ticks=ticks}}}
+    if trace!=nil {run.sampler={every=1,take=api_trace_take,data=trace}}
+    ran,_,problem:=api_step_run(&f.s,&run,probe_frame)
+    return ran==ticks && problem==""
+}
+
+@(private="file")
+PROBE_HISTORY_TRACE :: `{"name":"Hero","fields":["world_position[0]","components.Probe_Health.points"]}`
+
+@(test)
+the_history_reads_what_a_live_trace_read_and_a_rewound_run_steps_the_same_again :: proc(t:^testing.T) {
+    f:=new(Probe);defer free(f)
+    if !probe_open(t,f) {return}
+    defer probe_close(f)
+    settings:=PLAY_HISTORY_DEFAULT
+    f.s.play_history=&settings
+    r:=run_find(&f.s,0)
+    running:=cast(^Probe_World)r.world
+    // The hero moves with the score, so that its position says each tick.
+    f.info.loops[.Game][.Fixed]=proc(data,shared,editor,app:rawptr) {
+        probe_tick(data,shared,editor,app)
+        w:=cast(^Probe_World)data
+        w.transforms.values[0].position.x=f32(w.score.points)
+    }
+    testing.expect(t,probe_steps(f,1))
+    r.history.interval=4
+    call:=api.Call{allocator=context.temp_allocator,out=&f.out}
+    p:=Api_Play_Trace{every=1}
+    copy(p.name[:],"Hero")
+    copy(p.fields[0][:],"world_position[0]")
+    copy(p.fields[1][:],"components.Probe_Health.points")
+    live:Api_Trace
+    start:=running.time.tick
+    testing.expect_value(t,api_trace_read(&f.s,&call,run_ref(&f.s,r),&p,PROBE_HISTORY_TRACE,12,&live),"")
+    testing.expect(t,probe_steps(f,12,&live))
+    rows:=strings.clone(string(serial.writer_bytes(&live.rows)),context.temp_allocator)
+    newest,points:=running.time.tick,running.score.points
+    // The same rows from the past, and the game where it was.
+    error,text:=probe_call(f,"play.history",fmt.tprintf(`{{"from":%d,"to":%d,"trace":%s}}`,start,newest,PROBE_HISTORY_TRACE))
+    testing.expect_value(t,error.code,0)
+    testing.expect(t,strings.contains(text,fmt.tprintf(`"rows":[%s]}}`,rows)),text)
+    api_result_shape_expect(t,text,Api_Play_History_Result)
+    testing.expect(t,running.time.tick==newest && running.score.points==points && r.history.at==r.history.serial)
+    // Every other tick from tick 7 on.
+    error,text=probe_call(f,"play.history",`{"from":7,"trace":{"name":"Hero","fields":["world_position[0]"],"every":2}}`)
+    testing.expect_value(t,error.code,0)
+    testing.expect(t,strings.contains(text,`"rows":[{"tick":7,"values":[7]},{"tick":9,"values":[9]},{"tick":11,"values":[11]},{"tick":13,"values":[13]}]`),text)
+    // Rewound to tick 5, the run steps the same ticks again.
+    error,_=probe_call(f,"play.seek",`{"tick":5}`)
+    testing.expect_value(t,error.code,0)
+    again:Api_Trace
+    testing.expect_value(t,api_trace_read(&f.s,&call,run_ref(&f.s,r),&p,PROBE_HISTORY_TRACE,8,&again),"")
+    testing.expect(t,probe_steps(f,8,&again))
+    testing.expect(t,strings.has_suffix(rows,string(serial.writer_bytes(&again.rows))),string(serial.writer_bytes(&again.rows)))
+    // More rows than a call holds go on from next.
+    testing.expect(t,probe_steps(f,300))
+    error,text=probe_call(f,"play.history",`{"trace":{"storage":"Probe_Score","fields":["points"]}}`)
+    testing.expect_value(t,error.code,0)
+    oldest,last,_,_,_:=history_span(r.history)
+    next:=oldest+API_TRACE_ROWS
+    testing.expect(t,strings.contains(text,fmt.tprintf(`"next": %d`,next)) && strings.count(text,`{"tick":`)==API_TRACE_ROWS,text)
+    error,text=probe_call(f,"play.history",fmt.tprintf(`{{"from":%d,"trace":{{"storage":"Probe_Score","fields":["points"]}}}}`,next))
+    testing.expect_value(t,error.code,0)
+    testing.expect(t,strings.contains(text,`"next": 0`) && strings.count(text,`{"tick":`)==int(last-next)+1,text)
+    // An edit while paused is where the frames after it start, not where the ones before lead.
+    core.get(&running.health,f.hero).points=9
+    testing.expect(t,probe_steps(f,1))
+    error,text=probe_call(f,"play.history",`{"verify":true}`)
+    testing.expect_value(t,error.code,0)
+    testing.expect(t,strings.contains(text,`"diverged": false`),text)
+    refused:=[?]struct{params,says:string}{
+        {`{"from":9,"to":8,"trace":{"storage":"Probe_Score","fields":["points"]}}`,"from 9 is after to 8"},
+        {`{"trace":{"storage":"Probe_Score","fields":["lives"]}}`,"it has"},
+    }
+    for c in refused {
+        error,_=probe_call(f,"play.history",c.params)
+        testing.expectf(t,error.code==api.INVALID_PARAMS && strings.contains(error.message,c.says),"%s: %v",c.params,error)
+    }
+}
+
+@(test)
+verify_says_the_first_tick_and_field_where_playing_the_past_again_differs :: proc(t:^testing.T) {
+    f:=new(Probe);defer free(f)
+    if !probe_open(t,f) {return}
+    defer probe_close(f)
+    settings:=PLAY_HISTORY_DEFAULT
+    f.s.play_history=&settings
+    r:=run_find(&f.s,0)
+    running:=cast(^Probe_World)r.world
+    // Its seventh tick reads the ticks the application ran and its eleventh moves the hero by
+    // them: played again, they are more.
+    f.info.loops[.Game][.Fixed]=proc(data,shared,editor,app:rawptr) {
+        probe_tick(data,shared,editor,app)
+        w:=cast(^Probe_World)data
+        ran:=(cast(^host.App)app).stats.ticks
+        if w.time.tick==6 {w.score.points+=int(ran)}
+        if w.time.tick==10 {w.transforms.values[0].position.x+=f32(ran)}
+    }
+    testing.expect(t,probe_steps(f,1))
+    r.history.interval=4
+    testing.expect(t,probe_steps(f,15))
+    newest,points:=running.time.tick,running.score.points
+    error,text:=probe_call(f,"play.history",`{"to":5,"verify":true}`)
+    testing.expect_value(t,error.code,0)
+    testing.expect(t,strings.contains(text,`"verify": {"frames": 4, "diverged": false`),text)
+    // The score differs at the copy of tick 9, where the frames from tick 5 lead.
+    error,text=probe_call(f,"play.history",`{"verify":true}`)
+    testing.expect_value(t,error.code,0)
+    testing.expect(t,strings.contains(text,`"diverged": true, "tick": 9, "since": 5, "compared": 9`),text)
+    testing.expect(t,strings.contains(text,`"storage": "Probe_Score", "field": "points"`),text)
+    // The hero, at the first tick its transforms differ.
+    error,text=probe_call(f,"play.history",`{"from":10,"verify":true}`)
+    testing.expect_value(t,error.code,0)
+    testing.expect(t,strings.contains(text,`"diverged": true, "tick": 11, "since": 9, "compared": 13`),text)
+    testing.expect(t,strings.contains(text,fmt.tprintf(`"entity": "0x%016x", "name": "Hero"`,u64(f.hero))),text)
+    testing.expect(t,strings.contains(text,`position[0]"`),text)
+    api_result_shape_expect(t,text,Api_Play_History_Result)
+    testing.expect(t,running.time.tick==newest && running.score.points==points && r.history.at==r.history.serial)
 }

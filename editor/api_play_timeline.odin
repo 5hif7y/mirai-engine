@@ -393,6 +393,13 @@ api_play_step_write :: proc(s:^Session,call:^api.Call,r:^Run,ran:int,met:bool,tr
     serial.text_write(out,sc,index,mem.ptr_to_bytes(&result),.Line)
     if trace==nil {return}
     out.count-=1 // the brace that closes it
+    api_trace_write(s,out,trace)
+    serial.write_u8(out,'}')
+}
+
+// The trace of a result, as its last key: its columns and its rows.
+@(private)
+api_trace_write :: proc(s:^Session,out:^serial.Writer,trace:^Api_Trace) {
     api.write_key(out,"trace");serial.text_write_raw(out,`{"columns":[`)
     first:=true
     for d in 0..<(trace.storage>=0?1:trace.count) {
@@ -411,5 +418,5 @@ api_play_step_write :: proc(s:^Session,call:^api.Call,r:^Run,ran:int,met:bool,tr
     }
     serial.text_write_raw(out,`],"rows":[`)
     serial.text_write_raw(out,string(serial.writer_bytes(&trace.rows)))
-    serial.text_write_raw(out,"]}}")
+    serial.text_write_raw(out,"]}")
 }

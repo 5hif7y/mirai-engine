@@ -31,6 +31,8 @@ difference with the catalog, it rules.
   [`mirai record`](references/api.md#mirai-record).
 - Checking a motion in one or two calls (an input timeline, a table of values per tick, one
   image of cells around an entity): [`play.step` and `play.capture`](references/methods.md#play).
+- Values of entities at past ticks without changing the game, and whether replaying the past
+  repeats it (first tick and field that differ): [`play.history`](references/methods.md#play).
 - Capturing the world without UI and comparing it with a reference:
   [`mirai capture`](references/api.md#mirai-capture); measuring PNGs, cropping them, enlarging
   them or reading their pixels: [`mirai image`](references/image.md).
@@ -71,10 +73,12 @@ difference with the catalog, it rules.
    the one `scene.inspect` with `root` gives.
 4. Verify with `scene.inspect` or `editor.capture`; undo with `history.undo`. A method that fails
    changes nothing.
-5. After changing code, `mirai session restart [project]` builds and opens another session with
+5. Debugging a game: `play.history` with `trace` reads what happened at past ticks, `verify`
+   finds nondeterminism, and `play.seek` rewinds the run there to step it again.
+6. After changing code, `mirai session restart [project]` builds and opens another session with
    the same arguments; `mirai build editor` also restarts it if it has to replace the engine
    binaries it runs ([sessions](references/api.md#sessions)).
-6. Close with `engine.shutdown` (`discard` to discard unsaved changes) or with
+7. Close with `engine.shutdown` (`discard` to discard unsaved changes) or with
    `mirai session stop`.
 
 ### Checking an image
@@ -146,7 +150,9 @@ difference with the catalog, it rules.
   what_the_mouse_does_while_a_play_is_paused_does_not_reach_it_when_it_resumes
   the_strip_plays_the_past_again_at_the_pace_of_the_clock_with_the_game_paused
   the_keyframes_of_a_history_fit_its_memory_and_span_its_time
-  a_run_keeps_no_history_when_it_is_off_or_on_the_network`, and the copy it keeps:
+  a_run_keeps_no_history_when_it_is_off_or_on_the_network
+  the_history_reads_what_a_live_trace_read_and_a_rewound_run_steps_the_same_again
+  verify_says_the_first_tick_and_field_where_playing_the_past_again_differs`, and the copy it keeps:
   `mirai test plugins/physics/runtime
   a_kept_copy_takes_what_the_simulation_uses_and_copies_back_to_the_same_steps`; the wide image
   before and after the tonemap, with GPU and validation:

@@ -51,38 +51,10 @@ Api_Play_Record_Result :: struct {
     audio_frames:u64,
 }
 
-Api_Play_Seek_Params :: struct {
-    tick:u64 `mirai:"label=The tick to go to; when no frame ended on it the newest before it"`,
-    player:int `mirai:"optional,min=0,max=3,label=The run of that player of a game a turn plays on the network"`,
-}
-
-Api_Play_Seek_Result :: struct {
-    tick:u64 `mirai:"label=The tick reached"`,
-    seconds:f64,
-    paused:bool,
-    replayed:int `mirai:"label=Frames played again to get there from a keyframe or from where the game was"`,
-    matches:bool `mirai:"label=The frames played again left the World as when they played; false: the game does not repeat itself or something outside its frames changed it (an edit or a move of the simulation)"`,
-}
-
-Api_Play_History_Result :: struct {
-    on:bool `mirai:"label=The run keeps its past"`,
-    tick:u64 `mirai:"label=Where the run is"`,
-    oldest,newest:u64 `mirai:"label=The ticks play.seek goes to"`,
-    oldest_seconds,newest_seconds:f64,
-    frames:int `mirai:"label=Frames kept with what they gave the World"`,
-    keyframes:int `mirai:"label=Copies of the World kept"`,
-    capacity:int `mirai:"label=The copies that fit in the time and the memory of the history"`,
-    interval:u64 `mirai:"label=Ticks between two copies: going to a tick plays again at most these"`,
-    megabytes:f32 `mirai:"label=What the copies take"`,
-    reason:[160]u8 `mirai:"text,label=Why it keeps none, when it does not"`,
-}
-
 @(private)
 api_play_record_register :: proc(s:^Session,st:^Api_State) {
     record_default:=Api_Play_Record_Params{format=.Png16,fps=30,seconds=2,width=1280,height=720,audio=true,sheet=16}
     api_register(s,st,{name="play.record",summary="Records the game of the caller as a sequence of images and its sound, frame after frame at a fixed rate whatever the clock: it pauses the game, advances it 1/fps each frame and draws it alone through its camera. Ends paused.",params=Api_Play_Record_Params,result=Api_Play_Record_Result,defaults=&record_default,run=api_play_record})
-    api_register(s,st,{name="play.seek",summary="Takes the game of the caller to a tick it played, paused, to look at it and play on from there: the copy of the World before it and the frames between played again.",params=Api_Play_Seek_Params,result=Api_Play_Seek_Result,run=api_play_seek})
-    api_register(s,st,{name="play.history",summary="The ticks the game of the caller keeps to go back to, and what they take.",params=Api_Play_Player_Params,result=Api_Play_History_Result,flags={.Read_Only},run=api_play_history})
 }
 
 // A frame on its way to a file, and to its tile of the sheet.
@@ -338,59 +310,6 @@ api_play_record :: proc(s:^Session,call:^api.Call) {
     result.real_seconds=time.duration_seconds(time.tick_since(began))
     if t:=core.world_storage_of(run_ref(s,r),core.Time);t!=nil {result.tick_to,result.seconds=t.tick,t.seconds-start.seconds}
     if p.audio {result.sample_rate,result.channels,result.audio_frames=rate,channels,wav.frames}
-}
-
-@(private)
-api_play_seek :: proc(s:^Session,call:^api.Call) {
-    p:=api.call_params(call,Api_Play_Seek_Params)
-    r,own:=api_play_run(s,call,p.player)
-    if r==nil {api.call_fail(call,api.SERVER_ERROR,"No game is playing; play.start first");return}
-    if !own {api_play_refused(call);return}
-    if reason:=history_reason(s,r);reason!="" {api.call_fail(call,api.SERVER_ERROR,reason);return}
-    oldest,newest,_,_,_:=history_span(r.history)
-    serial:=history_frame_for(r.history,p.tick)
-    if serial==0 {
-        api.call_failf(call,api.INVALID_PARAMS,"tick %d is older than the history keeps: it goes to ticks %d to %d (play.history); Play_History.seconds and megabytes of the preferences keep more",p.tick,oldest,newest)
-        return
-    }
-    if r.owner==0 && !play_paused(s) {play_pause(s,true)}
-    seek:=history_seek(s,r,serial)
-    if !seek.ok {api.call_fail(call,api.SERVER_ERROR,"No memory to go back: the game stays where it was");return}
-    result:=api.call_result(call,Api_Play_Seek_Result)
-    if t:=core.world_storage_of(run_ref(s,r),core.Time);t!=nil {result.tick,result.seconds=t.tick,t.seconds}
-    result.paused=r.owner!=0 || play_paused(s)
-    result.replayed,result.matches=seek.replayed,seek.matches
-}
-
-@(private)
-api_play_history :: proc(s:^Session,call:^api.Call) {
-    p:=api.call_params(call,Api_Play_Player_Params)
-    r,_:=api_play_run(s,call,p.player)
-    result:=api.call_result(call,Api_Play_History_Result)
-    if r==nil {
-        api_text_put(result.reason[:],"No game is playing")
-        return
-    }
-    if t:=core.world_storage_of(run_ref(s,r),core.Time);t!=nil {result.tick=t.tick}
-    if reason:=history_reason(s,r);reason!="" {
-        api_text_put(result.reason[:],reason)
-        return
-    }
-    h:=r.history
-    result.on=true
-    result.oldest,result.newest,result.oldest_seconds,result.newest_seconds,_=history_span(h)
-    result.frames,result.keyframes,result.capacity,result.interval=h.frame_count,h.count,h.limit,h.interval
-    result.megabytes=f32(f64(history_bytes(h))/(1024*1024))
-}
-
-// Why a run has no past to go back to; empty when it has one.
-@(private)
-history_reason :: proc(s:^Session,r:^Run) -> string {
-    if r.history!=nil && r.history.count>0 {return ""}
-    if s.play_history==nil || !s.play_history.on {return "The history of Play is off: Play_History.on in the preferences of the editor turns it on"}
-    if network:=core.world_storage_of(run_ref(s,r),core.Network);network!=nil && network.role!=.Standalone {return "A game on the network keeps no history: its past belongs to its server"}
-    if r.history_off {return "This run keeps no history: there was no memory for it"}
-    return "The game has not run a tick yet: play.step first"
 }
 
 // The actions each local seat holds in the next tick the game runs.

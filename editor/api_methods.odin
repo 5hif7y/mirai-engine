@@ -362,6 +362,7 @@ api_methods_register :: proc(s:^Session,st:^Api_State) {
     test_defaults:=Api_Build_Test_Params{seconds=600}
     api_register(s,st,{name="build.test",summary="Builds and runs the @(test) procedures of a package of the project against the engine it uses, without loading anything; answers when they end, with each failed test and what it logged.",params=Api_Build_Test_Params,defaults=&test_defaults,result_schema=API_TEST_RESULT,flags={.Read_Only},run=api_build_test})
     api_play_record_register(s,st)
+    api_play_history_register(s,st)
     api_scene_register(s,st)
     api_names_register(s,st)
     api_simulation_register(s,st)

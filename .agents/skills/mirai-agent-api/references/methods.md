@@ -566,6 +566,13 @@ result of `play.status`, `paused`, `simulating` and `input_released` are the use
   ticks, paused, playing the frames again from the previous copy; `matches` false says that what
   was played again is not what was seen. Fails with the range if the tick is older
   ([history](../../mirai-editor/references/editor.md#play)).
+  - Both `trace` and `verify` play the kept frames again on the run's World and put it back after:
+    the game, paused or playing, stays as it was. A trace takes the syntax of `play.step`'s and
+    gives a row per kept frame that reached `every` ticks past the previous row (a frame that ran
+    several ticks shows the last); past `API_TRACE_ROWS` rows, `next` is the `from` that goes on.
+  - `verify` replays each span between keyframes and compares the transforms hash of every frame
+    and, at the next keyframe, every entity and storage as `play.inspect` writes them, stopping at
+    the first span that differs. A keyframe made from an edit while paused is not compared.
 - `play.player`: fails without a run. The seat is that of the focused local player
   (`input.focused`); body and camera come from `Drivable` and `render.View_Camera`. The AI context
   reads the player with the same `play_player_snapshot`.

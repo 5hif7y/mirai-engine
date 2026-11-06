@@ -229,6 +229,7 @@ nodes_report_events_and_write_their_bound_fields :: proc(t:^testing.T) {
     test_frame(&ctx,&input,test_hud_build,&s)
     clicked,count:=test_hud_events(&s,.Clicked)
     testing.expect_value(t,count,1)
+    clicked.rect={}
     testing.expect_value(t,clicked,Tree_Event{name=base.name_hash("resume"),node=5,kind=.Clicked,item=-1})
     _,count=test_hud_events(&s,.Released)
     testing.expect_value(t,count,1)
@@ -243,6 +244,8 @@ nodes_report_events_and_write_their_bound_fields :: proc(t:^testing.T) {
     testing.expect(t,muted(&s))
     change,changes:=test_hud_events(&s,.Changed)
     testing.expect_value(t,changes,1)
+    testing.expect_value(t,change.rect,mute)
+    change.rect={}
     testing.expect_value(t,change,Tree_Event{name=base.name_hash("mute"),node=6,kind=.Changed,on=true,item=-1,value=1})
     s.values.muted=change.on
     test_press(&input);test_release(&input)

@@ -575,6 +575,7 @@ Tree_Event :: struct {
     from_item:i32,
     from_owner:u64, // Dropped: Context.owner while the tree of the node dragged was built
     text:[TREE_EVENT_TEXT]u8, // Changed and Submitted by a Field: what it holds
+    rect:Rect, // where the node was laid out in the last frame, in layout units of its surface; zero before
 }
 TREE_EVENT_TEXT :: 256
 
@@ -622,6 +623,8 @@ tree_box :: proc(node:^Node,style:^Node_Style,id:Id) -> Box {
 
 @(private)
 Tree_Build :: struct {
+    ctx:^Context,
+    element:Id, // of the node being built: what its events say where it is
     tree:^Widget_Tree,
     instance:^Tree_Instance,
     desc:Tree_Build_Desc,
@@ -636,7 +639,7 @@ Tree_Build :: struct {
 // Builds the widgets of a tree where the call is made. The layer of a node
 // that floats counts from the layer the tree is built in.
 tree_build :: proc(ctx:^Context,tree:^Widget_Tree,instance:^Tree_Instance,desc:Tree_Build_Desc) -> Tree_Build_Result {
-    b:=Tree_Build{tree=tree,instance=instance,desc=desc,floor=int(ctx.layer),ghost=-1}
+    b:=Tree_Build{ctx=ctx,tree=tree,instance=instance,desc=desc,floor=int(ctx.layer),ghost=-1}
     tree_instance_texts(ctx,tree,instance)
     tree_kept_invalidate(tree,instance,desc.changed)
     b.tracks=ctx.layout.track_count
@@ -703,7 +706,10 @@ tree_play :: proc(tree:^Widget_Tree,instance:^Tree_Instance,node,anim:u64,item:i
 
 @(private)
 tree_emit :: proc(b:^Tree_Build,event:Tree_Event) {
-    if b.count<len(b.desc.events) {b.desc.events[b.count]=event;b.count+=1} else {b.dropped+=1}
+    if b.count>=len(b.desc.events) {b.dropped+=1;return}
+    b.desc.events[b.count]=event
+    if b.ctx!=nil && b.element!=0 {b.desc.events[b.count].rect,_=widget_rect(b.ctx,b.element)}
+    b.count+=1
 }
 
 @(private)
@@ -749,6 +755,9 @@ tree_build_node :: proc(ctx:^Context,b:^Tree_Build,index:int,values:rawptr,copy:
     slot:=int(instance.slots[index])+copy
     state:=&instance.slot[slot]
     node_id:=tree_node_id(ctx,node,index)
+    outer:=b.element
+    b.element=node_id
+    defer b.element=outer
     shown:=bound_number(values,bound.visible)!=0 if bound.visible.bound else node.flags&{.Collapsed,.Invisible}=={}
     // The ghost of a drag is built as it is: it can be a node the tree hides.
     if index==b.ghost {shown=true}

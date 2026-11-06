@@ -142,6 +142,8 @@ the_buttons_of_a_list_report_their_element :: proc(t:^testing.T) {
     count:=0
     for event in s.events[:s.event_count] {if event.kind==.Clicked {clicked=event;count+=1}}
     testing.expect_value(t,count,1)
+    testing.expect(t,clicked.rect.w>0,"it says where its button is")
+    clicked.rect={}
     testing.expect_value(t,clicked,Tree_Event{name=base.name_hash("use"),node=1,kind=.Clicked,item=2})
 }
 

@@ -492,7 +492,7 @@ screen_build :: proc(gui:^Gui,ctx:^ui.Context,s:^Surface,instance:^Instance,entr
         core.report(problems,entry.entity,"gui.events","%d events of the interface of this entity were lost in a frame: its widgets gave more than %d at once; give the interface fewer widgets that change in one frame",built.dropped,EVENT_BATCH)
     }
     for event in events[:built.count] {
-        append(&gui.pending,event_of(entry.entity,event))
+        append(&gui.pending,event_of(entry.entity,event,1 if entry.world else ctx.scale))
         if event.kind==.Changed {instance.edited,instance.edited_at=true,gui.deliveries}
     }
     if entry.top && entry.back && !ctx.escape_used && (.Escape in ctx.input.keys_pressed || .Cancel in ctx.input.pad) {
@@ -546,10 +546,11 @@ instance_built :: proc "contextless" (instance:^Instance,entry:^Planned,built:ui
     instance.top=entry.top
 }
 
-event_of :: proc "contextless" (entity:core.Entity,e:ui.Tree_Event) -> UI_Event {
+event_of :: proc "contextless" (entity:core.Entity,e:ui.Tree_Event,scale:=f32(1)) -> UI_Event {
     return {
         entity=entity,name=e.name,kind=UI_Event_Kind(e.kind),on=e.on,item=e.item,value=e.value,
         from=e.from,from_item=e.from_item,from_entity=core.Entity(e.from_owner),text=e.text,
+        rect=[4]f32{e.rect.x,e.rect.y,e.rect.w,e.rect.h}*scale,
     }
 }
 

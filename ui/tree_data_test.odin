@@ -254,16 +254,17 @@ the_programs_of_a_tree_follow_its_styles :: proc(t:^testing.T) {
 }
 
 // A node that holds none floats too: a Button over the corner of its card,
-// not in the flow under the card's text, and it takes the pointer there.
+// not in the flow under the card's text; it takes the pointer there, and its
+// events say where it is.
 @(test)
-a_leaf_floats_from_its_parent_and_takes_the_pointer_there :: proc(t:^testing.T) {
+a_leaf_floats_from_its_parent_and_its_events_say_where :: proc(t:^testing.T) {
     texts:=make([dynamic]u8,context.temp_allocator)
     nodes:=[3]Tree_Node{
         tree_node_record(&texts,-1,{kind=.Box,name="card",layout={width=fixed(100),height=fixed(100),padding=padding_all(10),direction=.Column},float={to=.Surface,offset={50,50}}}),
         tree_node_record(&texts,0,{kind=.Text,name="label",text="Wood",layout={height=fixed(60)}}),
         tree_node_record(&texts,0,{kind=.Button,name="pick",layout={width=fixed(100),height=fixed(100)},float={to=.Parent,layer=1}}),
     }
-    Scene :: struct {tree:Widget_Tree,instance:Tree_Instance,events:[8]Tree_Event,count:int}
+    Scene :: struct {tree:Widget_Tree,instance:Tree_Instance,events:[8]Tree_Event,count:int,at:Rect}
     scene:Scene
     testing.expect(t,tree_load(&scene.tree,{text=texts[:],nodes=nodes[:],styles={{}}},{}))
     defer tree_destroy(&scene.tree)
@@ -274,7 +275,7 @@ a_leaf_floats_from_its_parent_and_takes_the_pointer_there :: proc(t:^testing.T) 
     build :: proc(ctx:^Context,user:rawptr) {
         s:=cast(^Scene)user
         result:=tree_build(ctx,&s.tree,&s.instance,{events=s.events[:]})
-        for e in s.events[:result.count] {if e.kind==.Clicked {s.count+=1}}
+        for e in s.events[:result.count] {if e.kind==.Clicked {s.count+=1;s.at=e.rect}}
     }
     ctx:Context
     testing.expect(t,context_init(&ctx,TEST_SMALL))
@@ -290,4 +291,5 @@ a_leaf_floats_from_its_parent_and_takes_the_pointer_there :: proc(t:^testing.T) 
     test_release(&input)
     test_frame(&ctx,&input,build,&scene)
     testing.expect_value(t,scene.count,1)
+    testing.expect_value(t,scene.at,pick)
 }

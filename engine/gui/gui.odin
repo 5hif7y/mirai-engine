@@ -201,6 +201,7 @@ UI_Event :: struct {
     from_item:i32,
     from_entity:core.Entity,
     text:[ui.TREE_EVENT_TEXT]u8,
+    rect:[4]f32,        // where the node was in the last frame: x, y, width, height in window points on a UI_Screen, in layout units of its panel on a World_Widget; zero before
 }
 
 // The events of the frame that was drawn last, for the first fixed tick that

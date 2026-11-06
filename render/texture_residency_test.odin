@@ -187,3 +187,21 @@ a_stream_forgets_its_texture_with_a_new_stamp :: proc(t: ^testing.T) {
 	testing.expect(t, state.residency.streams[0].levels == 0 && state.residency.streams[0].stamp == stamp + 1)
 	testing.expect(t, state.residency.stale)
 }
+
+// The views of the window see textures from the camera of the detail while
+// it holds; one drawn into a texture keeps its own.
+@(test)
+the_detail_camera_sees_the_textures_of_the_views_of_the_window :: proc(t: ^testing.T) {
+	r := new(Renderer)
+	defer free(r)
+	game := Camera{position = {4, 2, 9}, forward = {0, 0, -1}, up = {0, 1, 0}, fov_y = 60, near = 0.1}
+	editor := Camera{position = {4, 2, 1}, forward = {0, 0, -1}, up = {0, 1, 0}, fov_y = 60, near = 0.1}
+	views := [2]Frame_View{{camera = editor, rect = {0, 0, 800, 600}}, {camera = editor, rect = {0, 0, 256, 256}, texture = 1}}
+	for on in ([2]bool{false, true}) {
+		textures_views_record(r, {camera = editor, detail = {camera = game, on = on}, views = views[:]})
+		seen := r.textures.residency.views[:r.textures.residency.view_count]
+		testing.expect_value(t, len(seen), 2)
+		testing.expectf(t, seen[0].position == (game.position if on else editor.position), "the window sees from the game camera: %v", on)
+		testing.expect(t, seen[1].position == editor.position, "a view into a texture sees from its own")
+	}
+}

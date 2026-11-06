@@ -401,8 +401,19 @@ Renderer_Desc :: struct {
 }
 
 // What one frame draws besides the scene.
+// A camera that chooses, in place of the views of the window, the detail
+// they draw: the levels of the meshes, the cuts rays trace and the levels of
+// the textures. In a frame no window shows (a capture of what it shows) it
+// is that of every view. What a paused game saw keeps its detail while the eye of the
+// editor looks at it from elsewhere.
+Frame_Detail :: struct {
+	camera: Camera,
+	on:     bool,
+}
+
 Frame_Desc :: struct {
 	camera: Camera,
+	detail: Frame_Detail,
 	camera_cut:bool,
 	carried: Mat4, // as Frame_View.carried, for the camera of a frame without views
 	inspection: View_Inspection, // as Frame_View.inspection, for the view of a frame without views
@@ -560,6 +571,7 @@ Renderer :: struct {
 	world_key:            u64,  // the world the light of ddgi is of (scene_world)
 	origin:               Vec3, // what every place the renderer keeps is relative to (origin.odin), a multiple of ORIGIN_STEP
 	frame_views:          [VIEW_CAPACITY + TEXTURE_VIEW_CAPACITY]Frame_View, // those of the frame being recorded, relative to the origin
+	frame_detail:         Frame_Detail, // of the frame being recorded, relative to the origin
 	world_known:          bool, // scene_world named one
 	world_kept:           bool, // the world shown is shown again with its light: the scene_set that follows changes none of it
 	world_switched:       bool, // the next frame follows another world: it keeps the delta time of the one before
@@ -1731,6 +1743,8 @@ frame_view_constants :: proc(f: ^Gpu_Frame, c: Camera, view, proj, unjittered: M
 	f.depth_plane = v4(forward, -linalg.dot(forward, c.position))
 	pixel := 2 / (abs(unjittered[1, 1]) * height)
 	f.footprint = {pixel * b, -pixel * a}
+	f.detail_eye = {c.position.x, c.position.y, c.position.z, max(c.near, 0.001)}
+	f.detail_footprint = {f.footprint.x, f.footprint.y, 0, 0}
 	f.clip_plane = c.clip_plane
 	f.layers = c.layers & LAYERS_ALL if c.layers & LAYERS_ALL != 0 else LAYERS_ALL
 	if c.own != 0 {

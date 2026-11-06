@@ -433,6 +433,7 @@ renderer_frame :: proc(r:^Renderer,frame:Frame_Desc) -> bool {
         // The cuts rays trace follow the eye of the first view of the window, as the probes.
         eye:=frame.camera.position
         for view in frame.views {if view.texture==0 && !view.disabled {eye=view.camera.position;break}}
+        if frame.detail.on {eye=frame.detail.camera.position}
         ray_cuts_update(r,eye)
     }
     if r.settings.gi_enabled && !frame.offscreen && !frame.ui_only {
@@ -752,6 +753,14 @@ view_begin :: proc(p: ^Pass) -> bool {
 		texturing = {clamp(math.log2(f32(t.width) / f32(t.output_width)), -2, 0), settings.reflection_roughness if p.use_reflections else 0, f32(s.tlas_node_count), f32(s.glass_node_count)},
 	}
 	frame_view_constants(&f, camera, view, shift * proj, proj, forward, f32(t.height))
+	// The detail is that of the views of the window, also those of a frame that captures it.
+	if detail := r.frame_detail; detail.on && (!p.texture || p.offscreen) {
+		_, chosen, _ := camera_matrices(detail.camera, f32(t.width) / f32(t.height), camera_reach(detail.camera, low, high))
+		pixel := 2 / (abs(chosen[1, 1]) * f32(t.height))
+		eye := detail.camera.position
+		f.detail_eye = {eye.x, eye.y, eye.z, max(detail.camera.near, 0.001)}
+		f.detail_footprint = {pixel * chosen[3, 3], -pixel * chosen[3, 2], 0, 0}
+	}
 	f.origin = origin_cells(r.origin)
 	f.scene_box = {{low.x, low.y, low.z, 0}, {high.x, high.y, high.z, 0}}
 	if !p.view.has_previous {p.view.prev_view_proj, p.view.prev_depth_plane, p.view.prev_eye = unjittered, f.depth_plane, camera.position}

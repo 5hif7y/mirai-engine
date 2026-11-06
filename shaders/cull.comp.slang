@@ -31,13 +31,13 @@
 uint2 instance_clusters(Instance inst, Mesh mesh) {
     if ((mesh.flags & MESH_FLAG_LEVEL0) != 0u) return mesh_level_clusters(mesh, 0u);
     float scale = instance_scale(inst);
-    float3 eye = frame.camera_position.xyz;
+    float3 eye = frame.detail_eye.xyz;
     float3 low = inst.bounds_min.xyz, high = inst.bounds_max.xyz;
-    float near = max(length(eye - clamp(eye, low, high)) - mesh.lod_reach * scale, frame.camera_position.w);
+    float near = max(length(eye - clamp(eye, low, high)) - mesh.lod_reach * scale, frame.detail_eye.w);
     float far = length(select(eye * 2.0 < low + high, high, low) - eye);
     float threshold = frame.cut.x;
-    float least = threshold * (frame.footprint.x + frame.footprint.y * near) / scale * 0.999;
-    float most = threshold * (frame.footprint.x + frame.footprint.y * far) / scale * 1.001;
+    float least = threshold * (frame.detail_footprint.x + frame.detail_footprint.y * near) / scale * 0.999;
+    float most = threshold * (frame.detail_footprint.x + frame.detail_footprint.y * far) / scale * 1.001;
     uint first = mesh.level_count, last = 0u;
     for (uint level = 0u; level < mesh.level_count; level++) {
         float2 errors = mesh_level_errors(mesh, level);

@@ -14,10 +14,11 @@ float instance_scale(Instance inst) {
     return max(length(c0), max(length(c1), length(c2)));
 }
 
-// The pixels an error of the world spans at the point of a sphere nearest the eye.
+// The pixels an error of the world spans at the point of a sphere nearest the
+// eye the detail is chosen from.
 float lod_pixels(float3 center, float radius, float error) {
-    float distance = max(length(center - frame.camera_position.xyz) - radius, frame.camera_position.w);
-    return error / max(frame.footprint.x + frame.footprint.y * distance, 1e-9);
+    float distance = max(length(center - frame.detail_eye.xyz) - radius, frame.detail_eye.w);
+    return error / max(frame.detail_footprint.x + frame.detail_footprint.y * distance, 1e-9);
 }
 
 // What the cut of a view does with a cluster: whether it draws it, and

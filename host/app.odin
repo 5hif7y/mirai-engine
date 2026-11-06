@@ -181,6 +181,7 @@ App :: struct {
     camera_cut:bool,
     camera_carried:render.Mat4, // the camera was carried with what it sees since the last frame; zero: it was not
     inspection:render.View_Inspection, // what the view of the camera shows in the next frame instead of its lit image: the editor sets it
+    detail:render.Frame_Detail, // the camera that chooses the detail of the views of the window in the next frame: the editor sets it
     // The part of the drawable the camera draws in, in pixels: what is not
     // always covered (the editor leaves out its bars). Zero: all of it.
     scene:[4]i32,

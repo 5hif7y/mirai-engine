@@ -130,8 +130,10 @@ textures_views_record :: proc(r: ^Renderer, frame: Frame_Desc) {
 		t.views[count^] = texture_viewer(camera, f32(width), f32(height))
 		count^ += 1
 	}
-	for view in frame.views {if !view.disabled {add(t, &count, view.camera, view.rect.z, view.rect.w)}}
-	if len(frame.views) == 0 {add(t, &count, frame.camera, i32(r.window_width), i32(r.window_height))}
+	// The views of the window see textures from the camera of the detail while it holds.
+	seen :: proc(frame: Frame_Desc, view: Frame_View) -> Camera {return frame.detail.camera if frame.detail.on && view.texture == 0 else view.camera}
+	for view in frame.views {if !view.disabled {add(t, &count, seen(frame, view), view.rect.z, view.rect.w)}}
+	if len(frame.views) == 0 {add(t, &count, frame.detail.camera if frame.detail.on else frame.camera, i32(r.window_width), i32(r.window_height))}
 	if count == 0 {return}
 	t.view_count = count
 	if count != t.seen_count {t.stale = true;return}

@@ -163,6 +163,7 @@ Session :: struct {
     runs:[EDITOR_RUNS]Run,
     run_serial:u64,      // the id of the newest run
     replay:Run,          // the last Play of the user after it stopped, with its history (play_review)
+    paused_view:core.View, // what the camera of the game saw at the tick a Play the user paused is at (view_write)
     watch:Watch,
     edit_orbit:Orbit,
     edit_selection:Selection, // that of the document while the editor shows a game

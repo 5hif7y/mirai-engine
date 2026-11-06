@@ -181,6 +181,8 @@ renderer_origin_set :: proc(r: ^Renderer, origin: Vec3) {
 origin_frame :: proc(r: ^Renderer, frame: Frame_Desc) -> (Frame_Desc, bool) {
 	f := frame
 	f.camera = origin_camera(f.camera, r.origin)
+	if f.detail.on {f.detail.camera = origin_camera(f.detail.camera, r.origin)}
+	r.frame_detail = f.detail
 	f.carried = origin_transform(f.carried, r.origin)
 	if len(f.views) > len(r.frame_views) {
 		set_error(r, "too many views: %d, at most %d", len(f.views), len(r.frame_views))

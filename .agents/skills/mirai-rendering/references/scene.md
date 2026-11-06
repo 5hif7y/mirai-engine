@@ -103,6 +103,11 @@
   whose clusters share the mesh sphere. Both are drawn with the same cut (`cut.slang`,
   `cluster_in_cut` on the CPU): a cluster enters when its projected error is within
   `lod_error_pixels` and that of what replaces it is not.
+- **Detail of another camera.** The error is projected from `Gpu_Frame.detail_eye`, the eye of
+  the view unless `Frame_Desc.detail` holds a camera: then the views of the window take from it
+  the levels of the meshes, the cuts rays trace and the levels of the textures, while visibility
+  and the image stay those of their own camera. It is what a paused game saw, kept while the
+  editor looks closer.
 - The G-buffer is drawn with one non-indexed indirect draw per phase, whose instance count is
   written by the culling: one instance per visible cluster, which the vertex shader reads from the
   visible list ([culling](frame-graph.md#frame-graph)). No binds per material or per object.

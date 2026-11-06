@@ -507,7 +507,7 @@ app_draw :: proc(app:^App,window:platform.Window_Frame) -> bool {
     count:=copy(views[:],app.views[:app.view_count])
     count+=copy(views[count:],app.texture_views[:app.texture_view_count])
     drawn:=render.renderer_frame(r,{
-        camera=app.camera,ui=extras.layers[:extras.layer_count],camera_cut=app.camera_cut,carried=app.camera_carried,inspection=app.inspection,time=app.time,
+        camera=app.camera,detail=app.detail,ui=extras.layers[:extras.layer_count],camera_cut=app.camera_cut,carried=app.camera_carried,inspection=app.inspection,time=app.time,
         views=views[:count],
         panels=extras.panels[:extras.panel_count],debug=extras.debug[:extras.debug_count],
         ui_textures=extras.ui_textures[:extras.ui_texture_count],effect_views=extras.effect_views[:extras.effect_view_count],
@@ -778,7 +778,7 @@ app_capture_world :: proc(app:^App,world:rawptr,frames:=8,size:=[2]i32{},editor:
             camera=app.camera,ui=extras.layers[:extras.layer_count],camera_cut=frame==0,inspection=app.inspection,time=app.time,
             views=app.views[:app.view_count],panels=extras.panels[:extras.panel_count],debug=extras.debug[:extras.debug_count],
             ui_textures=extras.ui_textures[:extras.ui_texture_count],effect_views=extras.effect_views[:extras.effect_view_count],
-            offscreen=true,
+            offscreen=true,detail=app.detail,
         }
         seen:=[1]render.Frame_View{{camera=app.camera,camera_cut=frame==0,rect={0,0,size.x,size.y},texture=texture,inspection=app.inspection}}
         if alone {desc.ui,desc.views,desc.panels,desc.debug=nil,seen[:],nil,nil}

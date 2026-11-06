@@ -1377,7 +1377,7 @@ menus_build :: proc(s:^Session,w:core.World_Ref) {
     g:=s.gui
     ctx:=g.ctx
     file:=[?]Menu_Entry{{.New,0},{.Open,0},{.Projects,0},{.Save,1},{.Save_All,1},{.Save_As,1},{.Import,2},{.Build,3},{.Settings,3},{.Quit,4}}
-    view:=[?]Menu_Entry{{.Focus,0},{.Reset_Camera,0},{.Scene_Thumbnail,0},{.Grid,1},{.Indicators,1},{.Output_Frame,1},{.Studio_Light,1},{.Graphics,1},{.Inspector_Panel,2},{.Console_Panel,2},{.Build_Panel,2}}
+    view:=[?]Menu_Entry{{.Focus,0},{.Reset_Camera,0},{.Scene_Thumbnail,0},{.Grid,1},{.Indicators,1},{.Output_Frame,1},{.Game_Detail,1},{.Studio_Light,1},{.Graphics,1},{.Inspector_Panel,2},{.Console_Panel,2},{.Build_Panel,2}}
     menu_entries(s,"File",1,file[:])
     menu_entries(s,"View",4,view[:])
 }

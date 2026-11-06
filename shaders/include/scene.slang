@@ -377,9 +377,9 @@ float box_faded(float3 low, float3 high, float fade, float cull) {
 float box_small_faded(float3 low, float3 high) {
     float least = frame.cut.y;
     if (least <= 0.0) return 0.0;
-    float3 eye = frame.camera_position.xyz;
-    float distance = max(length(eye - clamp(eye, low, high)), frame.camera_position.w);
-    float pixels = length(high - low) / max(frame.footprint.x + frame.footprint.y * distance, 1e-9);
+    float3 eye = frame.detail_eye.xyz;
+    float distance = max(length(eye - clamp(eye, low, high)), frame.detail_eye.w);
+    float pixels = length(high - low) / max(frame.detail_footprint.x + frame.detail_footprint.y * distance, 1e-9);
     return saturate((2.0 * least - pixels) / least);
 }
 

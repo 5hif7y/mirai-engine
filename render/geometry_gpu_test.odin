@@ -133,3 +133,42 @@ gpu_instances_of_batches_smaller_than_a_pixel_are_not_rasterized :: proc(t: ^tes
 	testing.expect_value(t, drawn(t, r, cube, tiny[:], camera), u32(1))
 	testing.expectf(t, rhi.device_validation_errors(device) == 0, "validation: %s", rhi.device_validation_message(device))
 }
+
+// The detail of a frame can come from another camera: the view draws from
+// its own eye the levels and ray cuts that camera would choose.
+@(test)
+gpu_the_detail_camera_chooses_the_levels_the_view_draws :: proc(t: ^testing.T) {
+	r:=new(Renderer);defer free(r)
+	device := skin_test_renderer(t, r, false)
+	if device == nil {return}
+	defer renderer_destroy(r)
+	CELLS :: 64
+	vertices := make([dynamic]asset.Vertex, context.temp_allocator)
+	indices := make([dynamic]u32, context.temp_allocator)
+	for z in 0 ..= CELLS {for x in 0 ..= CELLS {
+		p := Vec3{f32(x) * 0.25, 0.4 * math.sin(f32(x) * 0.7) * math.cos(f32(z) * 0.5), f32(z) * 0.25}
+		append(&vertices, asset.Vertex{position = p, normal = mm.normal_pack({0, 1, 0}), uv = {f32(x), f32(z)} / CELLS, color = 0xffffffff, tangent = mm.tangent_pack({1, 0, 0}, 1)})
+	}}
+	for z in 0 ..< u32(CELLS) {for x in 0 ..< u32(CELLS) {
+		a := z * (CELLS + 1) + x
+		append(&indices, a, a + CELLS + 1, a + 1, a + 1, a + CELLS + 1, a + CELLS + 2)
+	}}
+	g: asset.Mesh_Geometry
+	if !testing.expect(t, asset.mesh_build_dag({vertices = vertices[:]}, indices[:], &g, context.temp_allocator)) {return}
+	mesh, added := mesh_add_geometry(r, g, nil)
+	if !testing.expect(t, added) {return}
+	scene_set(r, {{object_id = 1, mesh = mesh, transform = Mat4(1), tint = 1}}, nil, {}, {})
+	near := Camera{position = {8, 3, 18}, forward = {0, -0.3, -1}, up = {0, 1, 0}, fov_y = 50, near = 0.1, far = 1000, exposure = UNIT_EXPOSURE}
+	far := near
+	far.position = {8, 60, 400}
+	drawn :: proc(t: ^testing.T, r: ^Renderer, frame: Frame_Desc) -> (clusters: u32) {
+		for _ in 0 ..< 6 {testing.expect(t, renderer_frame(r, frame), r.error)}
+		return r.stats.visible_kinds[.Levels].clusters
+	}
+	own := drawn(t, r, {camera = near})
+	chosen := drawn(t, r, {camera = near, detail = {camera = far, on = true}})
+	again := drawn(t, r, {camera = near})
+	testing.expectf(t, own > 0 && chosen > 0 && chosen < own, "from far the cut is coarser: %d clusters, %d from its own eye", chosen, own)
+	testing.expect_value(t, again, own)
+	testing.expectf(t, rhi.device_validation_errors(device) == 0, "validation: %s", rhi.device_validation_message(device))
+}

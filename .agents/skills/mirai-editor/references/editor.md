@@ -184,6 +184,10 @@ History and recording:
 - **Output frame** (View menu) darkens outside the aspect ratio of the last recording, only while
   the viewport looks through a game camera (Play with its own camera or the camera preview): through
   the editor camera it would frame nothing of what is recorded.
+- **Detail of the game camera** (View menu, `editor.action` `game_detail`): in a Play the user
+  paused, the levels of the meshes and textures are those its camera saw at that tick
+  (`Session.paused_view`, kept before the editor camera takes the `View`), wherever the editor
+  looks from, so a wrong level seen while playing is seen up close.
 
 ### Play from a place
 

@@ -107,6 +107,7 @@ Viewport_Preferences :: struct {
     show_grid:bool,
     show_indicators:bool,
     show_output_frame:bool, // the frame of a recording over the scene
+    game_detail:bool, // a Play the user paused draws the detail its camera saw (Frame_Detail), wherever the editor looks from
     output_size:[2]i32,     // pixels of that frame: those of the last recording
 }
 
@@ -379,12 +380,22 @@ viewport_screen :: proc(v:^Viewport,point:[3]f32) -> (screen:[2]f32,ok:bool) {
 viewport_rect :: proc(v:^Viewport) -> ui.Rect {return {v.origin.x,v.origin.y,v.size.x,v.size.y}}
 
 // The camera of the World shown is the editor's while editing and while a
-// Play is paused by the user, and while a game runs without a camera of its own.
+// Play is paused by the user, and while a game runs without a camera of its
+// own. What the camera of a paused game saw is kept before the editor takes
+// the view: with game_detail the detail is chosen from there.
 @(private)
 view_write :: proc(s:^Session,w:core.World_Ref) {
+    if s.app!=nil {s.app.detail={}}
+    if s.mode!=.Paused {s.paused_view={}}
     view:=core.world_storage_of(w,core.View)
     if view==nil {return}
     if (play_viewed(s) || s.mode==.Watch || camera_previewing(s)) && view.camera!=core.NONE {return}
+    if s.mode==.Paused {
+        if view.camera!=core.NONE {s.paused_view=view^}
+        if s.viewport.game_detail && s.paused_view.camera!=core.NONE && s.app!=nil {
+            s.app.detail={camera=host.camera_from_view(s.paused_view),on=true}
+        }
+    }
     // The Play of the host arrives with the view the host sees. The camera of
     // the viewport follows it, so what the editor draws over the scene and
     // what it picks line up with the image.

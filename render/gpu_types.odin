@@ -61,6 +61,8 @@ Gpu_Frame :: struct {
 	scene_box:        [2]Vec4, // xyz the lowest corner of what rays meet, relative to the origin, then the highest; low above high: nothing
 	volume_cells:     [VOLUME_CASCADES_MAX][4]i32, // xyz the cell of the world of the probe at the lowest corner of each cascade
 	volume_center:    Vec4, // xyz where the cascades centre, relative to the origin, which moves on smoothly as they step a cell at a time
+	detail_eye:       Vec4, // where the levels of detail are chosen from (xyz) and its near plane (w): the eye of the view, or that of Frame_Detail
+	detail_footprint: Vec4, // xy the footprint of a pixel of that eye, as footprint; zw 0
 	cut:              Vec4, // x the error in pixels the cut of the levels of the meshes allows (Settings.lod_error_pixels); 0 draws level 0. y the pixels across below which an instance of a batch is not rasterized (Settings.batch_min_pixels); 0 draws every one
 	batches:          [4]u32, // the batches drawn: x their instance slots, y the first word of their group table in the u32 pool, z how many, w how many rays meet
 	moved:            [4]u32, // what casts shadows and changed since the frame before (Occluder_Changes): x the boxes of moved_boxes, y the lights of moved_lights, z MOVED_* bits

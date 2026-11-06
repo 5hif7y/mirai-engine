@@ -158,6 +158,8 @@ struct Frame_Data {
     float4 scene_box[2];     // xyz the lowest corner of what rays meet, relative to the origin, then the highest; low above high: nothing (scene_reach)
     int4 volume_cells[VOLUME_CASCADES_MAX]; // xyz the cell of the world of the probe at the lowest corner of each cascade
     float4 volume_center;    // xyz where the cascades centre, relative to the origin, which moves on smoothly as they step a cell at a time
+    float4 detail_eye;       // where the levels of detail are chosen from (xyz) and its near plane (w): the eye of the view, or that of render.Frame_Detail
+    float4 detail_footprint; // xy the footprint of a pixel of that eye, as footprint; zw 0
     float4 cut;              // x the error in pixels the cut of the levels of the meshes allows (Settings.lod_error_pixels); 0 draws level 0. y the pixels across below which an instance of a batch is not rasterized (Settings.batch_min_pixels); 0 draws every one
     uint4 batches;           // the batches drawn (scene.slang): x their instance slots, y the first word of their group table in the u32 pool, z how many, w how many rays meet
     uint4 moved;             // what casts shadows and changed since the frame before (occluder_changed of trace.slang): x the boxes of moved_boxes, y the lights of moved_lights, z MOVED_* bits

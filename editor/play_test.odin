@@ -223,3 +223,29 @@ the_user_and_agents_play_their_own_runs_at_once :: proc(t:^testing.T) {
     runs_stop(s)
     testing.expect(t,!running(s) && host.app_world_count(app)==1)
 }
+
+@(test)
+a_paused_play_draws_the_detail_its_camera_saw_while_the_editor_looks_elsewhere :: proc(t:^testing.T) {
+    Detail_World :: struct {entities:core.Entities,view:core.View}
+    world:Detail_World
+    storages:=[1]core.Storage_Info{{type=core.View,info=type_info_of(core.View),offset=offset_of(Detail_World,view)}}
+    info:=core.World_Info{entities=offset_of(Detail_World,entities),storages=storages[:]}
+    ref:=core.world_ref(&world,&info)
+    app:host.App
+    v:Viewport;defer viewport_free(&v)
+    v.orbit=ORBIT_DEFAULT
+    s:=Session{app=&app,viewport=&v,mode=.Paused}
+    game:=[3]f32{4,2,9}
+    world.view={camera=core.Entity(7),position=game,rotation=1,fov=1,near=0.1}
+    cases:=[?]struct{mode:Mode,on,detail:bool}{
+        {.Paused,false,false},{.Paused,true,true},{.Paused,true,true},{.Play,true,false},{.Edit,true,false},
+    }
+    for c,i in cases {
+        s.mode,v.game_detail=c.mode,c.on
+        if c.mode!=.Paused {world.view.camera=core.Entity(7)}
+        view_write(&s,ref)
+        testing.expectf(t,app.detail.on==c.detail,"case %d: detail of the game camera %v",i,c.detail)
+        if c.detail {testing.expectf(t,app.detail.camera.position==game,"case %d: from where the game camera was",i)}
+        if c.mode==.Paused {testing.expect(t,world.view.camera==core.NONE && world.view.position!=game,"The editor looks from its own camera")}
+    }
+}

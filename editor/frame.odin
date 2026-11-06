@@ -25,7 +25,7 @@ Action :: enum u8 {
     New,Open,Save,Save_All,Save_As,Build,Quit,
     Undo,Redo,Copy,Paste,Duplicate,Delete,Rename,Select_All,Deselect,Group,
     Tool_Move,Tool_Rotate,Tool_Scale,Space,Snap,
-    Focus,Reset_Camera,Scene_Thumbnail,Grid,Indicators,Output_Frame,Studio_Light,Hierarchy_Panel,Inspector_Panel,Console_Panel,Build_Panel,Library_Panel,
+    Focus,Reset_Camera,Scene_Thumbnail,Grid,Indicators,Output_Frame,Game_Detail,Studio_Light,Hierarchy_Panel,Inspector_Panel,Console_Panel,Build_Panel,Library_Panel,
     Play,Play_From_Camera,Simulate,Apply_Simulation,Pause,Stop,Release_Input,
     Shortcuts,
     Find,Import,Ai_Chat,Source_Control,Graphics,Settings,Projects,
@@ -40,7 +40,7 @@ ACTION_LABELS :: [Action]string{
     .New="New scene",.Open="Open...",.Save="Save",.Save_All="Save all",.Save_As="Save as...",.Build="Build",.Quit="Quit",
     .Undo="Undo",.Redo="Redo",.Copy="Copy",.Paste="Paste",.Duplicate="Duplicate",.Delete="Delete",.Rename="Rename",.Select_All="Select all",.Deselect="Deselect",.Group="Group selection",
     .Tool_Move="Move",.Tool_Rotate="Rotate",.Tool_Scale="Scale",.Space="Local axes",.Snap="Snap to grid",
-    .Focus="Focus selection",.Reset_Camera="Reset camera",.Scene_Thumbnail="Update scene thumbnail",.Grid="Grid",.Indicators="Indicators",.Output_Frame="Output frame",.Studio_Light="Studio light",
+    .Focus="Focus selection",.Reset_Camera="Reset camera",.Scene_Thumbnail="Update scene thumbnail",.Grid="Grid",.Indicators="Indicators",.Output_Frame="Output frame",.Game_Detail="Detail of the game camera",.Studio_Light="Studio light",
     .Hierarchy_Panel="Hierarchy",.Inspector_Panel="Details",.Console_Panel="Console",.Build_Panel="Build output",
     .Library_Panel="Content Browser",
     .Play="Play",.Play_From_Camera="Play from camera",.Pause="Pause",.Stop="Stop",.Release_Input="Release input",
@@ -106,7 +106,7 @@ ACTION_SHORTCUTS := [Action]Shortcut{
     .Undo={.Z,{.Primary},true},.Redo={.Y,{.Primary},true},.Copy={.C,{.Primary},true},.Paste={.V,{.Primary},true},.Duplicate={.D,{.Primary},true},.Delete={.Delete,{},true},
     .Rename={.F2,{},true},.Select_All={.A,{.Primary},true},.Deselect={.Escape,{},true},.Group={.G,{.Primary},true},
     .Tool_Move={.W,{},true},.Tool_Rotate={.E,{},true},.Tool_Scale={.R,{},true},.Space={},.Snap={},
-    .Focus={.F,{},true},.Reset_Camera={},.Scene_Thumbnail={},.Grid={},.Indicators={},.Output_Frame={},.Studio_Light={},
+    .Focus={.F,{},true},.Reset_Camera={},.Scene_Thumbnail={},.Grid={},.Indicators={},.Output_Frame={},.Game_Detail={},.Studio_Light={},
     .Hierarchy_Panel={},.Inspector_Panel={},.Console_Panel={.Grave,{.Primary},true},.Build_Panel={},.Library_Panel={.Tab,{},true},
     .Play={.F5,{},true},.Play_From_Camera={},.Pause={.F6,{},true},.Stop={.F5,{.Shift},true},.Release_Input={.F1,{},true},
     .Simulate={},.Apply_Simulation={},
@@ -152,7 +152,7 @@ action_state :: proc(s:^Session,action:Action) -> (state:Action_State) {
             state.disabled=action not_in asset_document_actions(s,d.kind)
             return
         case .Save_As,.Group,
-             .Tool_Move,.Tool_Rotate,.Tool_Scale,.Space,.Snap,.Focus,.Reset_Camera,.Scene_Thumbnail,.Grid,.Indicators,.Output_Frame,.Studio_Light,
+             .Tool_Move,.Tool_Rotate,.Tool_Scale,.Space,.Snap,.Focus,.Reset_Camera,.Scene_Thumbnail,.Grid,.Indicators,.Output_Frame,.Game_Detail,.Studio_Light,
              .Play,.Play_From_Camera,.Simulate,.Apply_Simulation,.Pause,.Release_Input,.Find,
              .Prefab_Create,.Prefab_Apply,.Prefab_Revert,.Prefab_Unlink,.Prefab_Apply_Base:
             state.disabled=true
@@ -191,6 +191,7 @@ action_state :: proc(s:^Session,action:Action) -> (state:Action_State) {
     case .Grid:        state.checked=s.viewport.show_grid
     case .Indicators:  state.checked=s.viewport.show_indicators
     case .Output_Frame: state.checked=s.viewport.show_output_frame
+    case .Game_Detail: state.checked=s.viewport.game_detail
     case .Studio_Light: state.disabled,state.checked=document_is_prefab(s) || playing(s),s.viewport.studio_light
     case .Hierarchy_Panel: state.checked=s.gui.layout.left_open && s.gui.layout.library_tab==.Hierarchy
     case .Library_Panel:   state.checked=s.gui.layout.left_open
@@ -307,6 +308,7 @@ action_run :: proc(s:^Session,action:Action) -> bool {
     case .Grid:        v.show_grid=!v.show_grid
     case .Indicators:  v.show_indicators=!v.show_indicators
     case .Output_Frame: v.show_output_frame=!v.show_output_frame
+    case .Game_Detail: v.game_detail=!v.game_detail
     case .Studio_Light: v.studio_light=!v.studio_light
     case .Hierarchy_Panel:
         if g.layout.left_open && g.layout.library_tab==.Hierarchy {library_select(s,.Editor)} else {library_select(s,.Hierarchy)}

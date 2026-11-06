@@ -538,11 +538,13 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
             r:=db.ranges[current];tail:=int(cmath.ceil(lib.MATCH_HORIZON[lib.MATCH_TRAJECTORY-1]*db.rate))
             ending=state.ended || !m.landing && !m.tail && int(r.count)>tail+1 && row>=int(r.first+r.count)-tail
         }
-        // A clip that no longer reaches its landing marker at a landing rate searches again.
+        // A clip that no longer reaches its landing marker within the slack at a landing rate
+        // searches again; one a little off goes on at the nearest rate until a search finds better.
         lost:=false
         if m.landing && current>=0 {
             ahead:=lib.match_event_ahead(db,current,state.time)
-            lost=!(ahead>=time_to_land*info.landing_rates[0] && ahead<=time_to_land*info.landing_rates[1])
+            rate:=clamp(ahead/time_to_land,info.landing_rates[0],info.landing_rates[1])
+            lost=ahead<0 || abs(ahead/rate-time_to_land)>lib.MATCH_EVENT_SLACK
         }
         // With stationary_speed, a body that stands plays the clips that stand and one that moves
         // those that travel, whether they loop or not; an entry clip plays whatever the body does.
@@ -578,7 +580,11 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
                 // their marker.
                 toward:=request
                 toward.min_rate,toward.max_rate,toward.event,toward.event_rates=0,0,time_to_land,info.landing_rates
-                if m.landing && !lost && row>=0 && !entering {query,weights,_:=lib.match_query(db,toward,current);playing_on=lib.match_cost(db,row,query,weights)}
+                if m.landing && !lost && row>=0 && !entering {
+                    query,weights,_:=lib.match_query(db,toward,current)
+                    _,miss:=lib.match_event_rate(db,row,toward)
+                    playing_on=lib.match_cost(db,row,query,weights)+miss*lib.MATCH_EVENT_MISS
+                }
                 best,cost,_=lib.match_search(db,toward,row,whole,info.reselect,&m.recent,noted)
                 // Entering the air with no entry start that lands in time (off a ledge, a short
                 // fall), any row of its clips that does.

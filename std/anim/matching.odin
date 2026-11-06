@@ -47,6 +47,8 @@ MATCH_ENTRY_SPAN :: .1
 MATCH_TAIL_MIN :: .3
 // m/s at or below which a clip stands still.
 MATCH_STILL :: .05
+MATCH_EVENT_MISS :: f32(100) // cost of a second a row toward an event misses its marker at the nearest rate
+MATCH_EVENT_SLACK :: f32(.05) // s a row toward an event may miss its marker by; past it, it is left out
 // Rows a rig left that a search remembers.
 MATCH_RECENT :: 8
 // Ticks of the velocity of a body its trail keeps.
@@ -58,7 +60,8 @@ MATCH_CANDIDATES :: 16
 // Mode: the clip serves none of the modes; Entry: an entry clip while not entering, or one that is
 // not while entering; Stationary: it travels while the body stands, or stands while it moves;
 // Reselect: its rows are near the one playing or among those just left; Event: none of its rows
-// has the marker of the event ahead; Rate: its marker is not reached at a rate of the event.
+// has the marker of the event ahead; Rate: its marker misses the event by more than MATCH_EVENT_SLACK
+// at every rate of the event.
 Match_Reject :: enum u8 {None,Cost,Mode,Entry,Stationary,Reselect,Event,Rate}
 // The best row of a clip in a search, the rate it plays at, its cost split by kind of feature
 // (cost is their sum) and why the search did not give it.
@@ -473,7 +476,6 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
     entry_rows:=int(cmath.ceil(MATCH_ENTRY_SPAN*db.rate))+1
     rates:=request.event_rates
     event:=len(db.events)==db.rows && anim_finite(request.event) && request.event>0 && anim_finite(rates[0]) && anim_finite(rates[1]) && rates[0]>0 && rates[0]<=rates[1]
-    soonest,latest:=request.event*rates[0],request.event*rates[1]
     bounded:=len(db.small)>0
     seconds:=span if anim_finite(span) && span>0 else 0
     rows_in :: proc "contextless" (db:^Match_Database,seconds:f32) -> int {return int(min(cmath.ceil(seconds*db.rate),f32(db.rows)))}
@@ -519,9 +521,12 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
                     if value>=(least if candidates!=nil else cost) {continue}
                     at_rate:=scaled
                     if event {
-                        ahead:=db.events[row]
-                        if !(ahead>=soonest && ahead<=latest) {continue}
-                        at_rate=clamp(ahead/request.event,rates[0],rates[1])
+                        if db.events[row]<0 {continue}
+                        miss:f32
+                        at_rate,miss=match_event_rate(db,row,request)
+                        if miss>MATCH_EVENT_SLACK {continue}
+                        value+=miss*MATCH_EVENT_MISS
+                        if value>=(least if candidates!=nil else cost) {continue}
                     }
                     excluded:=playing && (whole || match_behind(r,row,near,reach) || match_behind(r,near,row,reach))
                     for l in left[:left_count] {if excluded {break};if l.range==range && match_behind(r,row,l.row,l.reach) {excluded=true}}
@@ -549,6 +554,16 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
         for &item in candidates.items[:clamp(candidates.count,0,MATCH_CANDIDATES)] {if int(item.row)==best && item.reason==.Cost {item.reason=.None;break}}
     }
     return
+}
+
+// The rate a row toward the event of request plays at, the one that reaches its marker then within
+// event_rates, and the seconds it misses it by at the nearest one. Up to MATCH_EVENT_SLACK the
+// miss costs MATCH_EVENT_MISS a second and weighs with the pose: a clip whose marker comes a frame
+// early is not left for one that fits the body worse.
+match_event_rate :: proc "contextless" (db:^Match_Database,row:int,request:Match_Request) -> (rate,miss:f32) {
+    ahead:=db.events[row]
+    rate=clamp(ahead/request.event,request.event_rates[0],request.event_rates[1])
+    return rate,abs(ahead/rate-request.event)
 }
 
 // Notes the best row of a clip a search leaves out (rows first..<end), with why.

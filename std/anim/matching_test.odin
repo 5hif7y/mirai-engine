@@ -373,6 +373,12 @@ an_event_searches_the_rows_that_reach_its_marker_in_time_at_the_rate_that_does :
     best,_,rate=match_search(&db,request)
     ahead:=db.events[best] if best>=0 else -1
     testing.expectf(t,match_range_of(&db,best)==3 && ahead>=.125 && ahead<=.5 && abs(rate*.25-ahead)<1e-4,"a row of the jump .125 to .5 s from its marker, not %.3f s at rate %.3f",ahead,rate)
+    // A jump whose marker comes a little early even at the slowest rate still plays, at that rate:
+    // a frame off the landing is not worth a clip that fits the body worse.
+    request.event,request.entry=.8/.5+MATCH_EVENT_SLACK*.5,true
+    best,_,rate=match_search(&db,request)
+    testing.expectf(t,match_range_of(&db,best)>=3 && rate==.5,"a start a frame early at rate .5, not row %d at %.3f",best,rate)
+    request.entry=false
     // Ten seconds before it lands no row reaches it: the jump lands too soon (Rate), the fall loop
     // has no marker (Event) and the ground serves another mode.
     noted:Match_Candidates

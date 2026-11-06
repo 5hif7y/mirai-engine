@@ -555,7 +555,8 @@ a_body_in_the_air_lands_on_the_landing_marker_of_its_clip_when_physics_says :: p
         testing.expectf(t,value.clip==base.name_hash("jump"),"standing, the jump in place, not %v",value)
         clips:=match_test_fall(t,&f,dt,.8-dt,turn={0,0,3})
         value,_=animation_match(&f.playback,f.rig)
-        testing.expectf(t,len(clips)==2 && clips[1]==base.name_hash("leap") && abs(value.time-.8)<.01,"moving, the leap takes over and lands at %.3f s",value.time)
+        // Within the slack of its marker at the fastest landing rate.
+        testing.expectf(t,len(clips)==2 && clips[1]==base.name_hash("leap") && abs(value.time-.8)<=2*lib.MATCH_EVENT_SLACK+.01,"moving, the leap takes over and lands at %.3f s",value.time)
     }
 }
 

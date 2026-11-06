@@ -98,7 +98,7 @@ Ai_Context :: struct {
     asset:Ai_Context_Asset,
     references:[]string, // the images the user attached, in the folder of the turn
     assets:[]string,     // the assets the user dragged onto the chat, by their paths
-    ticks:Ai_Play_Range, // of the Play the user chose on its timeline; to<=from: none
+    ticks:Ai_Context_Ticks, // of the Play the user chose on its timeline; to<=from: none
 }
 
 // The part of a rectangle that is on the window. False when what is left is
@@ -311,7 +311,7 @@ ai_context_write :: proc(s:^Session,task:^Ai_Task,entities:[]Ai_Entity) -> bool 
     for &file,i in references {file=ai_reference_file(i+1)}
     context_value.references=references
     context_value.assets=ai_attachment_paths(s,task)
-    context_value.ticks=task.play_range
+    context_value.ticks=ai_context_ticks(&task.play_range)
     context_value.entities=entities
     context_value.entities_in_region=task.entities_total
     if front!=nil {

@@ -2,9 +2,9 @@ package editor
 
 import "core:fmt"
 import "core:math"
-import "core:strings"
 import "mirai:core"
 import "mirai:platform"
+import "mirai:std/base"
 import "mirai:ui"
 
 // The past of the Play of the user under the scene while it is paused: a
@@ -22,14 +22,29 @@ History_Playback :: struct {
     elapsed:f64, // s of the clock not yet turned into ticks
 }
 
-play_history_bar :: proc(s:^Session) {
-    if !play_paused(s) || scene_covered(s) {return}
+// The run whose strip is under the scene: the Play of the user, paused, with
+// a past of more than one tick. nil while there is none.
+play_strip_run :: proc(s:^Session) -> ^Run {
+    if !play_paused(s) || scene_covered(s) {return nil}
     r:=run_find(s,0)
+    if r==nil || core.world_storage_of(run_ref(s,r),core.Time)==nil {return nil}
+    oldest,newest,_,_,ok:=history_span(r.history)
+    return ok && newest>oldest?r:nil
+}
+
+// The Play of the strip plays the past or stops; at the end it plays from the start.
+play_strip_toggle :: proc(s:^Session,r:^Run) {
+    p:=&s.history_playback
+    p.playing,p.elapsed=!p.playing,0
+    oldest,newest,_,_,_:=history_span(r.history)
+    if t:=core.world_storage_of(run_ref(s,r),core.Time);p.playing && t.tick>=newest {s.history_seek=oldest+1}
+}
+
+play_history_bar :: proc(s:^Session) {
+    r:=play_strip_run(s)
     if r==nil {return}
-    oldest,newest,since,_,ok:=history_span(r.history)
-    if !ok || newest<=oldest {return}
+    oldest,newest,_,_,_:=history_span(r.history)
     t:=core.world_storage_of(run_ref(s,r),core.Time)
-    if t==nil {return}
     g:=s.gui
     ctx:=g.ctx
     th:=&ctx.theme
@@ -47,17 +62,13 @@ play_history_bar :: proc(s:^Session) {
             p.playing=false
         }
         if result.loop {p.loop=!p.loop}
-        if result.play {
-            p.playing,p.elapsed=!p.playing,0
-            // At the end it plays from the start.
-            if p.playing && t.tick>=newest {s.history_seek=oldest+1}
-        }
+        if result.play {play_strip_toggle(s,r)}
         if result.here {s.requests+={.Resume_Here}}
         strip:=&s.play_strip
         menu:=shell_id(g,"play_history_menu")
         if result.ruler {ui.popup_open(ctx,menu,result.anchor)}
         if result.ask {
-            if range,found:=play_range_of(strip,clock.frames,oldest,since,rate);found {
+            if range,found:=play_range_of(s,r,strip,clock.frames,oldest);found {
                 play_range_ask(s,range)
             }
         }
@@ -68,25 +79,25 @@ play_history_bar :: proc(s:^Session) {
             if ui.menu_item(ctx,ui.id(ctx,"range_end"),"Set range end") {
                 timeline_range_set(strip,clock.frames,strip.pointed,clock.frame,true)
             }
-            range,found:=play_range_of(strip,clock.frames,oldest,since,rate)
+            range,found:=play_range_of(s,r,strip,clock.frames,oldest)
             copy_item:=ui.Menu_Item{icon=.Sparkle,disabled=!found}
             if ui.menu_item(ctx,ui.id(ctx,"range_copy"),"Copy range",copy_item) {
-                play_range_copy(s,range)
+                play_range_copy(s,&range)
             }
         }
     }
 }
 
-// The ticks of the range of a strip whose frame 0 is the tick oldest, at
-// seconds of the game; none while the range is off.
-play_range_of :: proc(t:^Timeline,frames:f32,oldest:u64,seconds:f64,rate:f32) ->
-    (r:Ai_Play_Range,ok:bool) {
-    if !t.range || t.range_out<=t.range_in || rate<=0 {return}
+// The ticks of the range of a strip whose frame 0 is the tick oldest, in the
+// run r of the scene open; none while the range is off.
+play_range_of :: proc(s:^Session,r:^Run,t:^Timeline,frames:f32,oldest:u64) ->
+    (range:Ai_Play_Range,ok:bool) {
+    if !t.range || t.range_out<=t.range_in {return}
     lo,hi:=timeline_range(t,frames)
     if hi<=lo {return}
-    r.from,r.to=oldest+u64(lo),oldest+u64(hi)
-    r.from_seconds,r.to_seconds=seconds+f64(lo)/f64(rate),seconds+f64(hi)/f64(rate)
-    return r,true
+    range.from,range.to,range.run=oldest+u64(lo),oldest+u64(hi),r.id
+    if s.document!=nil {base.text_set(range.scene[:],document_path(s.document))}
+    return range,true
 }
 
 // The agent of the editor asked about a range: its chat, with the range as
@@ -97,37 +108,13 @@ play_range_ask :: proc(s:^Session,r:Ai_Play_Range) {
 }
 
 @(private)
-play_range_copy :: proc(s:^Session,r:Ai_Play_Range) {
+play_range_copy :: proc(s:^Session,r:^Ai_Play_Range) {
     if s.app==nil || s.app.platform==nil {return}
-    scene:=s.document!=nil?document_path(s.document):""
-    text:=play_range_text(s.project_root,scene,ai_client_path(s.engine_root),r)
-    if !platform.clipboard_set(s.app.platform,text) {
+    if !platform.clipboard_set(s.app.platform,play_range_text(r)) {
         notify(s,"The range does not fit in the clipboard")
         return
     }
     notify(s,fmt.tprintf("Copied ticks %d to %d",r.from,r.to))
-}
-
-// What Copy range puts on the clipboard, for a chat in the editor or out of
-// it: where the ticks are and the calls of the API that read them.
-play_range_text :: proc(root,scene,tool:string,r:Ai_Play_Range) -> string {
-    b:=strings.builder_make(context.temp_allocator)
-    rpc:=fmt.tprintf(`mirai rpc --project "%s"`,root)
-    if tool!="" {rpc=fmt.tprintf(`"%s" rpc --project "%s"`,tool,root)}
-    fmt.sbprintf(&b,"Mirai project: %s\n",root)
-    fmt.sbprintf(&b,"Run: the Play of the user of %s, paused in the editor\n",
-        scene!=""?scene:"an unsaved scene")
-    fmt.sbprintf(&b,"Range: ticks %d to %d (%.2f s to %.2f s)\n",
-        r.from,r.to,r.from_seconds,r.to_seconds)
-    fmt.sbprintf(&b,"Values of an entity at those ticks:\n  %s play.history "+
-        `'{{"from":%d,"to":%d,"trace":{{"name":"<entity name>","fields":["world_position"]}}}}'`+
-        "\n",rpc,r.from,r.to)
-    fmt.sbprintf(&b,"Whether playing them again repeats them:\n  %s play.history "+
-        `'{{"from":%d,"to":%d,"verify":true}}'`+"\n",rpc,r.from,r.to)
-    fmt.sbprintf(&b,"The game at the first tick, paused:\n  %s play.seek "+
-        `'{{"tick":%d}}'`+"\n",rpc,r.from)
-    strings.write_string(&b,"Through the MCP server mirai, they go through its tool call.\n")
-    return strings.to_string(b)
 }
 
 // Goes to the tick the strip asked for, between frames, or plays the past

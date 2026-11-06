@@ -152,7 +152,8 @@ difference with the catalog, it rules.
   the_keyframes_of_a_history_fit_its_memory_and_span_its_time
   a_run_keeps_no_history_when_it_is_off_or_on_the_network
   the_history_reads_what_a_live_trace_read_and_a_rewound_run_steps_the_same_again
-  verify_says_the_first_tick_and_field_where_playing_the_past_again_differs`, and the copy it keeps:
+  verify_says_the_first_tick_and_field_where_playing_the_past_again_differs
+  the_last_play_keeps_its_history_after_stop_until_the_next_play`, and the copy it keeps:
   `mirai test plugins/physics/runtime
   a_kept_copy_takes_what_the_simulation_uses_and_copies_back_to_the_same_steps`; the wide image
   before and after the tonemap, with GPU and validation:

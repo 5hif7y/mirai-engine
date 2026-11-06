@@ -85,6 +85,7 @@ EDITOR_RUNS :: 1+AI_WORKER_CAPACITY*PLAYER_PROCESSES
 // advances one tick for each step it asks for, with only the input it gives.
 Run :: struct {
     world:rawptr,               // nil: the place is free
+    id:u64,                     // what play.history and play.seek take as run; from 1, never reused in a session
     player:int,                 // 0: the run of its owner; more: another player of its game on the network, a client of the first (an agent's)
     owner:int,                  // the AI task that keeps it alive; 0: the user
     step:bool,                  // one tick was asked for it
@@ -160,6 +161,8 @@ Session :: struct {
     providers:Providers,                         // of the plugins of the library in use
     edit_world:rawptr,   // the World being edited
     runs:[EDITOR_RUNS]Run,
+    run_serial:u64,      // the id of the newest run
+    replay:Run,          // the last Play of the user after it stopped, with its history (play_review)
     watch:Watch,
     edit_orbit:Orbit,
     edit_selection:Selection, // that of the document while the editor shows a game
@@ -304,13 +307,14 @@ running :: proc "contextless" (s:^Session) -> bool {
     return false
 }
 
-// Ends every run: the document they copied is about to change.
+// Ends every run, and the last Play kept: the document they copied is about to change.
 runs_stop :: proc(s:^Session) {
     if s.watch.task!=0 {watch_stop(s)}
     play_stop(s,true)
     for &r in s.runs {
         if r.world!=nil {run_free(s,&r)}
     }
+    replay_free(s)
 }
 
 // One line at the bottom of the window for a while.
@@ -785,6 +789,7 @@ play_start :: proc(s:^Session,simulate:=false,owner:int=0) -> bool {
     if s.recovery.pending {return false}
     if run_find(s,owner)!=nil {return owner!=0}
     if owner==0 && s.mode==.Watch {watch_stop(s)}
+    if owner==0 && !simulate {replay_free(s)}
     // The game of the user is shown: the scene comes to the front.
     if owner==0 {asset_document_activate(s,-1)}
     if owner==0 {tools_release(s)}
@@ -802,6 +807,15 @@ play_start :: proc(s:^Session,simulate:=false,owner:int=0) -> bool {
     // A body with no spawn point to appear at appears at the camera; player 1 where Play from here asked.
     if origin:=core.world_storage_of(host.app_world_ref(s.app,r.world),scene.Play_Origin);origin!=nil {origin^=asked.asked?asked:camera_origin(s)}
     if p:=providers(s);p.plays && p.play.play_begin!=nil {p.play.play_begin(s,r)}
+    play_view_enter(s,simulate)
+    s.mode=simulate?.Simulate:.Play
+    log.info("Play")
+    return true
+}
+
+// The editor shows the run of the user: what Stop puts back is kept.
+@(private)
+play_view_enter :: proc(s:^Session,simulate:bool) {
     s.edit_orbit=s.viewport.orbit
     selection_set(&s.edit_selection,s.selection.entities[:])
     s.edit_relative_mouse=platform.window_relative_mouse(s.app.platform)
@@ -815,9 +829,28 @@ play_start :: proc(s:^Session,simulate:=false,owner:int=0) -> bool {
         if s.gui.ctx!=nil {s.gui.ctx.edit={};ui.popup_close(s.gui.ctx)}
     }
     s.app.has_script_input,s.app.script_input,s.app.script_frame_input=false,{},{}
-    s.mode=simulate?.Simulate:.Play
     s.view_cut=true
-    log.info("Play")
+}
+
+// The last Play of the user, kept after Stop, is shown again paused at the
+// frame it was at: its past can be looked at and played on from there. False
+// without one, or while the editor shows another game.
+play_review :: proc(s:^Session) -> bool {
+    if s.mode!=.Edit || s.replay.world==nil || s.recovery.pending {return false}
+    r:^Run
+    for &place in s.runs {
+        if place.world==nil {r=&place;break}
+    }
+    if r==nil {return false}
+    asset_document_activate(s,-1)
+    tools_release(s)
+    r^=s.replay
+    s.replay={}
+    play_view_enter(s,false)
+    platform.window_set_relative_mouse(s.app.platform,false)
+    s.mode=.Paused
+    r.history.held=true
+    log.info("Play opened again")
     return true
 }
 
@@ -835,7 +868,8 @@ run_create :: proc(s:^Session,owner,player:int) -> ^Run {
     // Physics takes the edits since the last frame as its own, or the copy reads them as written by another.
     simulation_settle(s,edited_world(s))
     if !s.info.copy(world,s.edit_world) {host.app_world_free(s.app,world);return nil}
-    r^={world=world,owner=owner,player=player}
+    s.run_serial+=1
+    r^={world=world,id=s.run_serial,owner=owner,player=player}
     return r
 }
 
@@ -857,9 +891,23 @@ play_stop :: proc(s:^Session,force:=false) {
         }
     }
     if s.mode!=.Watch {tools_release(s)}
-    run_free(s,r)
+    // A Play that kept its past stays, with its World, until the next Play;
+    // its voices stop as those of a World that is freed.
+    if (s.mode==.Play || s.mode==.Paused) && r.history!=nil && r.history.count>0 {
+        eaudio.audio_release(host.app_world_storage(s.app,r.world,eaudio.Voices),s.app)
+        replay_free(s)
+        s.replay=r^
+        r^={}
+    } else {
+        run_free(s,r)
+    }
     if s.mode!=.Watch {play_view_restore(s)}
     log.info("Stop")
+}
+
+// Drops the last Play kept after Stop.
+replay_free :: proc(s:^Session) {
+    if s.replay.world!=nil {run_free(s,&s.replay)}
 }
 
 // Ends the runs of an AI task, which the editor does not show.

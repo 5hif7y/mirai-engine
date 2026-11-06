@@ -96,7 +96,10 @@ library_migrate :: proc(s:^Session,library:^host.Project_Library) -> bool {
     play_plugin_stop(s)
     for &r in s.runs {
         if r.world!=nil && r.player>0 {run_free(s,&r)}
+        // Its copies of the World are of the old layout: its past starts again.
+        if r.world!=nil {history_free(s,&r)}
     }
+    replay_free(s)
     collab_leave(s)
     edits_commit(s.edits,edited_world(s),s.selection)
     for slot in s.app.worlds {

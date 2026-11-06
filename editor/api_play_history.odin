@@ -14,14 +14,18 @@ import "mirai:std/serial"
 // with play.seek, and with play.history reading values at the ticks it played
 // or checking that playing its frames again leaves what they left. Reading
 // and checking play the frames again on the World of the run and put it back
-// after, as it was: the game does not change.
+// after, as it was: the game does not change. The last Play of the user
+// stays after Stop (Session.replay): both read it, and play.seek opens it
+// again, paused.
 
 Api_Play_Seek_Params :: struct {
     tick:u64 `mirai:"label=The tick to go to; when no frame ended on it the newest before it"`,
+    run:u64 `mirai:"optional,label=The run, by the id play.history gives; 0: that of the caller, or the last Play of the user after it stopped, which opens again paused"`,
     player:int `mirai:"optional,min=0,max=3,label=The run of that player of a game a turn plays on the network"`,
 }
 
 Api_Play_Seek_Result :: struct {
+    run:u64 `mirai:"label=The id of the run"`,
     tick:u64 `mirai:"label=The tick reached"`,
     seconds:f64,
     paused:bool,
@@ -30,6 +34,7 @@ Api_Play_Seek_Result :: struct {
 }
 
 Api_Play_History_Params :: struct {
+    run:u64 `mirai:"optional,label=The run, by its id; 0: that of the caller, or the last Play of the user after it stopped"`,
     player:int `mirai:"optional,min=0,max=3,label=The run of that player of a game a turn plays on the network"`,
     from:u64 `mirai:"optional,label=The first tick read or checked; the oldest kept when 0"`,
     to:u64 `mirai:"optional,label=The last tick read or checked; the newest kept when 0 or past it"`,
@@ -55,6 +60,8 @@ Api_Play_Verify :: struct {
 // What play.history writes: Api_Play_History_Info and its trace.
 Api_Play_History_Result :: struct {
     on:bool `mirai:"label=The run keeps its past"`,
+    run:u64 `mirai:"label=The id of the run, which play.history and play.seek take as run; 0 without one"`,
+    stopped:bool `mirai:"label=It is the last Play of the user, kept after it stopped until the next Play: play.seek opens it again, paused"`,
     tick:u64 `mirai:"label=Where the run is"`,
     oldest,newest:u64 `mirai:"label=The ticks play.seek goes to"`,
     oldest_seconds,newest_seconds:f64,
@@ -71,6 +78,8 @@ Api_Play_History_Result :: struct {
 @(private)
 Api_Play_History_Info :: struct {
     on:bool,
+    run:u64,
+    stopped:bool,
     tick:u64,
     oldest,newest:u64,
     oldest_seconds,newest_seconds:f64,
@@ -84,9 +93,9 @@ Api_Play_History_Info :: struct {
 
 @(private)
 api_play_history_register :: proc(s:^Session,st:^Api_State) {
-    api_register(s,st,{name="play.seek",summary="Takes the game of the caller to a tick it played, paused, to look at it and play on from there: the copy of the World before it and the frames between played again.",params=Api_Play_Seek_Params,result=Api_Play_Seek_Result,run=api_play_seek})
+    api_register(s,st,{name="play.seek",summary="Takes the game of the caller, or the last Play of the user after it stopped, to a tick it played, paused, to look at it and play on from there: the copy of the World before it and the frames between played again.",params=Api_Play_Seek_Params,result=Api_Play_Seek_Result,run=api_play_seek})
     history_default:=Api_Play_History_Params{trace={every=1}}
-    api_register(s,st,{name="play.history",summary="The ticks the game of the caller keeps to go back to and what they take; with trace, values of entities at those ticks, and with verify, whether playing them again repeats them: the game stays as it is.",params=Api_Play_History_Params,result=Api_Play_History_Result,writes_result=true,defaults=&history_default,flags={.Read_Only},run=api_play_history})
+    api_register(s,st,{name="play.history",summary="The ticks the game of the caller, or the last Play of the user after it stopped, keeps to go back to and what they take; with trace, values of entities at those ticks, and with verify, whether playing them again repeats them: the game stays as it is.",params=Api_Play_History_Params,result=Api_Play_History_Result,writes_result=true,defaults=&history_default,flags={.Read_Only},run=api_play_history})
     if _,ok:=api.schema_register(&st.server,Api_Play_History_Info);!ok {
         st.refused+=1
         if st.refused==1 {st.refusal=fmt.bprintf(st.refusal_buffer[:],"play.history: its result has no schema: %s",st.server.schema.error)}
@@ -96,19 +105,45 @@ api_play_history_register :: proc(s:^Session,st:^Api_State) {
 @(private)
 api_play_seek :: proc(s:^Session,call:^api.Call) {
     p:=api.call_params(call,Api_Play_Seek_Params)
-    r,own:=api_play_run(s,call,p.player)
+    r,own,stopped,problem:=api_history_run(s,call,p.run,p.player)
+    if problem!="" {api.call_fail(call,api.INVALID_PARAMS,problem);return}
     if r==nil {api.call_fail(call,api.SERVER_ERROR,"No game is playing; play.start first");return}
+    if !own && stopped {api.call_fail(call,api.SERVER_ERROR,"A turn reads the last Play of the user with play.history; it opens again only from outside a turn");return}
     if !own {api_play_refused(call);return}
     if reason:=history_reason(s,r);reason!="" {api.call_fail(call,api.SERVER_ERROR,reason);return}
     serial:=history_frame_for(r.history,p.tick)
     if serial==0 {api_history_older(call,r.history,p.tick);return}
+    if stopped {
+        if !play_review(s) {api.call_fail(call,api.SERVER_ERROR,"The editor shows another game: stop it to open the last Play again");return}
+        r=run_find(s,0)
+    }
     if r.owner==0 && !play_paused(s) {play_pause(s,true)}
     seek:=history_seek(s,r,serial)
     if !seek.ok {api.call_fail(call,api.SERVER_ERROR,"No memory to go back: the game stays where it was");return}
     result:=api.call_result(call,Api_Play_Seek_Result)
     if t:=core.world_storage_of(run_ref(s,r),core.Time);t!=nil {result.tick,result.seconds=t.tick,t.seconds}
+    result.run=r.id
     result.paused=r.owner!=0 || play_paused(s)
     result.replayed,result.matches=seek.replayed,seek.matches
+}
+
+// The run a call on the past acts on: the one of the id run, or else that of
+// the caller, or else the last Play of the user after it stopped. own: the
+// call may move it; stopped: it is that last Play. problem: no run has that id.
+@(private)
+api_history_run :: proc(s:^Session,call:^api.Call,id:u64,player:int) -> (r:^Run,own,stopped:bool,problem:string) {
+    owner:=ai_task_of_call(s,call)
+    if id!=0 {
+        if player!=0 {return nil,false,false,"Give run or player, not both"}
+        if s.replay.world!=nil && s.replay.id==id {return &s.replay,owner==0,true,""}
+        for &other in s.runs {
+            if other.world!=nil && other.id==id {return &other,other.owner==owner,false,""}
+        }
+        return nil,false,false,fmt.tprintf("No run %d: a new Play or another scene ends the run before it; play.history without run reads the run of the caller",id)
+    }
+    r,own=api_play_run(s,call,player)
+    if r==nil && player==0 && s.replay.world!=nil {return &s.replay,owner==0,true,""}
+    return
 }
 
 @(private)
@@ -120,7 +155,8 @@ api_history_older :: proc(call:^api.Call,h:^Run_History,tick:u64) {
 @(private)
 api_play_history :: proc(s:^Session,call:^api.Call) {
     p:=api.call_params(call,Api_Play_History_Params)
-    r,_:=api_play_run(s,call,p.player)
+    r,_,stopped,unknown:=api_history_run(s,call,p.run,p.player)
+    if unknown!="" {api.call_fail(call,api.INVALID_PARAMS,unknown);return}
     raw:[1]string
     api.object_values(call.allocator,call.raw,{"trace"},raw[:])
     traced:=raw[0]!=""
@@ -132,6 +168,7 @@ api_play_history :: proc(s:^Session,call:^api.Call) {
         api_play_history_write(s,call,&info,nil)
         return
     }
+    info.run,info.stopped=r.id,stopped
     if t:=core.world_storage_of(run_ref(s,r),core.Time);t!=nil {info.tick=t.tick}
     if reason:=history_reason(s,r);reason!="" {
         if looks {api.call_fail(call,api.SERVER_ERROR,reason);return}

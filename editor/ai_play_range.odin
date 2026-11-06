@@ -3,15 +3,37 @@ package editor
 import "core:fmt"
 import "core:math"
 import "core:strings"
+import "mirai:std/base"
 import "mirai:ui"
 
 // The ticks of the paused Play of the user that the next message is about,
 // chosen on its timeline: a chip over the composer and, when it is sent, a
-// line of the instructions of the turn with the method that reads them.
+// line of the instructions of the turn with the method that reads them. Copy
+// range and the turn say the same: the ticks, the run and the scene, never a
+// path outside the project.
 
 Ai_Play_Range :: struct {
-    from,to:u64,                 // ticks; to<=from: none
-    from_seconds,to_seconds:f64, // of the game
+    from,to:u64,              // ticks; to<=from: none
+    run:u64,                  // Run.id
+    scene:[AI_PATH_BYTES]u8,  // in the assets of the project; empty for one never saved
+}
+
+// What context.json says of the range.
+Ai_Context_Ticks :: struct {
+    from,to,run:u64,
+    scene:string,
+}
+
+ai_context_ticks :: proc(r:^Ai_Play_Range) -> Ai_Context_Ticks {
+    if r.to<=r.from {return {}}
+    return {r.from,r.to,r.run,base.text_get(r.scene[:])}
+}
+
+// What Copy range puts on the clipboard, for a chat in the editor or out of it.
+play_range_text :: proc(r:^Ai_Play_Range) -> string {
+    scene:=base.text_get(r.scene[:])
+    return fmt.tprintf("Range: ticks %d to %d\nRun: %d\nScene: %s",r.from,r.to,r.run,
+        scene!=""?scene:"unsaved")
 }
 
 ai_play_range_set :: proc(s:^Session,r:Ai_Play_Range) {
@@ -48,10 +70,12 @@ ai_play_range_build :: proc(s:^Session,width:f32,rows:int) {
 // The line of the instructions that names them.
 @(private)
 ai_play_range_prompt :: proc(task:^Ai_Task,b:^strings.Builder) {
-    r:=task.play_range
+    r:=&task.play_range
     if r.to<=r.from {return}
-    fmt.sbprintf(b,"- The user chose ticks %d to %d (%.2f s to %.2f s) on the timeline of "+
-        "their paused Play: this message is about them. `play.history` with `from` %d and `to` "+
-        "%d reads them: with `trace`, values of entities at those ticks; with `verify`, whether "+
-        "playing them again repeats them.\n",r.from,r.to,r.from_seconds,r.to_seconds,r.from,r.to)
+    scene:=base.text_get(r.scene[:])
+    fmt.sbprintf(b,"- The user chose ticks %d to %d of run %d, a Play of %s, on its timeline: "+
+        "this message is about them. `play.history` with `run` %d, `from` %d and `to` %d reads "+
+        "them, also after the user stopped that Play: with `trace`, values of entities at those "+
+        "ticks; with `verify`, whether playing them again repeats them.\n",
+        r.from,r.to,r.run,scene!=""?scene:"an unsaved scene",r.run,r.from,r.to)
 }

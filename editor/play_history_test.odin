@@ -4,6 +4,7 @@ import "core:testing"
 import "mirai:core"
 import "mirai:host"
 import "mirai:platform"
+import "mirai:ui"
 
 // A tick that moves the entity of the test as its input says: a frame played
 // again has to give it the same input to leave it where it was.
@@ -306,4 +307,37 @@ the_strip_plays_the_past_again_at_the_pace_of_the_clock_with_the_game_paused :: 
     play_history_seek(s)
     oldest,_,_,_,_:=history_span(r.history)
     testing.expect(t,w.time.tick==oldest && s.history_playback.playing)
+}
+
+@(test)
+space_plays_and_stops_the_strip_of_the_past_unless_a_text_field_takes_it :: proc(t:^testing.T) {
+    f:=new(Play_Test);defer free(f)
+    if !play_test_open(t,f) {return}
+    defer play_test_close(f)
+    s:=&f.s
+    f.info.loops[.Game][.Fixed]=history_test_tick
+    settings:=PLAY_HISTORY_DEFAULT
+    s.play_history=&settings
+    ctx:ui.Context
+    testing.expect(t,ui.context_init(&ctx,{draw_user=draw_user}))
+    defer ui.context_destroy(&ctx)
+    f.gui.ctx=&ctx
+    defer f.gui.ctx=nil
+    testing.expect(t,play_start(s))
+    play_pause(s,true)
+    r:=run_find(s,0)
+    for _ in 1..=4 {history_step(f,r,false)}
+    space :: proc(f:^Play_Test) {editor_shortcuts(&f.s,&f.gui,&f.viewport,{.Space},{},0,false)}
+    ctx.edit.id=0x1234
+    space(f)
+    testing.expect(t,!s.history_playback.playing,"A text field being edited takes Space")
+    ctx.edit={}
+    space(f)
+    testing.expect(t,s.history_playback.playing && s.history_seek!=0,"At the end it plays from the start")
+    space(f)
+    testing.expect(t,!s.history_playback.playing,"And Space stops it")
+    // While the game plays, Space is its own.
+    play_pause(s,false)
+    space(f)
+    testing.expect(t,!s.history_playback.playing && s.mode==.Play)
 }

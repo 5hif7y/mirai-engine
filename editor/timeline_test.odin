@@ -94,27 +94,20 @@ the_ruler_asks_for_its_menu_at_a_frame_and_the_agent_button_needs_a_range :: pro
 }
 
 @(test)
-copy_range_names_the_ticks_their_seconds_and_the_calls_that_read_them :: proc(t:^testing.T) {
+copy_range_names_the_ticks_the_run_and_the_scene_and_nothing_else :: proc(t:^testing.T) {
+    document:Document
+    s:=Session{document=&document}
+    run:=Run{id=3}
     strip:=Timeline{range=true,range_in=30,range_out=90}
     hidden:=Timeline{range_in=30,range_out=90}
-    _,off:=play_range_of(&hidden,120,100,0,60)
+    _,off:=play_range_of(&s,&run,&hidden,120,100)
     testing.expect(t,!off,"A range that is off is no range")
-    r,ok:=play_range_of(&strip,120,1000,10,60)
+    r,ok:=play_range_of(&s,&run,&strip,120,1000)
     testing.expect(t,ok && r.from==1030 && r.to==1090,"Frames count from the oldest tick")
-    testing.expect(t,r.from_seconds==10.5 && r.to_seconds==11.5,"Seconds of the game at them")
-    text:=play_range_text("C:/games/demo","levels/arena.scene","",r)
-    for part in ([?]string{
-        "C:/games/demo","levels/arena.scene","ticks 1030 to 1090","10.50 s to 11.50 s",
-        `mirai rpc --project "C:/games/demo" play.history '{"from":1030,"to":1090,"trace":`,
-        `play.history '{"from":1030,"to":1090,"verify":true}'`,
-        `play.seek '{"tick":1030}'`,
-    }) {
-        testing.expectf(t,strings.contains(text,part),"The copied range has %q:\n%s",part,text)
-    }
-    text=play_range_text("C:/games/demo","","C:/mirai/mirai",r)
-    engine_tool:=strings.contains(text,`"C:/mirai/mirai" rpc --project`)
-    testing.expect(t,engine_tool,"The tool of the engine runs the calls")
-    testing.expect(t,strings.contains(text,"an unsaved scene"))
+    testing.expect_value(t,play_range_text(&r),"Range: ticks 1030 to 1090\nRun: 3\nScene: unsaved")
+    document_name(&document,"levels/arena.scene","C:/games/demo/assets/levels/arena.scene")
+    r,_=play_range_of(&s,&run,&strip,120,1000)
+    testing.expect_value(t,play_range_text(&r),"Range: ticks 1030 to 1090\nRun: 3\nScene: levels/arena.scene")
 }
 
 @(test)

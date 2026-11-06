@@ -232,5 +232,8 @@ play_plugin_poll :: proc(s:^Session) {
 play_plugin_start :: proc(s:^Session,online,ping:int,saved_only:bool) -> (taken:bool,error:string) {
     p:=providers(s)
     if !p.plays || p.play.start==nil {return}
-    return p.play.start(s,online,ping,saved_only)
+    taken,error=p.play.start(s,online,ping,saved_only)
+    // A new Play of the user, on the network: the last one kept goes.
+    if taken {replay_free(s)}
+    return
 }

@@ -280,7 +280,8 @@ and what it asks to do outside reaches Mirai, which rejects it.
   `assets` and `prompt.md` says their paths and types: the agent reads and changes them through the
   API. One that is no longer in the registry is not named.
 - Ticks of the paused Play chosen on its strip go the same way: a chip, `Ai_Task.play_range`,
-  `ticks` in `context.json` and a line of `prompt.md` that reads them with `play.history`.
+  `ticks` in `context.json` (ticks, run and scene, as Copy range) and a line of `prompt.md` that
+  reads them with `play.history` and `run`.
 
 ### Reference images
 

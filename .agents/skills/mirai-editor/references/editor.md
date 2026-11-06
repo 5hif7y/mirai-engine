@@ -155,15 +155,20 @@ History and recording:
   also while the game runs.
 - The Play of the strip passes the past again at the clock's pace, with the game paused: each
   frame goes to the ticks the clock covered and stops at the newest, or returns to the oldest with
-  Loop. Resuming (Pause on the bar, `play.pause`) returns to the newest frame it played and
-  discards what was edited in the past; **Play from here**, among the strip controls when it went
-  back (`play.pause` with `here`), continues from the frame it is at, edited or not, and discards
-  the later ones.
+  Loop; Space does the same while the strip is shown and no text field is being edited
+  (`editor_shortcuts`), and is the game's while it plays. Resuming (Pause on the bar,
+  `play.pause`) returns to the newest frame it played and discards what was edited in the past;
+  **Play from here**, among the strip controls when it went back (`play.pause` with `here`),
+  continues from the frame it is at, edited or not, and discards the later ones.
 - The right button on the ruler of the strip sets an end of its range at that tick (the other end
   stays while start stays before end; otherwise, or without a range, it goes to the head or to the
-  edge) and Copy range puts the project, the run, the ticks and the `play.history` and `play.seek`
-  calls that read them on the clipboard; with a range, the AI button of the strip attaches it to
-  the next message of the chat ([ticks of a message](ai-tasks.md#assets-of-a-message)).
+  edge) and Copy range puts three lines on the clipboard, the ticks, the run (`Run.id`) and the
+  scene relative to the assets, with no absolute path; with a range, the AI button of the strip
+  attaches the same to the next message of the chat
+  ([ticks of a message](ai-tasks.md#assets-of-a-message)).
+- Stop keeps the user's Play that has a history, with its World and voices stopped
+  (`Session.replay`), until the next Play, a change of document or a reload of code: `play.history`
+  reads it and `play.seek` opens it again paused (`play_review`). Edit never reads or writes it.
 - While paused, what the mouse and keys do belongs to the editor: `play_input_update` discards
   each frame the window's per-tick input, and the game that continues does not receive it all
   together in its first tick (the look and the body's turn would jump).

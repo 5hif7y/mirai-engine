@@ -395,6 +395,11 @@ shortcuts_run :: proc(s:^Session,keys:core.Keys,modifiers:ui.Modifiers) {
     // The keys the plugin tool that is on takes are its own.
     if s.viewport!=nil && s.viewport.plugin_tool!=0 {keys-=s.viewport.plugin_keys}
     if keys=={} {return}
+    // Space plays and stops the strip of the past while it is shown.
+    if r:=play_strip_run(s);r!=nil && .Space in keys && modifiers=={} {
+        play_strip_toggle(s,r)
+        keys-={.Space}
+    }
     shortcuts,alternates:=ACTION_SHORTCUTS,ACTION_ALTERNATES
     // The keys of Delete, Rename and Duplicate on a card of the browser act on
     // its asset, not on the selected entities.
@@ -476,7 +481,16 @@ editor_begin :: proc(s:^Session,g:^Editor_Ui,v:^Viewport,selection:^Selection,wo
     v.hovered=frame.mouse_inside && !ctx.over && ctx.active==0 && popups==0 && !modal && s.mode!=.Play && !camera_previewing(s) && !player_processes_view(s) && g.drag.kind==.None && !scene_covered(s)
     drag_update(g,frame)
     events_input(s,frame)
-    if ctx.edit.id==0 && popups==0 && !modal && v.capture==.None && g.splitter==.None && !content_typing(s.content,ctx) && !(s.projects!=nil && s.projects.shown) {shortcuts_run(s,frame.keys_pressed,input.modifiers)}
+    editor_shortcuts(s,g,v,frame.keys_pressed,input.modifiers,popups,modal)
+}
+
+// The keys of the frame are shortcuts unless a text field, a menu, a dialog
+// or a gesture takes them.
+@(private)
+editor_shortcuts :: proc(s:^Session,g:^Editor_Ui,v:^Viewport,keys:core.Keys,modifiers:ui.Modifiers,popups:int,modal:bool) {
+    ctx:=g.ctx
+    if ctx.edit.id!=0 || popups>0 || modal || v.capture!=.None || g.splitter!=.None || content_typing(s.content,ctx) || s.projects!=nil && s.projects.shown {return}
+    shortcuts_run(s,keys,modifiers)
 }
 
 @(step="frame",stage="begin")

@@ -116,7 +116,9 @@ asking_the_agent_about_a_range_of_the_play_attaches_it_to_the_next_message :: pr
         ai_chat_content_build(s,280,560)
         ui.frame_end(s.gui.ctx)
     }
-    play_range_ask(&s,{from=130,to=190,from_seconds=2.5,to_seconds=3.5})
+    asked:=Ai_Play_Range{from=130,to=190,run=4}
+    base.text_set(asked.scene[:],"scenes/main.scene")
+    play_range_ask(&s,asked)
     opened:=m.chat_open && m.focus && g.layout.left_open
     testing.expect(t,opened,"The chat opens with its composer focused")
     attached:=m.play_range.from==130 && m.play_range.to==190
@@ -129,8 +131,11 @@ asking_the_agent_about_a_range_of_the_play_attaches_it_to_the_next_message :: pr
     b:=strings.builder_make(context.temp_allocator)
     ai_play_range_prompt(&task,&b)
     line:=strings.to_string(b)
-    testing.expect(t,strings.contains(line,"ticks 130 to 190 (2.50 s to 3.50 s)"),line)
-    testing.expect(t,strings.contains(line,"`play.history` with `from` 130 and `to` 190"),line)
+    testing.expect(t,strings.contains(line,"ticks 130 to 190 of run 4, a Play of scenes/main.scene"),line)
+    testing.expect(t,strings.contains(line,"`play.history` with `run` 4, `from` 130 and `to` 190"),line)
+    testing.expect(t,!strings.contains(line,":/"),"No path outside the project")
+    ticks:=ai_context_ticks(&task.play_range)
+    testing.expect(t,ticks==Ai_Context_Ticks{130,190,4,"scenes/main.scene"},"context.json says what Copy range says")
     ai_chat_new(&s)
     testing.expect(t,m.play_range=={},"A new chat takes no range")
     play_range_ask(&s,{from=10,to=10})

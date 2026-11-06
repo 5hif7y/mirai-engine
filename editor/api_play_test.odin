@@ -600,6 +600,43 @@ the_history_reads_what_a_live_trace_read_and_a_rewound_run_steps_the_same_again 
 }
 
 @(test)
+the_last_play_keeps_its_history_after_stop_until_the_next_play :: proc(t:^testing.T) {
+    f:=new(Probe);defer free(f)
+    if !probe_open(t,f) {return}
+    defer probe_close(f)
+    settings:=PLAY_HISTORY_DEFAULT
+    f.s.play_history=&settings
+    id:=run_find(&f.s,0).id
+    testing.expect(t,probe_steps(f,1))
+    run_find(&f.s,0).history.interval=4
+    testing.expect(t,probe_steps(f,10))
+    error,text:=probe_call(f,"play.stop",`{}`)
+    testing.expect(t,error.code==0 && f.s.mode==.Edit && run_find(&f.s,0)==nil)
+    // Its past answers without a game playing, and the document does not change.
+    error,text=probe_call(f,"play.history",`{"verify":true}`)
+    testing.expect_value(t,error.code,0)
+    expected:=fmt.tprintf(`"on": true, "run": %d, "stopped": true, "tick": 11, "oldest": 1, "newest": 11`,id)
+    testing.expect(t,strings.contains(text,expected),text)
+    testing.expect(t,strings.contains(text,`"diverged": false`),text)
+    api_result_shape_expect(t,text,Api_Play_History_Result)
+    edited:=cast(^Probe_World)f.data
+    testing.expect(t,edited.time.tick==0 && !document_dirty(&f.s),"Edit is as it was")
+    // play.seek opens it again, paused at that tick.
+    error,text=probe_call(f,"play.seek",fmt.tprintf(`{{"run":%d,"tick":6}}`,id))
+    testing.expect_value(t,error.code,0)
+    r:=run_find(&f.s,0)
+    reopened:=r!=nil && r.id==id && f.s.mode==.Paused && (cast(^Probe_World)r.world).time.tick==6
+    testing.expect(t,reopened,text)
+    testing.expect(t,strings.contains(text,fmt.tprintf(`"run": %d, "tick": 6`,id)),text)
+    // The next Play discards it.
+    error,_=probe_call(f,"play.stop",`{}`)
+    testing.expect(t,play_start(&f.s))
+    testing.expect(t,run_find(&f.s,0).id!=id && f.s.replay.world==nil)
+    error,_=probe_call(f,"play.history",fmt.tprintf(`{{"run":%d}}`,id))
+    testing.expect(t,error.code==api.INVALID_PARAMS && strings.contains(error.message,"No run"),error.message)
+}
+
+@(test)
 verify_says_the_first_tick_and_field_where_playing_the_past_again_differs :: proc(t:^testing.T) {
     f:=new(Probe);defer free(f)
     if !probe_open(t,f) {return}

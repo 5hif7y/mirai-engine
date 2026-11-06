@@ -83,6 +83,23 @@ walking_reaches_the_speed_of_the_locomotion_and_brakes :: proc(t:^testing.T) {
     testing.expect(t,abs(sim.character_velocity(&f.w,f.ch).x)<0.01)
 }
 
+// The look faces -Z like a camera; the body faces it with +Z, the front of a glTF model.
+@(test)
+walking_toward_plus_x_turns_the_front_of_the_body_to_plus_x_and_keeps_the_look :: proc(t:^testing.T) {
+    f:Loco_Test
+    testing.expect(t,loco_test_init(&f,{0,0,0}))
+    defer sim.world_destroy(&f.w)
+    look:=f32(-0.5*cmath.PI)
+    loco_test_tick(&f,{0,0,-1},60,yaw=look)
+    v:=sim.character_velocity(&f.w,f.ch)
+    testing.expectf(t,near(v.x,5,0.05) && abs(v.z)<0.05,"velocity %v",v)
+    rotation:=sim.body_transform(&f.w,sim.character_body(&f.w,f.ch)).q
+    front:=mm.quat_rotate(rotation,{0,0,1})
+    testing.expectf(t,near(front.x,1,1e-4),"the body's +Z is %v",front)
+    testing.expectf(t,near(sim.character_move(&f.w,f.ch).yaw,look,1e-6),"move yaw %v",sim.character_move(&f.w,f.ch).yaw)
+    testing.expectf(t,near(look_yaw_of(mm.QUAT_IDENTITY,rotation),look,1e-4),"the look taken from the body %v",look_yaw_of(mm.QUAT_IDENTITY,rotation))
+}
+
 @(test)
 a_jump_reaches_the_height_of_the_locomotion_once_per_press :: proc(t:^testing.T) {
     for height in ([2]f32{0.6,1.5}) {

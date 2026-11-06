@@ -119,7 +119,8 @@ Per tick:
   braking and where it turns. With physics, the automatic plugin `animation_physics` says it for
   each `Character` with `Animation` (the `Character` is the only writer of the mode; animation keeps
   no copy) and asks for the warping of `Animation.motion` while it walks: the game writes no
-  locomotion code. Without physics, the game calls `match_goal` with what moves its rig.
+  locomotion code. The model on the `Character`'s entity faces its +Z, as the body does
+  ([facing](../../mirai-physics/SKILL.md#library-invariants)): it is not turned by hand. Without physics, the game calls `match_goal` with what moves its rig.
 - Every `interval` (0: every tick) it searches the lowest-cost row among the clips of the mode; a
   clip that travels is compared with the trajectory scaled by the rate at which it would play
   (`min_rate`..`max_rate`), so a few clips cover the velocities between theirs. It jumps only if it

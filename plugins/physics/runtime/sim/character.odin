@@ -54,7 +54,7 @@ Character_Move :: struct {
     ground:Drive,    // while it stands: relative to the ground, along it
     air:Drive,       // otherwise: in the world, across the up of the character unless Drive_Vertical
     launch:Vec3,     // m/s added at once; a standing character pushes the ground back
-    yaw:f32,         // radians the body faces, turning left about the up of the character in its up_frame
+    yaw:f32,         // radians of its heading (its look, -Z at 0), turning left about the up in its up_frame
     flags:Move_Flags,
     float_height:f32, // m of the head over the surface of a fluid, with Float
     // Its seconds per second of the world, a body that lives faster or slower (bullet time): its gravity,
@@ -190,10 +190,10 @@ character_create :: proc(w:^World,desc:Character_Desc,position:Vec3,rotation:=QU
     }
     turned:=q_normalize(rotation)
     up_frame:=up_frame_turn(q_normalize(frame),q_rotate(turned,UP))
-    yaw:=up_frame_yaw(up_frame,turned)
+    yaw:=character_yaw(up_frame,turned)
     body_desc:=BODY_DESC_DEFAULT
     body_desc.position=position
-    body_desc.rotation=up_frame*q_axis_angle(UP,yaw)
+    body_desc.rotation=character_rotation(up_frame,yaw)
     body_desc.gravity_scale=d.gravity_scale
     body_desc.locks=ANGULAR_LOCKS
     body_desc.sleep_disabled=true
@@ -341,8 +341,8 @@ character_set_rotation :: proc(w:^World,h:Character_Handle,rotation:Quat) {
     if ch==nil {return}
     turned:=q_normalize(rotation)
     ch.state.up_frame=up_frame_turn(ch.state.up_frame,q_rotate(turned,UP))
-    ch.move.yaw=up_frame_yaw(ch.state.up_frame,turned)
-    body_set_transform(w,ch.body,body_position(w,ch.body),ch.state.up_frame*q_axis_angle(UP,ch.move.yaw))
+    ch.move.yaw=character_yaw(ch.state.up_frame,turned)
+    body_set_transform(w,ch.body,body_position(w,ch.body),character_rotation(ch.state.up_frame,ch.move.yaw))
     ch.state.ground+={.Stale}
 }
 // The up of a frame of the vertical: its +Y.
@@ -359,9 +359,21 @@ up_frame_turn :: proc "contextless" (frame:Quat,up:Vec3,angle:=max(f32)) -> Quat
     if s<1e-6 && c<0 {axis=perp(from)} else {axis/=s}
     return q_normalize(q_axis_angle(axis,min(cmath.atan2(s,c),angle))*frame)
 }
-// The yaw of a rotation in a frame of the vertical: where its -Z heads, about the up.
+// The yaw of a rotation in a frame of the vertical: where its -Z heads, about the up, as a camera looks.
 up_frame_yaw :: proc "contextless" (frame,rotation:Quat) -> f32 {
     forward:=q_rotate(conj(frame)*rotation,{0,0,-1})
+    return cmath.atan2(-forward.x,-forward.z)
+}
+// Half a turn about +Y, exact: what turns a look (-Z ahead) into a body (+Z ahead).
+HALF_TURN :: Quat(quaternion(w=0,x=0,y=1,z=0))
+// The body of a character faces its yaw with +Z, the front of a glTF model, while the yaw is a look that
+// faces -Z: a half turn about the up apart.
+character_rotation :: #force_inline proc "contextless" (frame:Quat,yaw:f32) -> Quat {
+    return frame*q_axis_angle(UP,yaw)*HALF_TURN
+}
+// The yaw of a character's body rotation in a frame of the vertical: where its +Z heads, about the up.
+character_yaw :: proc "contextless" (frame,rotation:Quat) -> f32 {
+    forward:=q_rotate(conj(frame)*rotation,{0,0,1})
     return cmath.atan2(-forward.x,-forward.z)
 }
 
@@ -581,7 +593,7 @@ characters_update :: proc(w:^World) {
         ch.state=cs.next
         pace:=move_pace(cs.move)
         body.gravity_scale=.No_Gravity in cs.move.flags?0:ch.desc.gravity_scale*pace*pace
-        body.rotation=cs.next.up_frame*q_axis_angle(UP,cs.move.yaw)
+        body.rotation=character_rotation(cs.next.up_frame,cs.move.yaw)
         body.linear_velocity=cs.velocity
         // A turning up turns the capsule about the feet.
         if turned {

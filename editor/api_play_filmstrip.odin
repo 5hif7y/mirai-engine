@@ -167,15 +167,19 @@ api_filmstrip_take :: proc(s:^Session,data:rawptr,_:core.World_Ref,ran:int) -> s
     case strip.follow!=core.NONE:
         center:=view.xy+view.zw*0.5
         if core.alive(core.world_entities(w),strip.follow) {
-            // The middle of what hangs from it as it is posed (bones, parts), not its origin at
-            // the feet; the box of a skinned mesh is that of its bind pose.
-            low:=entity_world(w,strip.follow).position;high:=low
+            // Not its origin, at the feet of a character: the center of mass of a body, or the
+            // middle of what hangs from it. The box of a skinned mesh is that of its bind pose.
+            placed:=entity_world(w,strip.follow)
+            low,high:=placed.position,placed.position
             it:=scene_items(s,w)
             for item in scene_item_next(&it) {
                 if !entity_under(w,item.entity,strip.follow) {continue}
                 low,high=linalg.min(low,item.world.position),linalg.max(high,item.world.position)
             }
             point:=(low+high)*0.5
+            if motions:=core.world_table_of(w,core.Motion);motions!=nil {
+                if motion,moves:=core.get(core.read(motions),strip.follow);moves {point=placed.position+mm.quat_rotate(placed.rotation,motion.center)}
+            }
             if at,seen:=api_view_project(s.app.camera,view,point);seen {
                 center,cell.at,cell.seen=at,at/density,true
             }

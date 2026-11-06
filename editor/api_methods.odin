@@ -1348,7 +1348,7 @@ api_play_step :: proc(s:^Session,call:^api.Call) {
     met,problem:=api_conditions_read(s,run_ref(s,target),until,nil,"until")
     if problem!="" {api.call_fail(call,api.INVALID_PARAMS,problem);return}
     if params.focus>=0 && !api_seat_focus(s,call,target,params.focus) {return}
-    if owner==0 && !play_paused(s) {play_pause(s,true)}
+    if owner==0 && !play_paused(s) {play_pause(s,true,stepped=true)}
     ran:=0
     for tick in 0..<params.ticks {
         if len(until)>0 && met {break}

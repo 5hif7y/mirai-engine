@@ -379,12 +379,12 @@ viewport_screen :: proc(v:^Viewport,point:[3]f32) -> (screen:[2]f32,ok:bool) {
 viewport_rect :: proc(v:^Viewport) -> ui.Rect {return {v.origin.x,v.origin.y,v.size.x,v.size.y}}
 
 // The camera of the World shown is the editor's while editing and while a
-// Play is paused, and while a game runs without a camera of its own.
+// Play is paused by the user, and while a game runs without a camera of its own.
 @(private)
 view_write :: proc(s:^Session,w:core.World_Ref) {
     view:=core.world_storage_of(w,core.View)
     if view==nil {return}
-    if (s.mode==.Play || s.mode==.Watch || camera_previewing(s)) && view.camera!=core.NONE {return}
+    if (play_viewed(s) || s.mode==.Watch || camera_previewing(s)) && view.camera!=core.NONE {return}
     // The Play of the host arrives with the view the host sees. The camera of
     // the viewport follows it, so what the editor draws over the scene and
     // what it picks line up with the image.
@@ -698,7 +698,7 @@ viewport_drop :: proc(s:^Session,w:core.World_Ref) {
     g:=s.gui
     d:=&g.drag
     ctx:=g.ctx
-    if d.kind==.None || !d.released || s.mode==.Play || watching(s) || scene_covered(s) {return}
+    if d.kind==.None || !d.released || play_viewed(s) || watching(s) || scene_covered(s) {return}
     tool_preview_cancel(s)
     if !d.moved {
         if placement_subject(d^) {
@@ -825,7 +825,7 @@ material_assign :: proc(s:^Session,w:core.World_Ref,entities:[]core.Entity,mater
 // Discs, the gizmo, the box being dragged: drawn before the panels, which cover them.
 @(private)
 overlays_draw :: proc(s:^Session,w:core.World_Ref) {
-    if s.mode==.Play || camera_previewing(s) {return}
+    if play_viewed(s) || camera_previewing(s) {return}
     v:=s.viewport
     g:=s.gui
     ctx:=g.ctx
@@ -924,7 +924,7 @@ highlight_sync :: proc(s:^Session,w:core.World_Ref) {
     parents:=core.world_table_of(w,core.Parent)
     meshes:=core.world_table_of(w,erender.Mesh_Renderer)
     es:=core.world_entities(w)
-    play:=s.mode==.Play || camera_previewing(s)
+    play:=play_viewed(s) || camera_previewing(s)
     marquee:=v.capture==.Select && v.moved && !play
     ids:=core.world_table_of(w,core.Id)
     key:=Highlight_Key{sources={s.selection.serial,u64(uintptr(w.data)),parents!=nil?parents.layout+parents.version:0,meshes!=nil?meshes.layout:0,u64(len(es.generation)),0,0,0,0,0,0,s.ai!=nil?s.ai.scene_serial:0,ids!=nil?ids.layout+ids.version:0,collab_highlights_key(s)},marquee=marquee,play=play}
@@ -1001,7 +1001,7 @@ grid_lines :: proc(s:^Session) {
     v:=s.viewport
     lines:=&v.lines
     gpu.debug_lines_clear(lines)
-    if s.mode==.Play || camera_previewing(s) {return}
+    if play_viewed(s) || camera_previewing(s) {return}
     w:=shown_world(s)
     if v.show_grid {
         center:=[2]f32{math.round(v.orbit.target.x),math.round(v.orbit.target.z)}

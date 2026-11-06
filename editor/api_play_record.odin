@@ -246,7 +246,7 @@ api_play_record :: proc(s:^Session,call:^api.Call) {
     }
     defer delete(sound,s.app.allocator)
 
-    if owner==0 && !play_paused(s) {play_pause(s,true)}
+    if owner==0 && !play_paused(s) {play_pause(s,true,stepped=true)}
     s.recording={i32(width),i32(height)}
     s.viewport.output_size=s.recording
     defer s.recording={}

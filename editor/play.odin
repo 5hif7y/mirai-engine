@@ -5,6 +5,10 @@ import "mirai:ui"
 
 play_paused :: proc "contextless" (s:^Session) -> bool {return s.mode==.Paused || s.mode==.Simulation_Paused}
 
+// The game of the user is seen through its own camera: while it plays, and while play.step or
+// play.record holds it paused, so that its interfaces take the pointer as the image shows them.
+play_viewed :: proc "contextless" (s:^Session) -> bool {return s.mode==.Play || s.mode==.Paused && s.play_stepped}
+
 // The editor shows the game of the user, playing or paused: the chat and the
 // panels behave as in a game.
 play_shown :: proc "contextless" (s:^Session) -> bool {return s.mode==.Play || s.mode==.Paused}
@@ -80,8 +84,11 @@ play_input_update :: proc(s:^Session) {
 }
 
 // Resuming plays on from the newest frame the game played; with here, from
-// the frame its history went back to, dropping the frames after it.
-play_pause :: proc(s:^Session,paused:bool,here:=false) {
+// the frame its history went back to, dropping the frames after it. stepped:
+// the pause is that of play.step, which keeps the view of the game; any other
+// pause or resume gives the viewport back to the editor's camera.
+play_pause :: proc(s:^Session,paused:bool,here:=false,stepped:=false) {
+    s.play_stepped=paused && stepped
     if !playing(s) {return}
     r:=run_find(s,0)
     if paused && (s.mode==.Play || s.mode==.Simulate) {

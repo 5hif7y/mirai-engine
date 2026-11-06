@@ -640,7 +640,7 @@ shell_build :: proc(s:^Session,w:core.World_Ref) {
     // The clients of a game on the network take the viewport, as a Play does.
     panels:=!play && !player_processes_view(s)
     // A paused game shows what is selected of it.
-    details:=panels || s.mode==.Paused && !player_processes_view(s)
+    details:=panels || s.mode==.Paused && !s.play_stepped && !player_processes_view(s)
 
     if (panels && l.left_open || play && s.play_chat_open) && !s.viewport.pick.active {
         tabs,shown_tab:=library_tabs(s),library_tab_shown(s)

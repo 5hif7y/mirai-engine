@@ -170,6 +170,7 @@ Session :: struct {
     mode:Mode,
     edit_relative_mouse,play_relative_mouse:bool,
     play_input_released,play_capture_click:bool,
+    play_stepped:bool, // paused by play.step or play.record: the viewport keeps the view of the game
     camera_run:Camera_Preview_Run,
     edit_layout:Layout,
     edit_chat_open,play_chat_open,play_chat_input_released:bool,
@@ -564,7 +565,9 @@ game_frame :: proc(s:^Session) {
             host.app_game_frame(app,r.world,phases,record=&record)
             history_frame(s,r,&record)
         case .Paused,.Simulation_Paused:
+            stepped:=r.step
             game_tick(s,r,phases)
+            if !stepped && mode==.Paused && s.play_stepped {game_ui_frame(s,r)}
         }
         if r.world!=shown {extras_drop(app,kept)}
         if app.quit {
@@ -665,6 +668,19 @@ game_tick :: proc(s:^Session,r:^Run,phases:core.Phases) {
     app.has_script_input,app.script_input,app.script_frame_input=false,{},{}
     if r.owner==0 {platform.window_set_relative_mouse(app.platform,false)}
     history_frame(s,r,&record)
+}
+
+// A frame of the interfaces of a game that play.step holds paused, between its
+// steps: they are drawn and route the pointer the steps left, as in the tick
+// that built them, while no tick runs and the window reaches no game.
+@(private)
+game_ui_frame :: proc(s:^Session,r:^Run) {
+    app:=s.app
+    window,blocked:=app.ui_input,app.game_input_blocked
+    app.ui_input=run_ui_input(r,window)
+    app.game_input_blocked=true
+    host.app_game_frame(app,r.world,{.Ui},dt=0)
+    app.ui_input,app.game_input_blocked=window,blocked
 }
 
 // What replaces a World or ends the editor, and the jobs that run beside it.
@@ -788,7 +804,7 @@ play_start :: proc(s:^Session,simulate:=false,owner:int=0) -> bool {
     s.edit_orbit=s.viewport.orbit
     selection_set(&s.edit_selection,s.selection.entities[:])
     s.edit_relative_mouse=platform.window_relative_mouse(s.app.platform)
-    s.play_input_released,s.play_capture_click=false,false
+    s.play_input_released,s.play_capture_click,s.play_stepped=false,false,false
     if !simulate {
         s.edit_layout=s.gui.layout
         s.edit_chat_open=s.ai!=nil && s.ai.chat_open
@@ -890,7 +906,7 @@ play_view_restore :: proc(s:^Session) {
     s.app.game_input_excluded={}
     s.app.has_script_input,s.app.script_input,s.app.script_frame_input=false,{},{}
     s.app.player_tile_count=0
-    s.play_input_released,s.play_capture_click=false,false
+    s.play_input_released,s.play_capture_click,s.play_stepped=false,false,false
     s.mode=.Edit
     s.view_cut=true
     selection_prune(s.selection,edited_world(s))

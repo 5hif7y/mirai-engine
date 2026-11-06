@@ -226,7 +226,7 @@ the_game_that_plays_is_changed_and_read_by_its_storages_and_conditions :: proc(t
     // Storages of the game, by name.
     error,text:=probe_call(f,"play.inspect",`{"storage":"Probe_*","limit":1}`)
     testing.expect_value(t,error.code,0)
-    testing.expect(t,strings.contains(text,`"storages":{"Probe_Score":{"points": 0, "state": "Waiting"}`),text)
+    testing.expect(t,strings.contains(text,`"storages":{"Probe_Score":{"points": 0, "state": "Waiting", "seen": {"version": 0, "gone": 0}}`),text)
     error,_=probe_call(f,"play.inspect",`{"storage":"Score"}`)
     testing.expect_value(t,error.code,api.INVALID_PARAMS)
     // A component and a teleport, without the document.
@@ -259,7 +259,7 @@ the_game_that_plays_is_changed_and_read_by_its_storages_and_conditions :: proc(t
     testing.expect(t,strings.contains(text,`"results":[{"passed":true,"value":7},{"passed":false,"value":3},{"passed":true,"value":5},{"passed":true,"value":"Waiting"},{"passed":true,"value":null}]`),text)
     error,_=probe_call(f,"play.check",`{"conditions":[{"storage":"Probe_Score","field":"lives","compare":"Equal","number":1}]}`)
     testing.expect_value(t,error.code,api.INVALID_PARAMS)
-    testing.expect(t,strings.contains(error.message,"points, state") || strings.contains(error.message,"state, points"),error.message)
+    testing.expect(t,strings.contains(error.message,"points") && strings.contains(error.message,"state"),error.message)
     error,_=probe_call(f,"play.check",`{"conditions":[{"storage":"Probe_Score","field":"state","compare":"Below","text":"Won"}]}`)
     testing.expect_value(t,error.code,api.INVALID_PARAMS)
 }

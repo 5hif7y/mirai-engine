@@ -689,56 +689,58 @@ content_hides_the_parts_of_an_import_in_their_folder_and_a_prefab_opens_to_its_v
 
 @(test)
 content_gear_shows_the_parts_and_details_lists_them_after_the_rest :: proc(t:^testing.T) {
-    ctx:ui.Context
-    testing.expect(t,ui.context_init(&ctx,{}))
-    defer ui.context_destroy(&ctx)
-    assets:=host.Assets{registry=content_test_parts_registry(),indexed=true}
+    // On the heap: on the stack, with the copy each literal makes, these come near the
+    // megabyte of a test thread on Windows.
+    f:=new(struct{ctx:ui.Context,assets:host.Assets,app:host.App,g:Editor_Ui,ins:Inspector,selection:Selection,info:core.World_Info,session:Session})
+    defer free(f)
+    ctx,assets,g,session:=&f.ctx,&f.assets,&f.g,&f.session
+    testing.expect(t,ui.context_init(ctx,{}))
+    defer ui.context_destroy(ctx)
+    assets.registry,assets.indexed=content_test_parts_registry(),true
     defer content_test_registry_free(&assets.registry)
-    app:=host.App{assets=&assets}
-    g:=Editor_Ui{ctx=&ctx}
+    f.app.assets=assets
+    g.ctx=ctx
     c:=CONTENT_TEST_FOLDERS
     defer core.value_free(&c,type_info_of(Content))
-    ins:Inspector
-    selection:Selection
-    info:core.World_Info
-    session:=Session{app=&app,gui=&g,content=&c,inspector=&ins,selection=&selection,info=&info,headless=true}
+    session.app,session.gui,session.content,session.inspector=&f.app,g,&c,&f.ins
+    session.selection,session.info,session.headless=&f.selection,&f.info,true
     append(&c.open,content_test_hash("Robot"))
-    for _ in 0..<2 {content_test_still(&session)}
-    mesh:=ui.id_derive(&ctx,100,"content_entry",int(content_test_hash(assets.registry.files[2].path)))
-    _,found:=ui.widget_rect(&ctx,mesh)
+    for _ in 0..<2 {content_test_still(session)}
+    mesh:=ui.id_derive(ctx,100,"content_entry",int(content_test_hash(assets.registry.files[2].path)))
+    _,found:=ui.widget_rect(ctx,mesh)
     testing.expect(t,!found,"The mesh of the import is not in its folder")
-    content_test_click(t,&session,ui.id_derive(&ctx,100,"content_settings_open"))
-    content_test_still(&session)
-    content_test_click(t,&session,ui.id_derive(&ctx,content_settings_popup(&g),"parts"))
+    content_test_click(t,session,ui.id_derive(ctx,100,"content_settings_open"))
+    content_test_still(session)
+    content_test_click(t,session,ui.id_derive(ctx,content_settings_popup(g),"parts"))
     testing.expect(t,c.view.show_parts)
-    content_test_still(&session)
-    _,found=ui.widget_rect(&ctx,mesh)
+    content_test_still(session)
+    _,found=ui.widget_rect(ctx,mesh)
     testing.expect(t,found,"Show parts of imports lists it")
     c.view.show_parts=false
     // Find in Content Browser gives the keyboard to the part, in its folder.
     c.reveal=assets.registry.files[2].id
-    content_test_still(&session)
+    content_test_still(session)
     testing.expect(t,c.view.show_parts)
-    testing.expect_value(t,ctx.focus,ui.id_derive(&ctx,100,"content_entry",int(content_card_key(assets.registry.files[2].path,{},0))))
+    testing.expect_value(t,ctx.focus,ui.id_derive(ctx,100,"content_entry",int(content_card_key(assets.registry.files[2].path,{},0))))
     testing.expect_value(t,c.selected,assets.registry.files[2].id)
     // The list of a material field of Details: None, the material of its own,
     // then the part; choosing it marks it as used.
-    list_open(&session,{key=77,table=-1,kinds={0=asset.KIND_MATERIAL}},{20,20,260,40})
+    list_open(session,{key=77,table=-1,kinds={0=asset.KIND_MATERIAL}},{20,20,260,40})
     frame :: proc(ctx:^ui.Context,s:^Session,input:ui.Input) {
         ui.frame_begin(ctx,input)
         list_build(s,core.World_Ref{})
         ui.frame_end(ctx)
     }
-    for _ in 0..<2 {frame(&ctx,&session,{size={800,600},pointer_absent=true})}
-    row,shown:=ui.widget_rect(&ctx,ui.id_derive(&ctx,list_popup(&g),"row",3))
-    _,more:=ui.widget_rect(&ctx,ui.id_derive(&ctx,list_popup(&g),"row",4))
+    for _ in 0..<2 {frame(ctx,session,{size={800,600},pointer_absent=true})}
+    row,shown:=ui.widget_rect(ctx,ui.id_derive(ctx,list_popup(g),"row",3))
+    _,more:=ui.widget_rect(ctx,ui.id_derive(ctx,list_popup(g),"row",4))
     testing.expect(t,shown && !more)
     if !shown {return}
     for phase in 0..<3 {
         input:=ui.Input{size={800,600},pointer=ui.rect_center(row)}
         if phase==1 {input.down,input.pressed={.Left},{.Left}}
         if phase==2 {input.released={.Left}}
-        frame(&ctx,&session,input)
+        frame(ctx,session,input)
     }
     testing.expect_value(t,c.marks.recent[0],assets.registry.files[0].id)
 }

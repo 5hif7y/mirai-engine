@@ -83,8 +83,8 @@ play_seat :: proc(s:^Session,call:^api.Call,w:core.World_Ref,slot:int,handle:str
 play_tick :: proc(s:^Session,r:^Run) -> bool {
     owner:=r.owner
     if owner==0 && !play_paused(s) {play_pause(s,true,stepped=true)}
-    params:=Api_Play_Step_Params{ticks=1,focus=-1}
-    api_step_tick(s,owner,&params,{},true)
+    step:=Api_Step_Input{ticks=1}
+    api_step_tick(s,owner,0,&step,true)
     return api_frames(s,1,0)>0 && run_find(s,owner)!=nil
 }
 

@@ -117,36 +117,9 @@ api_condition_read :: proc(s:^Session,w:core.World_Ref,c:^Api_Play_Condition,all
     if !found {return {passed=c.compare==.Gone,value="null"},""}
     whole,parse_error:=json.parse(serial.writer_bytes(&out),allocator=allocator)
     if parse_error!=nil {return {},"the value could not be read back as JSON"}
-    leaf:=whole
-    if field!="" {
-        for part in strings.split(field,".",allocator) {
-            #partial switch v in leaf {
-            case json.Object:
-                inner,has:=v[part]
-                if !has {
-                    keys:=make([dynamic]string,allocator)
-                    for key in v {append(&keys,key)}
-                    return {},fmt.tprintf("field %q: %q is not there; it has %s",field,part,strings.join(keys[:],", ",allocator))
-                }
-                leaf=inner
-            case json.Array:
-                index,number:=strconv.parse_int(part)
-                if !number || index<0 || index>=len(v) {return {},fmt.tprintf("field %q: %q is not an element of a list of %d",field,part,len(v))}
-                leaf=v[index]
-            case:
-                return {},fmt.tprintf("field %q: %q goes inside a value that has nothing inside",field,part)
-            }
-        }
-    }
-    #partial switch v in leaf {
-    case json.Float:
-        buffer:=make([]u8,32,allocator)
-        read.value=strconv.write_float(buffer,f64(v),'g',-1,64)
-        if strings.has_prefix(read.value,"+") {read.value=read.value[1:]}
-    case:
-        bytes,_:=json.marshal(leaf,allocator=allocator)
-        read.value=string(bytes)
-    }
+    leaf,missing:=api_json_select(whole,field,allocator)
+    if missing!="" {return {},fmt.tprintf("field %q: %s",field,missing)}
+    read.value=api_json_text(leaf,allocator)
     switch c.compare {
     case .Exists: read.passed=true
     case .Gone:   read.passed=false
@@ -218,4 +191,61 @@ api_play_check :: proc(s:^Session,call:^api.Call) {
         serial.write_u8(out,'}')
     }
     serial.text_write_raw(out,"]}")
+}
+
+// The value at a path inside a JSON value: names of fields joined by dots and
+// [i] for element i of a list, from its end when negative (velocity[1], also
+// velocity.1); "" is the whole value. missing says which part is not there
+// and what is.
+@(private)
+api_json_select :: proc(value:json.Value,path:string,allocator:=context.temp_allocator) -> (leaf:json.Value,missing:string) {
+    leaf=value
+    rest:=path
+    for rest!="" {
+        part:string
+        if rest[0]=='[' {
+            end:=strings.index_byte(rest,']')
+            if end<0 {return nil,fmt.tprintf("%q has no ] that closes it",rest)}
+            part,rest=rest[1:end],rest[end+1:]
+            if strings.has_prefix(rest,".") {rest=rest[1:]}
+        } else {
+            end:=strings.index_any(rest,".[")
+            switch {
+            case end<0:          part,rest=rest,""
+            case rest[end]=='.': part,rest=rest[:end],rest[end+1:]
+            case:                part,rest=rest[:end],rest[end:]
+            }
+        }
+        if part=="" {return nil,fmt.tprintf("%q has an empty name: join names with one dot",path)}
+        #partial switch v in leaf {
+        case json.Object:
+            inner,has:=v[part]
+            if !has {
+                keys:=make([dynamic]string,allocator)
+                for key in v {append(&keys,key)}
+                return nil,fmt.tprintf("%q is not there; it has %s",part,strings.join(keys[:],", ",allocator))
+            }
+            leaf=inner
+        case json.Array:
+            index,number:=strconv.parse_int(part)
+            if number && index<0 {index+=len(v)}
+            if !number || index<0 || index>=len(v) {return nil,fmt.tprintf("%q is not an element of a list of %d",part,len(v))}
+            leaf=v[index]
+        case:
+            return nil,fmt.tprintf("%q goes inside a value that has nothing inside",part)
+        }
+    }
+    return
+}
+
+// A JSON value as text; a number as short as it reads back the same.
+@(private)
+api_json_text :: proc(value:json.Value,allocator:=context.temp_allocator) -> string {
+    if v,is_float:=value.(json.Float);is_float {
+        buffer:=make([]u8,32,allocator)
+        text:=strconv.write_float(buffer,f64(v),'g',-1,64)
+        return text[1:] if strings.has_prefix(text,"+") else text
+    }
+    bytes,_:=json.marshal(value,allocator=allocator)
+    return string(bytes)
 }

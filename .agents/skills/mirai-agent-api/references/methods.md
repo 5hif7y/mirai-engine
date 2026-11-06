@@ -501,6 +501,14 @@ result of `play.status`, `paused`, `simulating` and `input_released` are the use
   - `until`: up to 8 conditions of `play.check`; runs until the first tick after which all are met,
     with `ticks` as the maximum (`ran` and `met` say so). A badly written condition fails before
     running; if it becomes invalid later, it fails saying after how many ticks.
+  - `segments`: a timeline in one call, each segment holding its input for its `ticks` and its
+    pointer motion, wheel and text in its first tick; it replaces `ticks` and the input fields,
+    which fail beside it, and its ticks add up to at most those of a step.
+  - `trace`: up to 4 entities (selected as in `play.inspect`) or a storage, and paths of
+    `--select` inside the document `play.inspect` writes. Its rows are read between ticks, before
+    the first, every `every` and after the last, so the rows of a long step need a larger `every`.
+    In the first row a path that is not there fails, unless it names a component the entity does
+    not have yet; later, what is gone is `null`.
 - `play.check` (`read_only`): each condition reads a field (`field` with dots and indices) of a
   component of an entity (by `entity`, `id` or `name`) or of a storage, as `play.inspect` writes
   it, and compares it with `number` or `text`; without a component, the entity gives its
@@ -527,13 +535,20 @@ result of `play.status`, `paused`, `simulating` and `input_released` are the use
   one, another by `slot`, or a local one by handle. In a networked game a player is held in the
   run of its client (`player`), whose seat sends the held actions to the server with the others;
   the seat of a connection in the server's run is refused, since it takes what its client sends.
-  Typical test: hold `jump` for 1 tick, `play.step` 30 ticks, `play.check` the height.
+  Typical test: hold `jump` for 1 tick, `play.step` 30 ticks with a `trace` of the height (or
+  `play.capture` with a filmstrip that follows the body), `play.check` the height.
 - `play.walk` (registered by the `navigation` plugin): walks the body of a seat to a point or
   an entity tick by tick through the meshes and says how it ended
   ([walk](../../mirai-plugins/references/navigation.md#editor-and-api)).
 - `play.capture`: requires a GPU. The run of a turn is drawn offscreen with its camera and its game
   UI, without the editor; the user's Play is the window. A job writes the PNG, at `path` like that
   of `editor.capture` or, without it, in `.mirai/captures/`.
+  - Filmstrip (`every` and `count`): steps the caller's own run like `play.step` (pausing the
+    user's Play), with `segments` as its input and nothing held after them, and draws a cell
+    before the first tick and every `every` ticks: the whole image, a `region`, or a cell of
+    `size` centered where the `follow` entity projects through the game camera (in the user's
+    Play, inside the viewport). One PNG, cells left to right and top to bottom with their tick
+    in the corner, scaled down past a sheet width; `structuredContent` gives each cell's tick.
 - `play.record`: requires a GPU. Deletes the previous sequence in the folder, pauses the run,
   advances it `1/fps` of game time per frame (with its `Clock`), draws the world alone through the
   camera of its `View`, without screen UI, and writes `frame_000000.png` (16 bits, after the

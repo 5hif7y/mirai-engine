@@ -243,8 +243,10 @@ Api_Play_Step_Params :: struct {
     text:[ui.INPUT_TEXT_CAPACITY]u8 `mirai:"optional,text,label=Printable ASCII typed in the first tick: the field of the UI of the game with the focus takes it"`,
     gamepads:[core.GAMEPAD_CAPACITY]Api_Play_Gamepad `mirai:"optional,label=The gamepads connected in every tick; gamepad i is that of the local seat of slot i when the game has several"`,
     focus:int `mirai:"optional,min=-1,max=3,label=The local seat (by slot) that gets the keys and the mouse from this step on; -1 keeps it"`,
-    until:[8]Api_Play_Condition `mirai:"optional,label=It stops after the first tick at which all hold as play.check reads them; ticks is the most it runs and none run when they hold already"`,
+    until:[8]Api_Play_Condition `mirai:"optional,label=It stops after the first tick at which all hold as play.check reads them; ticks (or those of segments) is the most it runs and none run when they hold already"`,
     player:int `mirai:"optional,min=0,max=3,label=The run that gets the input in a game a turn plays on the network; every run of it advances"`,
+    segments:[API_STEP_SEGMENTS]Api_Play_Segment `mirai:"optional,label=Input that changes along the step: each segment holds its input for its ticks and the next one follows; in place of ticks and the input fields"`,
+    trace:Api_Play_Trace `mirai:"optional,label=Values of a few entities or of a storage read before the first tick and every some ticks and after the last: the trace of the result"`,
 }
 
 Api_Build_Params :: struct {
@@ -328,7 +330,7 @@ Api_Editor_Action :: struct {
 api_methods_register :: proc(s:^Session,st:^Api_State) {
     step_default:=Api_Step_Params{frames=1,dt=HEADLESS_DT}
     capture_default:=Api_Capture_Params{warmup_frames=1,dt=HEADLESS_DT,ui=true,seconds=-1}
-    play_step_default:=Api_Play_Step_Params{ticks=1,focus=-1}
+    play_step_default:=Api_Play_Step_Params{ticks=1,focus=-1,trace={every=1}}
     pause_default:=Api_Pause_Params{paused=true}
     api_register(s,st,{name="engine.status",summary="The state of the editor and of its renderer, and what the last frame cost by part of the main thread and by pass of the GPU.",result=Api_Status,flags={.Read_Only},run=api_status})
     api_register(s,st,{name="engine.step",summary="Advances whole frames of editor, game and render with a fixed dt. Manual execution only (headless).",params=Api_Step_Params,result=Api_Step_Result,defaults=&step_default,run=api_step})
@@ -351,7 +353,7 @@ api_methods_register :: proc(s:^Session,st:^Api_State) {
     api_register(s,st,{name="play.start",flags={.Core},summary="Plays a copy of the scene: outside a turn, in the editor; in a turn, a run of its own the editor does not show and only play.step advances. Up to three turns play besides the user. When an Odin source changed since the last build, it builds first and answers building: the game starts once the build stands.",params=Api_Play_Start_Params,result=Api_Play_Result,run=api_play_start})
     api_register(s,st,{name="play.stop",summary="Ends the game of the caller (its turn, or the user outside a turn, with its game on the network) and discards what it changed.",result=Api_Play_Result,flags={.Idempotent},run=api_play_stop})
     api_register(s,st,{name="play.pause",summary="Pauses the game, or resumes it with paused false: from the newest tick it played, or with here from the tick play.seek went to.",params=Api_Pause_Params,result=Api_Play_Result,defaults=&pause_default,run=api_play_pause})
-    api_register(s,st,{name="play.step",flags={.Core},summary="Pauses the game and runs exactly the fixed ticks asked for with the input given (keys, mouse, pointer and text for its UI, gamepads of the local seats), or until conditions hold.",params=Api_Play_Step_Params,result=Api_Play_Result,defaults=&play_step_default,run=api_play_step})
+    api_register(s,st,{name="play.step",flags={.Core},summary="Pauses the game and runs exactly the fixed ticks asked for with the input given (keys, mouse, pointer and text for its UI, gamepads of the local seats), or until conditions hold; segments change the input along the ticks and a trace reads values along them.",params=Api_Play_Step_Params,result=Api_Play_Step_Result,writes_result=true,defaults=&play_step_default,run=api_play_step})
     api_register(s,st,{name="play.status",summary="State of the game.",result=Api_Play_Result,flags={.Core,.Read_Only},run=api_play_status})
     api_register(s,st,{name="build.start",flags={.Core},summary="Starts the build of the editor of the project, whose new code loads into the running editor when it succeeds, or of the game to ship, which leaves the editor as it is; build.status follows it.",params=Api_Build_Params,result=Api_Build_Result,run=api_build_start})
     api_register(s,st,{name="build.status",summary="State of the build and its first error.",result=Api_Build_Result,flags={.Core,.Read_Only},run=api_build_status})
@@ -1199,8 +1201,10 @@ api_play_refused :: proc(call:^api.Call) {
 }
 
 @(private)
-api_play_result :: proc(s:^Session,call:^api.Call,r:^Run) {
-    result:=api.call_result(call,Api_Play_Result)
+api_play_result :: proc(s:^Session,call:^api.Call,r:^Run) {api_play_result_fill(s,api.call_result(call,Api_Play_Result),r)}
+
+@(private)
+api_play_result_fill :: proc(s:^Session,result:^Api_Play_Result,r:^Run) {
     result.ticks_dropped=s.app.stats.ticks_dropped
     if r==nil {return}
     result.playing=true
@@ -1333,9 +1337,9 @@ api_play_step :: proc(s:^Session,call:^api.Call) {
     }
     if !own {api_play_refused(call);return}
     owner:=r.owner
-    step,ok:=api_step_input(s,call,params)
+    timeline,ok:=api_step_timeline(call,params)
     if !ok {return}
-    if owner==0 && simulating(s) && (params.keys!={} || params.mouse_buttons!={} || params.mouse_delta!={} || params.wheel!={} || step.placed || step.text!="" || step.gamepads!={} || params.focus>=0) {
+    if owner==0 && simulating(s) && (api_timeline_input(timeline) || params.focus>=0) {
         api.call_fail(call,api.INVALID_PARAMS,"A simulation takes no player input")
         return
     }
@@ -1344,60 +1348,24 @@ api_play_step :: proc(s:^Session,call:^api.Call) {
         api.call_fail(call,api.INVALID_PARAMS,"That player has no run: play.start with online opens them")
         return
     }
-    until:=params.until[:api_list_count(step.until)]
-    met,problem:=api_conditions_read(s,run_ref(s,target),until,nil,"until")
-    if problem!="" {api.call_fail(call,api.INVALID_PARAMS,problem);return}
-    if params.focus>=0 && !api_seat_focus(s,call,target,params.focus) {return}
-    if owner==0 && !play_paused(s) {play_pause(s,true,stepped=true)}
-    ran:=0
-    for tick in 0..<params.ticks {
-        if len(until)>0 && met {break}
-        api_step_tick(s,owner,params,step,tick==0)
-        if api_frames(s,1,0)==0 {break}
-        ran+=1
-        // The run ends with its turn or with the document.
-        if r=run_find(s,owner);r==nil {break}
-        if len(until)==0 {continue}
-        if target=run_player(s,owner,params.player);target==nil {break}
-        if met,problem=api_conditions_read(s,run_ref(s,target),until,nil,"until");problem!="" {
-            api.call_failf(call,api.INVALID_PARAMS,"%s, after %d ticks",problem,ran)
+    values:[2]string
+    api.object_values(call.allocator,call.raw,{"until","trace"},values[:])
+    until:=params.until[:api_list_count(values[0])]
+    if _,problem:=api_conditions_read(s,run_ref(s,target),until,nil,"until");problem!="" {api.call_fail(call,api.INVALID_PARAMS,problem);return}
+    run:=Api_Step_Run{owner=owner,player=params.player,timeline=timeline,until=until}
+    trace:Api_Trace
+    traced:=values[1]!=""
+    if traced {
+        if problem:=api_trace_read(s,call,run_ref(s,target),&params.trace,values[1],api_timeline_ticks(timeline),&trace);problem!="" {
+            api.call_fail(call,api.INVALID_PARAMS,problem)
             return
         }
+        run.sampler={every=params.trace.every,take=api_trace_take,data=&trace}
     }
-    api_play_result(s,call,r)
-    result:=api.call_result(call,Api_Play_Result)
-    result.ran,result.met=ran,len(until)>0 && met
-}
-
-// The input of play.step beyond the keys and buttons it holds, checked.
-@(private)
-Api_Step_Input :: struct {
-    placed:bool, // mouse_position was given
-    until:string, // the JSON of until
-    text:string,
-    gamepads:[core.GAMEPAD_CAPACITY]core.Gamepad,
-}
-
-@(private)
-api_step_input :: proc(s:^Session,call:^api.Call,params:^Api_Play_Step_Params) -> (step:Api_Step_Input,ok:bool) {
-    values:[3]string
-    api.object_values(call.allocator,call.raw,{"mouse_position","gamepads","until"},values[:])
-    step.placed,step.until=values[0]!="",values[2]
-    if step.placed && (!rpc_finite(params.mouse_position.x) || !rpc_finite(params.mouse_position.y)) {
-        api.call_fail(call,api.INVALID_PARAMS,"mouse_position takes two finite numbers: points of the window from its top left")
-        return
-    }
-    step.text=base.text_get(params.text[:])
-    for c in step.text {
-        if c<' ' || c>'~' {api.call_failf(call,api.INVALID_PARAMS,"text takes printable ASCII from space to ~; %q has a character outside it",step.text);return}
-    }
-    for pad in params.gamepads[:api_list_count(values[1])] {
-        g:=&step.gamepads[pad.slot]
-        if g.connected {api.call_failf(call,api.INVALID_PARAMS,"gamepads: slot %d is given twice; give each gamepad once",pad.slot);return}
-        g.connected,g.down=true,pad.buttons
-        g.axes={.Left_X=pad.left_stick.x,.Left_Y=pad.left_stick.y,.Right_X=pad.right_stick.x,.Right_Y=pad.right_stick.y,.Left_Trigger=pad.left_trigger,.Right_Trigger=pad.right_trigger}
-    }
-    return step,true
+    if params.focus>=0 && !api_seat_focus(s,call,target,params.focus) {return}
+    ran,met,problem:=api_step_run(s,&run,api_step_frame)
+    if problem!="" {api.call_fail(call,api.INVALID_PARAMS,problem);return}
+    api_play_step_write(s,call,run_find(s,owner),ran,len(until)>0 && met,traced?&trace:nil)
 }
 
 // The elements of a JSON array as text; 0 for anything else.
@@ -1433,20 +1401,22 @@ api_seat_focus :: proc(s:^Session,call:^api.Call,r:^Run,slot:int) -> bool {
     return true
 }
 
-// One tick of play.step: every run of the game advances; the one of the player gets the input.
+// One tick of play.step: every run of the game advances; the one of the
+// player gets the input of step. first: the first tick of its segment, which
+// takes its pointer motion, wheel and text.
 @(private)
-api_step_tick :: proc(s:^Session,owner:int,params:^Api_Play_Step_Params,step:Api_Step_Input,first:bool) {
+api_step_tick :: proc(s:^Session,owner,player:int,step:^Api_Step_Input,first:bool) {
     for &other in s.runs {
         if other.world==nil || other.owner!=owner {continue}
         other.step=true
-        if other.player!=params.player {continue}
-        if step.placed {other.pointer,other.pointer_set=params.mouse_position,true}
+        if other.player!=player {continue}
+        if step.placed {other.pointer,other.pointer_set=step.mouse_position,true}
         given:core.Input
-        given.keys_down,given.mouse_down=params.keys,params.mouse_buttons
-        given.keys_pressed=params.keys-other.held_keys
-        given.keys_released=other.held_keys-params.keys
-        given.mouse_pressed=params.mouse_buttons-other.held_buttons
-        given.mouse_released=other.held_buttons-params.mouse_buttons
+        given.keys_down,given.mouse_down=step.keys,step.buttons
+        given.keys_pressed=step.keys-other.held_keys
+        given.keys_released=other.held_keys-step.keys
+        given.mouse_pressed=step.buttons-other.held_buttons
+        given.mouse_released=other.held_buttons-step.buttons
         given.mouse_position,given.gamepads=other.pointer,step.gamepads
         // The device used last stays until another is pressed.
         if held:=core.world_storage_of(run_ref(s,&other),core.Input);held!=nil {given.device=held.device}
@@ -1457,8 +1427,8 @@ api_step_tick :: proc(s:^Session,owner:int,params:^Api_Play_Step_Params,step:Api
             if g.pressed!={} {given.device={gamepad=true,slot=u8(slot)}}
         }
         if given.keys_pressed!={} || given.mouse_pressed!={} {given.device={}}
-        if first {given.mouse_delta,given.wheel=params.mouse_delta,params.wheel}
-        other.held_keys,other.held_buttons=params.keys,params.mouse_buttons
+        if first {given.mouse_delta,given.wheel=step.mouse_delta,step.wheel}
+        other.held_keys,other.held_buttons=step.keys,step.buttons
         // One store per value until odin-lang/Odin#7937 (see ODIN_WORKAROUNDS).
         other.input=given
         other.has_input=true
@@ -1486,8 +1456,8 @@ api_play_ui_input :: proc(given:core.Input,text:string) -> ui.Input {
 // run of player gets the input, whose edges are against what it held before.
 @(private)
 runs_tick_ask :: proc(s:^Session,owner,player:int,keys:core.Keys,buttons:core.Mouse_Buttons,mouse_delta,wheel:[2]f32) {
-    params:=Api_Play_Step_Params{player=player,keys=keys,mouse_buttons=buttons,mouse_delta=mouse_delta,wheel=wheel}
-    api_step_tick(s,owner,&params,{},true)
+    step:=Api_Step_Input{ticks=1,keys=keys,buttons=buttons,mouse_delta=mouse_delta,wheel=wheel}
+    api_step_tick(s,owner,player,&step,true)
 }
 
 // Whether the game loop of a run goes on every frame of the editor: the Play

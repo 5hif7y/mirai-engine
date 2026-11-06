@@ -17,12 +17,12 @@ Sheet :: struct {
     count:int,
 }
 
-// A grid of count tiles of frames of width by height, as square as the frames
-// let it be.
-sheet_make :: proc(count,width,height:int,allocator:=context.allocator) -> (sheet:Sheet,error:Error) {
-    if count<1 || count>SHEET_CAPACITY {return {},.Bad_Count}
+// A grid of count tiles of frames of width by height, columns across or, with
+// 0, as square as the frames let it be.
+sheet_make :: proc(count,width,height:int,allocator:=context.allocator,columns:=0) -> (sheet:Sheet,error:Error) {
+    if count<1 || count>SHEET_CAPACITY || columns<0 {return {},.Bad_Count}
     if width<=0 || height<=0 {return {},.Empty}
-    columns:=max(int(math.ceil(math.sqrt(f64(count)))),1)
+    columns:=min(columns,count) if columns>0 else max(int(math.ceil(math.sqrt(f64(count)))),1)
     rows:=(count+columns-1)/columns
     tile_width:=max(min(width,(SHEET_WIDTH-(columns-1)*SHEET_GAP)/columns),1)
     tile_height:=max((height*tile_width+width/2)/width,1)
@@ -82,6 +82,36 @@ sheet_put :: proc(sheet:^Sheet,k:int,pixels:[]f32,width,height:int,linear:bool,l
                 if linear {v=v<=0.0031308?v*12.92:1.055*math.pow(min(v,1),1/2.4)-0.055}
                 out[c]=u8(clamp(v,0,1)*255+0.5)
             }
+            out[3]=255
+        }
+    }
+    sheet_label(sheet,left,top,label)
+    return .None
+}
+
+// Puts a region of an RGBA8 image in tile k, scaled to it by averaging, with
+// label in its corner. What of the region falls outside the image is black.
+sheet_put_region :: proc(sheet:^Sheet,k:int,image:Image,region:Region,label:u64) -> Error {
+    if k<0 || k>=sheet.count {return .Bad_Count}
+    if region.w<=0 || region.h<=0 || image.width<=0 || image.height<=0 || len(image.pixels)<image.width*image.height*4 {return .Empty}
+    if region.w>ZOOM_MAX_SIDE || region.h>ZOOM_MAX_SIDE || abs(region.x)>ZOOM_MAX_SIDE || abs(region.y)>ZOOM_MAX_SIDE {return .Bad_Region}
+    tw,th:=sheet.tile.x,sheet.tile.y
+    left,top:=(k%sheet.columns)*(tw+SHEET_GAP),(k/sheet.columns)*(th+SHEET_GAP)
+    stride:=sheet.image.width
+    for y in 0..<th {
+        y0,y1:=region.y+y*region.h/th,region.y+max((y+1)*region.h/th,y*region.h/th+1)
+        for x in 0..<tw {
+            x0,x1:=region.x+x*region.w/tw,region.x+max((x+1)*region.w/tw,x*region.w/tw+1)
+            sum:[3]int
+            for sy in max(y0,0)..<min(y1,image.height) {
+                for sx in max(x0,0)..<min(x1,image.width) {
+                    pixel:=image.pixels[(sy*image.width+sx)*4:][:3]
+                    sum+={int(pixel[0]),int(pixel[1]),int(pixel[2])}
+                }
+            }
+            area:=(y1-y0)*(x1-x0)
+            out:=sheet.image.pixels[((top+y)*stride+left+x)*4:][:4]
+            for c in 0..<3 {out[c]=u8((sum[c]+area/2)/area)}
             out[3]=255
         }
     }

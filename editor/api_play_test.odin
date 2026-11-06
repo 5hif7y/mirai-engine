@@ -2,13 +2,17 @@ package editor
 
 import "base:runtime"
 import "core:fmt"
+import "core:math"
+import "core:slice"
 import "core:strings"
 import "core:testing"
+import img "mirai:cook/image"
 import "mirai:core"
 import "mirai:editor/api"
 import input "mirai:engine/input"
 import "mirai:host"
 import "mirai:platform"
+import gpu "mirai:render"
 import "mirai:std/base"
 import "mirai:std/serial"
 
@@ -254,14 +258,11 @@ a_step_gives_the_run_the_pointer_the_gamepads_and_the_text_of_its_ui :: proc(t:^
     if !probe_open(t,f) {return}
     defer probe_close(f)
     r:=run_find(&f.s,0)
-    params:=Api_Play_Step_Params{ticks=1,keys={.Enter},mouse_buttons={.Left},mouse_position={120,80},focus=-1}
-    step:Api_Step_Input
-    step.placed=true
-    step.text="go"
+    step:=Api_Step_Input{ticks=1,keys={.Enter},buttons={.Left},mouse_position={120,80},placed=true,text="go"}
     step.gamepads[1]={connected=true,down={.South}}
     step.gamepads[1].axes[.Left_X]=0.5
     play_pause(&f.s,true)
-    api_step_tick(&f.s,0,&params,step,true)
+    api_step_tick(&f.s,0,0,&step,true)
     testing.expect(t,r.pointer_set && r.pointer==[2]f32{120,80})
     testing.expect(t,.Left in r.ui.pressed && r.ui.clicks==1 && r.ui.pointer==[2]f32{120,80})
     testing.expect_value(t,string(r.ui.text[:r.ui.text_count]),"go")
@@ -275,7 +276,8 @@ a_step_gives_the_run_the_pointer_the_gamepads_and_the_text_of_its_ui :: proc(t:^
     testing.expect(t,running.input.device.gamepad && running.input.device.slot==1 || .Enter in running.input.keys_pressed)
     testing.expect(t,r.ui.pressed=={} && r.ui.text_count==0 && .Left in r.ui.down,"the edges of the UI last one tick")
     // The next step holds what it held: no edges.
-    api_step_tick(&f.s,0,&params,{gamepads=step.gamepads},false)
+    step.placed,step.text=false,""
+    api_step_tick(&f.s,0,0,&step,false)
     testing.expect(t,r.ui.pressed=={} && r.pointer==[2]f32{120,80})
     testing.expect(t,.South not_in r.input.gamepads[1].pressed && .South in r.input.gamepads[1].down)
     // Run until a condition: met before running runs nothing.
@@ -301,8 +303,8 @@ play_input_holds_actions_of_a_seat_by_name_for_the_ticks_that_run :: proc(t:^tes
     read:=core.read(&running.seats)
     // One tick as play.step runs it, without the frame of a window.
     step :: proc(f:^Probe) {
-        params:=Api_Play_Step_Params{ticks=1,focus=-1}
-        api_step_tick(&f.s,0,&params,{},true)
+        held:=Api_Step_Input{ticks=1}
+        api_step_tick(&f.s,0,0,&held,true)
         platform.frame_begin(f.p)
         play_input_update(&f.s)
         game_frame(&f.s)
@@ -335,4 +337,159 @@ play_input_holds_actions_of_a_seat_by_name_for_the_ticks_that_run :: proc(t:^tes
     testing.expect_value(t,error.code,0)
     step(f)
     testing.expect(t,input.seat_action(read,f.seat,PROBE_MOVE).released)
+}
+
+// A frame of the editor as a step runs it, without the window.
+@(private="file")
+probe_frame :: proc(s:^Session) -> bool {
+    platform.frame_begin(s.app.platform)
+    play_input_update(s)
+    game_frame(s)
+    return true
+}
+
+// What the game of a run took in each tick and the tick of each sample.
+@(private="file")
+Probe_Seen :: struct {keys:[16]core.Keys,deltas:[16][2]f32,ticks:[16]u64,count:int}
+
+@(private="file")
+probe_seen :: proc(s:^Session,data:rawptr,w:core.World_Ref,ran:int) -> string {
+    seen:=cast(^Probe_Seen)data
+    given:=core.world_storage_of(w,core.Input)
+    seen.keys[seen.count],seen.deltas[seen.count]=given.keys_down,given.mouse_delta
+    seen.ticks[seen.count]=core.world_storage_of(w,core.Time).tick
+    seen.count+=1
+    return ""
+}
+
+@(test)
+a_step_holds_each_segment_for_its_ticks_in_order_with_its_edges_at_its_first :: proc(t:^testing.T) {
+    f:=new(Probe);defer free(f)
+    if !probe_open(t,f) {return}
+    defer probe_close(f)
+    seen:Probe_Seen
+    timeline:=[]Api_Step_Input{{ticks=2,keys={.Space},mouse_delta={3,0}},{ticks=1},{ticks=2,keys={.Enter}}}
+    run:=Api_Step_Run{timeline=timeline,sampler={every=1,take=probe_seen,data=&seen}}
+    ran,_,problem:=api_step_run(&f.s,&run,probe_frame)
+    testing.expect_value(t,problem,"")
+    testing.expect_value(t,ran,5)
+    testing.expect_value(t,seen.count,5)
+    testing.expect(t,slice.equal(seen.keys[:5],[]core.Keys{{.Space},{.Space},{},{.Enter},{.Enter}}),"each segment for its ticks in order")
+    testing.expect(t,seen.deltas[0]==[2]f32{3,0} && seen.deltas[1]=={},"the motion is of the first tick of its segment")
+    refused:=[?]struct{params,says:string}{
+        {`{"segments":[{"ticks":1}],"keys":["Space"]}`,"keys goes inside each of segments"},
+        {`{"segments":[{"ticks":3000},{"ticks":1000}]}`,"segments run 4000 ticks"},
+        {`{"segments":[]}`,"segments is empty"},
+        {`{"segments":[{"ticks":1,"text":"a\tb"}]}`,"segments[0].text"},
+    }
+    for c in refused {
+        error,_:=probe_call(f,"play.step",c.params)
+        testing.expectf(t,error.code==api.INVALID_PARAMS && strings.contains(error.message,c.says),"%s: %v",c.params,error)
+    }
+}
+
+@(test)
+a_trace_reads_a_row_before_the_first_tick_every_some_ticks_and_after_the_last :: proc(t:^testing.T) {
+    f:=new(Probe);defer free(f)
+    if !probe_open(t,f) {return}
+    defer probe_close(f)
+    r:=run_find(&f.s,0)
+    running:=cast(^Probe_World)r.world
+    call:=api.Call{allocator=context.temp_allocator,out=&f.out}
+    p:=Api_Play_Trace{every=2}
+    copy(p.name[:],"Hero")
+    copy(p.fields[0][:],"world_position[0]")
+    copy(p.fields[1][:],"components.Probe_Health.points")
+    trace:Api_Trace
+    testing.expect_value(t,api_trace_read(&f.s,&call,run_ref(&f.s,r),&p,`{"name":"Hero","fields":["",""]}`,5,&trace),"")
+    score:=Api_Play_Trace{every=2}
+    copy(score.storage[:],"Probe_Score")
+    copy(score.fields[0][:],"points")
+    scores:Api_Trace
+    testing.expect_value(t,api_trace_read(&f.s,&call,run_ref(&f.s,r),&score,`{"fields":[""]}`,5,&scores),"")
+    // Both traces sample at the same ticks; the run takes one sampler.
+    both :: proc(s:^Session,data:rawptr,w:core.World_Ref,ran:int) -> string {
+        traces:=cast(^[2]^Api_Trace)data
+        if problem:=api_trace_take(s,traces[0],w,ran);problem!="" {return problem}
+        return api_trace_take(s,traces[1],w,ran)
+    }
+    traces:=[2]^Api_Trace{&trace,&scores}
+    run:=Api_Step_Run{timeline=[]Api_Step_Input{{ticks=5}},sampler={every=2,take=both,data=&traces}}
+    start,points:=running.time.tick,running.score.points
+    ran,_,problem:=api_step_run(&f.s,&run,probe_frame)
+    testing.expect_value(t,problem,"")
+    testing.expect_value(t,ran,5)
+    rows:=[4]u64{0,2,4,5}
+    expected:=strings.builder_make(context.temp_allocator)
+    for at,i in rows {fmt.sbprintf(&expected,`%s{{"tick":%d,"values":[%d]}}`,i>0?",":"",start+at,points+int(at))}
+    testing.expect_value(t,string(serial.writer_bytes(&scores.rows)),strings.to_string(expected))
+    testing.expect(t,strings.has_suffix(string(serial.writer_bytes(&trace.rows)),fmt.tprintf(`{{"tick":%d,"values":[1,3]}}`,start+5)),string(serial.writer_bytes(&trace.rows)))
+    serial.writer_reset(&f.out)
+    api_play_step_write(&f.s,&call,r,ran,false,&trace)
+    text:=string(serial.writer_bytes(&f.out))
+    testing.expect(t,strings.contains(text,fmt.tprintf(`"columns":[{{"entity":"0x%016x","name":"Hero","field":"world_position[0]"}}`,u64(f.hero))),text)
+    api_result_shape_expect(t,text,Api_Play_Step_Result)
+    refused:=[?]struct{params,says:string}{
+        {`{"trace":{"storage":"Probe_Score","fields":["lives"]}}`,"it has"},
+        {`{"trace":{"fields":["points"]}}`,"name what it reads"},
+        {`{"trace":{"storage":"Probe_Score","fields":[]}}`,"trace.fields is empty"},
+        {`{"ticks":3600,"trace":{"storage":"Probe_Score","fields":["points"]}}`,"give every 15 or more"},
+        {`{"trace":{"name":"Hero","fields":["components.Nothing.x"]}}`,"Nothing"},
+    }
+    for c in refused {
+        error,_:=probe_call(f,"play.step",c.params)
+        testing.expectf(t,error.code==api.INVALID_PARAMS && strings.contains(error.message,c.says),"%s: %v",c.params,error)
+    }
+}
+
+@(test)
+a_filmstrip_cell_comes_before_the_first_tick_and_every_every_ticks_around_its_entity :: proc(t:^testing.T) {
+    f:=new(Probe);defer free(f)
+    if !probe_open(t,f) {return}
+    defer probe_close(f)
+    r:=run_find(&f.s,0)
+    running:=cast(^Probe_World)r.world
+    call:=api.Call{allocator=context.temp_allocator,raw=`{"every":3,"count":4,"segments":[{"ticks":2,"keys":["Space"]}],"follow":"Hero"}`}
+    p:=Api_Play_Capture_Params{frames=1,every=3,count=4,size={64,32}}
+    p.segments[0]={ticks=2,keys={.Space}}
+    copy(p.follow[:],"Hero")
+    strip,ok:=api_filmstrip_read(&f.s,&call,r,true,&p)
+    testing.expect(t,ok && strip!=nil && strip.follow==f.hero,call.error.message)
+    if strip==nil {return}
+    testing.expect_value(t,len(strip.run.timeline),2)
+    testing.expect(t,strip.run.timeline[0].keys=={.Space} && strip.run.timeline[1].ticks==7 && strip.run.timeline[1].keys=={},"the segments and then nothing held")
+    // The cells without the GPU: what each one sees.
+    seen:Probe_Seen
+    strip.run.sampler.take,strip.run.sampler.data=probe_seen,&seen
+    start:=running.time.tick
+    probe_seen(&f.s,&seen,run_ref(&f.s,r),0)
+    ran,_,problem:=api_step_run(&f.s,&strip.run,probe_frame)
+    testing.expect_value(t,problem,"")
+    testing.expect_value(t,ran,9)
+    testing.expect(t,slice.equal(seen.ticks[:seen.count],[]u64{start,start+3,start+6,start+9}),"a cell every 3 ticks from the one before the first")
+    // Where the entity shows and the cell around it, kept beside the image when it is far off.
+    camera:=gpu.Camera{position={0,0,10},forward={0,0,-1},up={0,1,0},fov_y=90,near=0.1}
+    at,shown:=api_view_project(camera,{100,50,200,100},{0,0,0})
+    testing.expect(t,shown && abs(at.x-200)<1e-3 && abs(at.y-100)<1e-3,"the centre of the view")
+    at,shown=api_view_project(camera,{100,50,200,100},{5,0,0})
+    testing.expect(t,shown && abs(at.x-225)<1e-3,"a quarter of the half width to the right")
+    _,shown=api_view_project(camera,{100,50,200,100},{0,0,20})
+    testing.expect(t,!shown,"behind the camera")
+    testing.expect_value(t,api_filmstrip_region({225,100},{64,32},{400,300}),img.Region{193,84,64,32})
+    testing.expect_value(t,api_filmstrip_region({1e9,-1e9},{64,32},{400,300}),img.Region{432,-48,64,32})
+    testing.expect_value(t,api_filmstrip_region({f32(math.nan_f32()),0},{64,32},{400,300}),img.Region{168,134,64,32})
+    refused:=[?]struct{params,says:string}{
+        {`{"count":4}`,"count is of a filmstrip"},
+        {`{"every":3}`,"count: give the cells"},
+        {`{"every":100,"count":64}`,"lower every or count"},
+        {`{"every":3,"count":4,"follow":"Nobody"}`,"names no entity"},
+        {`{"every":3,"count":2,"segments":[{"ticks":5}]}`,"segments run 5 ticks"},
+        {`{"every":3,"count":2,"follow":"Hero","region":[0,0,10,10]}`,"not both"},
+        {`{"every":3,"count":2,"size":[100,100]}`,"give follow"},
+        {`{"every":3,"count":2,"region":[0,0,0,10]}`,"region takes"},
+    }
+    for c in refused {
+        error,_:=probe_call(f,"play.capture",c.params)
+        testing.expectf(t,error.code==api.INVALID_PARAMS && strings.contains(error.message,c.says),"%s: %v",c.params,error)
+    }
 }

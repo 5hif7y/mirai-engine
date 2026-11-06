@@ -191,6 +191,32 @@ a_sheet_tiles_evenly_spaced_frames_in_order_each_with_its_number :: proc(t:^test
     testing.expect_value(t,error,Error.Bad_Count)
 }
 
+@(test)
+a_sheet_of_given_columns_takes_regions_of_frames_black_outside_them :: proc(t:^testing.T) {
+    sheet,error:=sheet_make(5,40,20,context.temp_allocator,columns=2)
+    testing.expect_value(t,error,Error.None)
+    defer sheet_destroy(&sheet)
+    testing.expect(t,sheet.columns==2 && sheet.rows==3 && sheet.tile==[2]int{40,20})
+    pixels:=make([]u8,100*50*4,context.temp_allocator)
+    for i in 0..<100*50 {pixels[i*4],pixels[i*4+3]=200,255}
+    frame:=Image{pixels=pixels,width=100,height=50}
+    // Tile 3 is the second of the second row; its region goes past the right edge of the frame.
+    testing.expect_value(t,sheet_put_region(&sheet,3,frame,{80,10,40,20},7),Error.None)
+    at :: proc(s:^Sheet,x,y:int) -> [4]u8 {
+        p:=s.image.pixels[(y*s.image.width+x)*4:][:4]
+        return {p[0],p[1],p[2],p[3]}
+    }
+    left,top:=40+SHEET_GAP,20+SHEET_GAP
+    testing.expect_value(t,at(&sheet,left+10,top+15),[4]u8{200,0,0,255})
+    testing.expect_value(t,at(&sheet,left+30,top+15),[4]u8{0,0,0,255})
+    testing.expect_value(t,at(&sheet,left+10,15),[4]u8{0,0,0,255})
+    testing.expect_value(t,sheet_put_region(&sheet,5,frame,{0,0,40,20},0),Error.Bad_Count)
+    testing.expect_value(t,sheet_put_region(&sheet,0,frame,{0,0,0,20},0),Error.Empty)
+    testing.expect_value(t,sheet_put_region(&sheet,0,frame,{max(int)/2,0,40,20},0),Error.Bad_Region)
+    _,error=sheet_make(4,40,20,columns=-1)
+    testing.expect_value(t,error,Error.Bad_Count)
+}
+
 // A wall lit in a gradient, with blotches of `strength` of its light every
 // `every` pixels, `size` pixels wide.
 wall :: proc(width,height:int,scale,strength:f64,every,size:int) -> Image {

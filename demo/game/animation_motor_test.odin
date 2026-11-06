@@ -52,7 +52,7 @@ animation_input_fixture_destroy :: proc(f:^Animation_Input_Fixture) {
 
 @(private)
 animation_input_physics :: proc(f:^Animation_Input_Fixture,time:core.Time) {
-    phys.locomotion_step(&f.characters,&f.character_moves,&f.inputs,core.read(&f.walks),core.read(&f.flights),core.read(&f.swims),core.read(&f.character_states),core.read(&f.body_states),core.read(&f.worlds),core.read(&f.remotes),{&f.physics},{},{},&f.locomotion_requests,time,core.CLOCK_DEFAULT,&f.problems)
+    phys.locomotion_step(&f.characters,&f.character_moves,&f.inputs,core.read(&f.walks),core.read(&f.flights),core.read(&f.swims),core.read(&f.character_states),core.read(&f.body_states),core.read(&f.transforms),core.read(&f.parents),core.read(&f.remotes),{&f.physics},{},{},&f.locomotion_requests,time,core.CLOCK_DEFAULT,&f.problems)
     core.table_settle(&f.characters,&f.entities);core.table_settle(&f.inputs,&f.entities);core.table_settle(&f.character_moves,&f.entities)
     phys.physics_step(&f.physics,{&f.settings},&f.body_requests,&f.body_events,&f.collider_meshes,&f.app,time,core.read(&f.rigids),core.read(&f.colliders),core.read(&f.characters),core.read(&f.character_moves),&f.joints,core.read(&f.meshes),core.read(&f.parents),core.read(&f.names),&f.transforms,&f.body_states,core.read(&f.replicas),&f.character_states,&f.joint_states,{},nil,{},{},nil,nil,&f.problems,{},{},{},{},{},core.ref(&f.hierarchy))
     core.table_settle(&f.body_states,&f.entities);core.table_settle(&f.character_states,&f.entities);core.table_settle(&f.joint_states,&f.entities)

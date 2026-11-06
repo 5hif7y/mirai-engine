@@ -260,7 +260,8 @@ a_mode_needs_its_component :: proc(t:^testing.T) {
     core.table_settle(&inputs,&es);core.table_settle(&moves,&es)
     testing.expect(t,core.has(&inputs,walker) && core.has(&moves,walker),"playing adds its Move_Input and its Character_Move")
     looking,_:=core.get(core.read(&inputs),walker)
-    testing.expectf(t,abs(looking.look_yaw-2.5)<1e-4,"it looks where its Transform turns it, not %v",looking.look_yaw)
+    // Its body faces +Z, its look -Z: the look is half a turn from where the Transform turns the body.
+    testing.expectf(t,abs(looking.look_yaw-mm.angle_wrap(2.5-cmath.PI))<1e-4,"it looks where its Transform turns its body, not %v",looking.look_yaw)
 }
 
 // Walks in from the shallows, swims on the surface with its head out, dives,

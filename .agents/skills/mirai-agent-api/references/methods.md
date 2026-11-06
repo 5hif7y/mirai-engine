@@ -489,6 +489,8 @@ result of `play.status`, `paused`, `simulating` and `input_released` are the use
   to the newest tick it played; with `here`, it continues from the tick `play.seek` went to, with
   what was edited there, and discards the later ones.
 - `play.step`: pauses the user's Play, or takes the run of the turn. Input reaches only that run;
+  between steps the viewport keeps the game's camera and builds its UI without advancing time, so
+  a step can hover and click the game UI and the game reads those events on its next tick;
   in a networked game of a turn all its runs advance and the input goes to that of `player`.
   - Input: keys, buttons, `mouse_position`, `text` and gamepads arrive through the path of real
     input. The pointer stays where a step leaves it and the game UI takes it with its clicks

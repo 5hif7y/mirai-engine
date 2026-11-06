@@ -1,7 +1,7 @@
 # Shapes
 
 `shapes` (`Runtime` and `Editor`; depends on `physics`) makes editable solids for any game: level
-blockout, and games where players stamp squares, circles and triangles onto flat outlines to add or
+blockout, and games where players stamp squares, circles, stars and other shapes onto flat outlines to add or
 cut material, drag vertices, and make pieces static or physical.
 
 ## Source and derived
@@ -83,16 +83,17 @@ cut material, drag vertices, and make pieces static or physical.
 
 ### Strokes
 
-- A drag is one `Shape_Stroke`: the brush (a convex loop around 0) swept along the path of the
-  pointer, its area one polygon with holes in the units of the plane
+- A drag is one `Shape_Stroke`: the brush (a simple loop around 0, convex or not) swept along the
+  path of the pointer, its area one polygon with holes in the units of the plane
   (`shape_stroke_begin`, `shape_stroke_to`, `shape_stroke_area`).
 - The path is simplified as it comes: a point nearer than the tolerance to the last one kept is
   left out, and a kept point becomes a corner only when no line from the last corner passes
   within the tolerance of every point kept since (a sleeve fit). The caller gives the tolerance as
   a few pixels of the screen in plane units at the current zoom, so the shake of a hand goes
   where it happens; the same path read at any rate gives the same area within the tolerance.
-- The area is the union of the convex hulls of the brush at both ends of each segment. The
-  segments before the last corner stay united, so a point costs two booleans at most.
+- The area is the union of the convex hulls of each convex piece of the brush at both ends of each
+  segment, so a concave brush keeps its dents. The segments before the last corner stay united,
+  so a point costs two booleans per piece at most.
 - **Edits.** `Shape_Edit` applies a stroke to the Outline shapes of a plane, without entities of
   its own, so the editor tool and a game share it: the caller begins it with the stamp, the plane,
   add or cut and what a new shape starts from (`shape_edit_begin`), gives it the shapes it may
@@ -123,7 +124,7 @@ the plane of the shape selected last (its local XY at z = 0) or, with no shape s
 plane z = 0 of the world. W, E and R lend the scene to the gizmo and the selection; a mode takes
 it back.
 
-- **Stamp** (1): square, circle or triangle, size, angle, Add or Cut (X) and the material of new
+- **Stamp** (1): a kind of `Stamp_Kind` (square, circle, triangle, star, heart...), size, angle, Add or Cut (X) and the material of new
   shapes. A press and its drag are one stroke, its tolerance two points of the window on the plane
   under the pointer. The stroke is a `Shape_Edit` given the Outline shapes of the plane when it
   begins, and writes what changed each frame through the edits of the step. Adding joins the first of them the

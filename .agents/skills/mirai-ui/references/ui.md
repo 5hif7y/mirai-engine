@@ -423,7 +423,11 @@ The node types are in `Node_Kind` (`tree.odin`) and the events in `Tree_Event`.
 - **Input.** A `Button` with `action` is also pressed with that game action (with `hold`, only after
   holding it); `Action_Bar` lists the buttons with an action of its tree with their prompts. A
   `passive` tree takes no input; `order`, `nav`, `Focus_First` and `Wrap_X`/`Wrap_Y` build its
-  navigation.
+  navigation. Each `Tree_Event` carries the rect of its node, so the game can point at what was
+  hovered or pressed.
+- **Floats.** A node's `float` applies to every kind, also to one that holds no children (a
+  `Button` over an icon and its name): it floats from its parent like a box would. A `Tooltip`
+  opens where its node's float anchor, pivot and offset say.
 - **Drag and drop.** A `Draggable` node is dragged past `DRAG_DISTANCE` with its `tag`; under the
   pointer goes the node that `ghost` names, even if the tree hides it, or a copy of the node. A
   `Drop` takes only what its `accepts` carries, has the `Over` state while something is over it and

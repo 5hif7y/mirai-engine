@@ -18,7 +18,7 @@ Stamp_Params :: struct {
     id:base.Entity_Id `mirai:"optional,label=A shape whose local XY at z 0 is the plane, and the first an add joins; 0: the plane z 0 of the world"`,
     points:[STAMP_POINTS][3]f32 `mirai:"unit=m,label=World points in order, taken onto the plane: the stamp swept along the path through them"`,
     kind:shapes.Stamp_Kind `mirai:"optional"`,
-    size:f32 `mirai:"optional,min=0.01,max=100,unit=m,label=Half the width of the square; the radius of the circle and of the circle around the triangle"`,
+    size:f32 `mirai:"optional,min=0.01,max=100,unit=m,label=Half the width of the square and the radius of the circle; the other kinds reach about as far"`,
     angle:f32 `mirai:"optional,angle"`,
     cut:bool `mirai:"optional,label=Cuts the stamps out of every outline shape of the plane instead of adding them to one"`,
     material:base.Asset_Id `mirai:"optional,kind=.mat,label=Of a shape the stroke makes"`,
@@ -46,7 +46,7 @@ Corner_Result :: struct {
 @(private)
 api_register :: proc(s:^editor.Session) {
     defaults:=Stamp_Params{size=SETTINGS_DEFAULT.size}
-    editor.api_method_register(s,{name="shapes.stamp",summary="Sweeps a square, circle or triangle along world points over the outline shapes of a plane, as the Stamp mode of the Shapes tool: adding joins the area to the first shape it touches at the first point or makes one, cutting takes it out of every outline shape of the plane, splitting it into shapes or deleting it. One step of undo.",params=Stamp_Params,params_info=type_info_of(Stamp_Params),result=Stamp_Result,result_info=type_info_of(Stamp_Result),defaults=&defaults,run=api_stamp})
+    editor.api_method_register(s,{name="shapes.stamp",summary="Sweeps a stamp (square, circle, star, heart...) along world points over the outline shapes of a plane, as the Stamp mode of the Shapes tool: adding joins the area to the first shape it touches at the first point or makes one, cutting takes it out of every outline shape of the plane, splitting it into shapes or deleting it. One step of undo.",params=Stamp_Params,params_info=type_info_of(Stamp_Params),result=Stamp_Result,result_info=type_info_of(Stamp_Result),defaults=&defaults,run=api_stamp})
     editor.api_method_register(s,{name="shapes.corner",summary="Moves, inserts or removes a corner of an outline shape at world points, as the Corners mode of the Shapes tool. A change that would make edges cross is refused. One step of undo.",params=Corner_Params,params_info=type_info_of(Corner_Params),result=Corner_Result,result_info=type_info_of(Corner_Result),run=api_corner})
 }
 

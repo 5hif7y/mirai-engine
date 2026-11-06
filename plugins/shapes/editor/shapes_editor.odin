@@ -12,7 +12,7 @@ import "mirai:std/base"
 import mm "mirai:std/math"
 import "mirai:ui"
 
-// The Shapes tool: stamps squares, circles and triangles onto the outline
+// The Shapes tool: stamps squares, circles, stars and the other kinds onto the outline
 // shapes of a plane, drags, inserts and removes their corners, and places
 // brushes of solids on the surface under the pointer. The camera stays free;
 // the outline modes work on the plane of the shape selected, its local XY at

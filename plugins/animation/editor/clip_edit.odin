@@ -45,9 +45,9 @@ Clip_Edit_Params :: struct {
     clip:[64]u8 `mirai:"text,optional,label=Its clip; empty is the first"`,
     skeleton:base.Asset_Id `mirai:"optional,label=Its skeleton; or id"`,
     id:base.Entity_Id `mirai:"optional,label=An entity whose rig gives the skeleton"`,
-    edits:[CLIP_EDIT_STEPS]Clip_Edit_Step `mirai:"label=Applied in order"`,
-    name:[64]u8 `mirai:"text,optional,label=Name of the new clip; empty adds ' edited'"`,
-    path:[1024]u8 `mirai:"text,optional,label=A new .anim for it; empty adds it to asset"`,
+    edits:[CLIP_EDIT_STEPS]Clip_Edit_Step `mirai:"optional,label=Applied in order; empty copies the clip with its keys as they are"`,
+    name:[64]u8 `mirai:"text,optional,label=Name of the new clip; empty keeps the clip's in another .anim and adds ' edited' in asset"`,
+    path:[1024]u8 `mirai:"text,optional,label=The .anim it goes into: a new one, or one whose clips move the same skeleton; empty is asset"`,
     replace:bool `mirai:"optional,label=Replaces a clip of that name"`,
     rate:f32 `mirai:"optional,min=1,max=240,label=Frames per second of the result"`,
     loop:Clip_Loop `mirai:"optional"`,
@@ -329,8 +329,7 @@ clip_edit :: proc(s:^editor.Session,call:^api.Call) {
     index,found:=authoring_clip_index(call,animation,base.text_get(p.clip[:]));if !found {return}
     skeleton,has:=clip_skeleton(s,call,p.skeleton,p.id,&skeleton_file);if !has {return}
     sampled,sampled_ok:=clip_sample(call,animation,index,skeleton,p.rate,p.loop);if !sampled_ok {return}
-    steps,listed:=api.params_array_count(call,"edits")
-    if !listed || steps==0 {authoring_failure(call,"edits","Required","one to 16 edits","none","Nothing to do",fix=`Pass edits, for example [{"verb":"Smooth","amount":0.3}]`);return}
+    steps,_:=api.params_array_count(call,"edits")
     steps=min(steps,CLIP_EDIT_STEPS)
     edits_raw,_:=authoring_json_field(call.raw,"edits",call.allocator)
     max_frames:=aa.ANIMATION_MAX_KEYS/max(len(skeleton.bones)*3,1)
@@ -353,20 +352,38 @@ clip_edit :: proc(s:^editor.Session,call:^api.Call) {
         }
         frames,markers=output,moved
     }
-    name:=base.text_get(p.name[:])
-    if name=="" {name=fmt.tprintf("%s edited",sampled.name[:min(len(sampled.name),56)])}
-    clip:=clip_desc(sampled,frames,name,markers[:])
-    clip.skeleton=skeleton_file.file.blob.header.id
-    // The new clip goes into a new file or among the clips of the asset.
-    clips:[]aa.Animation_Clip_Desc
-    target:=file
-    id:=p.asset
+    // The .anim it goes into: asset, another one at path whose clips move the same skeleton, or a
+    // new one at path.
+    target,target_view,id:=file,animation,p.asset
+    other:Authoring_File;defer aa.asset_close(&other.file)
+    created:=false
     if path:=base.text_get(p.path[:]);path!="" {
-        created:bool
-        target,id,created=authoring_create_target(s,call,path,".anim");if !created {return}
+        if record,found:=aa.registry_find_path(&s.app.assets.registry,path);found {
+            if record.kind!=aa.KIND_ANIMATION {authoring_failure(call,"path","Invalid_Asset","a new path, or an .anim",fmt.tprintf("kind %v",record.kind),"The path holds another kind of asset",fix="Pass a new path ending in .anim, or the path of an .anim");return}
+            if record.id!=p.asset {
+                view,opened:=authoring_clip_open(s,call,record.id,&other);if !opened {return}
+                if !clip_same_skeleton(call,view,skeleton) {return}
+                target,target_view,id=other,view,record.id
+            }
+        } else {
+            target,id,created=authoring_create_target(s,call,path,".anim");if !created {return}
+        }
+    }
+    name:=base.text_get(p.name[:])
+    if name=="" {name=sampled.name if id!=p.asset else fmt.tprintf("%s edited",sampled.name[:min(len(sampled.name),56)])}
+    clip:aa.Animation_Clip_Desc
+    if steps==0 {
+        source,prepared:=authoring_clip_descs(animation,call);if !prepared {return}
+        clip=source[index];clip.name=name
+    } else {
+        clip=clip_desc(sampled,frames,name,markers[:])
+        clip.skeleton=skeleton_file.file.blob.header.id
+    }
+    clips:[]aa.Animation_Clip_Desc
+    if created {
         clips=make([]aa.Animation_Clip_Desc,1,call.allocator);clips[0]=clip
     } else {
-        existing,prepared:=authoring_clip_descs(animation,call);if !prepared {return}
+        existing,prepared:=authoring_clip_descs(target_view,call);if !prepared {return}
         at:=len(existing)
         for &value,i in existing {if value.name==name {at=i}}
         if at<len(existing) && !p.replace {authoring_failure(call,"name","Already_Exists","a clip name the asset does not have",name,"The asset already has a clip of that name",fix="Pass another name, or replace=true");return}
@@ -375,7 +392,7 @@ clip_edit :: proc(s:^editor.Session,call:^api.Call) {
         clips=updated
     }
     doc:aa.Document;defer aa.document_destroy(&doc)
-    if error:=aa.animation_document(&doc,&s.app.assets.types,{id=id,clips=clips,source=animation.source if target.file.file!=nil else nil},s.app.allocator);error!=.None {authoring_failure(call,"edits","Invalid_Result","keys and markers within the clip capacities",fmt.tprintf("%v",error),"The edited clip could not be stored",api.SERVER_ERROR if error==.Out_Of_Memory else api.INVALID_PARAMS);return}
+    if error:=aa.animation_document(&doc,&s.app.assets.types,{id=id,clips=clips,source=target_view.source if !created else nil},s.app.allocator);error!=.None {authoring_failure(call,"edits","Invalid_Result","keys and markers within the clip capacities",fmt.tprintf("%v",error),"The edited clip could not be stored",api.SERVER_ERROR if error==.Out_Of_Memory else api.INVALID_PARAMS);return}
     Written :: struct {sampled:^Clip_Sampled,frames:lib.Frames,name:string,skeleton:aa.Skeleton_View}
     written:=Written{&sampled,frames,name,skeleton}
     authoring_publish(s,call,target,&doc,proc(call:^api.Call,data:rawptr) {
@@ -384,6 +401,22 @@ clip_edit :: proc(s:^editor.Session,call:^api.Call) {
         metrics_write(call.out,"before",w.sampled.rig,w.skeleton.bones,w.sampled.frames,16)
         metrics_write(call.out,"after",w.sampled.rig,w.skeleton.bones,w.frames,16)
     },&written)
+}
+
+// Whether every bone track of an .anim names a bone of the skeleton: the clips of a library move
+// one skeleton.
+@(private)
+clip_same_skeleton :: proc(call:^api.Call,view:aa.Animation_View,skeleton:aa.Skeleton_View) -> bool {
+    bones:=make(map[u64]struct{},len(skeleton.bones),context.temp_allocator)
+    for &bone in skeleton.bones {bones[base.name_hash(base.text_get(bone.path[:]))]={}}
+    for &track in view.tracks {
+        if track.property==.Float || track.property==.Vector {continue}
+        target:=base.text_get(track.target[:])
+        if base.name_hash(target) in bones {continue}
+        authoring_failure(call,"path","Other_Skeleton","an .anim whose clips move the bones of the skeleton",target,"The .anim at path animates another skeleton",fix="Pass the path of an .anim made for this skeleton, or a new path")
+        return false
+    }
+    return true
 }
 
 // The tracks of a clip from its frames: a key a frame for what moves, one key

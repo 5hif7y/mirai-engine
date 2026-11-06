@@ -115,4 +115,37 @@ clip_edit_retimes_smooths_and_loops_into_a_new_clip_with_metrics_before_and_afte
     result=authoring_test_execute(f,"edit",fmt.tprintf(`{{%s,"path":"mirror.anim","edits":[{{"verb":"Mirror"}},{{"verb":"Offset","part":"Spine","direction":"Forward","strength":"Medium","range":[0.2,0.8]}}]}}`,ids))
     testing.expect(t,result.code==0,result.data)
     testing.expect(t,authoring_test_exists(f,"mirror.anim"))
+
+    // Without edits the clip is copied with its keys, here into the .anim just made (whose clip
+    // kept its name), which moves the same skeleton: a library of clips picked from another.
+    copy_request:=fmt.tprintf(`{{%s,"clip":"sway","path":"mirror.anim","name":"plain","edits":[]}}`,ids)
+    result=authoring_test_execute(f,"edit",copy_request)
+    if !testing.expectf(t,result.code==0,"%s %s",result.message,result.data) {return}
+    picked:aa.Asset
+    if testing.expect_value(t,authoring_test_load(f,"mirror.anim",&picked),aa.Error.None) {
+        library,library_error:=aa.animation_view(&picked,&f.assets.types)
+        source:=view.clips[0]
+        if testing.expect(t,library_error==.None && len(library.clips)==2) {
+            copied:=library.clips[1]
+            testing.expect(t,base.text_get(library.clips[0].name[:])=="sway" && base.text_get(copied.name[:])=="plain")
+            testing.expect(t,copied.track_count==source.track_count && copied.marker_count==source.marker_count && copied.root==source.root)
+            for track,i in library.tracks[copied.first_track:][:copied.track_count] {
+                original:=view.tracks[source.first_track+u32(i)]
+                testing.expect(t,track.target==original.target && track.key_count==original.key_count && view.keys[original.first_key]==library.keys[track.first_key])
+            }
+        }
+        aa.asset_close(&picked)
+    }
+    result=authoring_test_execute(f,"edit",copy_request)
+    testing.expect(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,`"code":"Already_Exists"`))
+    result=authoring_test_execute(f,"edit",strings.concatenate({copy_request[:len(copy_request)-1],`,"replace":true,"edits":[{"verb":"Face_Rest"}]}`},context.temp_allocator))
+    testing.expectf(t,result.code==0,"%s %s",result.message,result.data)
+    // Another skeleton's library, or another kind of asset, does not take it.
+    turn:=[2]lib.Keyframe{{time=0,value=lib.quat_vec4(1)},{time=1,value=lib.quat_vec4(1)}}
+    testing.expect_value(t,aa.animation_save(fmt.tprintf("%s/other.anim",f.root),&f.assets.types,{id={812,3},clips={{name="nod",tracks={{target="neck",property=.Rotation,keys=turn[:]}}}}}),aa.Error.None)
+    testing.expect(t,host.assets_scan(&f.assets))
+    result=authoring_test_execute(f,"edit",fmt.tprintf(`{{%s,"clip":"sway","path":"other.anim"}}`,ids))
+    testing.expect(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,`"code":"Other_Skeleton"`) && strings.contains(result.data,`"actual":"neck"`))
+    result=authoring_test_execute(f,"edit",fmt.tprintf(`{{%s,"clip":"sway","path":"figure.skeleton"}}`,ids))
+    testing.expect(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,`"code":"Invalid_Asset"`))
 }

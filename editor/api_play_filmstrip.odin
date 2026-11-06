@@ -3,6 +3,7 @@ package editor
 import "core:fmt"
 import "core:math"
 import "core:math/linalg"
+import "core:mem"
 import img "mirai:cook/image"
 import "mirai:core"
 import "mirai:editor/api"
@@ -116,25 +117,32 @@ api_filmstrip_run :: proc(s:^Session,call:^api.Call,strip:^Api_Filmstrip,path:st
     // The write takes the pixels.
     strip.sheet={}
     if !api_png_write(s,path,sheet.image.pixels,sheet.image.width,sheet.image.height) {api.call_fail(call,api.SERVER_ERROR,"The filmstrip could not be written");return}
+    api_png_content(call,path,api_filmstrip_result(path,sheet,strip.cells[:strip.taken],strip.follow!=core.NONE,call.allocator))
+}
+
+// What a filmstrip answers besides its image: where it is, its grid and the tick of each cell.
+@(private)
+api_filmstrip_result :: proc(path:string,sheet:img.Sheet,cells:[]Api_Filmstrip_Cell,followed:bool,allocator:mem.Allocator) -> string {
     out:serial.Writer
-    serial.writer_init(&out,1024,call.allocator)
+    serial.writer_init(&out,1024,allocator)
     serial.text_write_raw(&out,`{"path":`);serial.text_write_string(&out,path)
     api.write_int(&out,"width",i64(sheet.image.width));api.write_int(&out,"height",i64(sheet.image.height))
     api.write_int(&out,"columns",i64(sheet.columns));api.write_int(&out,"rows",i64(sheet.rows))
     api.write_key(&out,"cell");serial.write_u8(&out,'[')
     serial.text_write_int(&out,i64(sheet.tile.x));serial.write_u8(&out,',');serial.text_write_int(&out,i64(sheet.tile.y))
+    serial.write_u8(&out,']')
     api.write_key(&out,"cells");serial.write_u8(&out,'[')
-    for &cell,i in strip.cells[:strip.taken] {
+    for &cell,i in cells {
         if i>0 {serial.write_u8(&out,',')}
         serial.text_write_raw(&out,`{"tick":`);serial.text_write_uint(&out,cell.tick)
-        if strip.follow!=core.NONE {
+        if followed {
             api.write_key(&out,"at")
             if cell.seen {api.write_list(&out,cell.at[:])} else {serial.text_write_raw(&out,"null")}
         }
         serial.write_u8(&out,'}')
     }
-    serial.text_write_raw(&out,"]]}")
-    api_png_content(call,path,string(serial.writer_bytes(&out)))
+    serial.text_write_raw(&out,"]}")
+    return string(serial.writer_bytes(&out))
 }
 
 // A cell of the filmstrip: the game drawn now, the part of it it shows put
@@ -159,7 +167,10 @@ api_filmstrip_take :: proc(s:^Session,data:rawptr,_:core.World_Ref,ran:int) -> s
     case strip.follow!=core.NONE:
         center:=view.xy+view.zw*0.5
         if core.alive(core.world_entities(w),strip.follow) {
-            if at,seen:=api_view_project(s.app.camera,view,entity_world(w,strip.follow).position);seen {
+            // The middle of its meshes, not its origin at the feet; its origin without meshes.
+            point:=entity_world(w,strip.follow).position
+            if box,meshes:=spatial_box(s,w,spatial_items(s,w,false),strip.follow);meshes {point=(box.min+box.max)*0.5}
+            if at,seen:=api_view_project(s.app.camera,view,point);seen {
                 center,cell.at,cell.seen=at,at/density,true
             }
         }

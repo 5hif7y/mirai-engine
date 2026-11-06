@@ -113,7 +113,7 @@ spatial_entities :: proc(call:^api.Call,w:core.World_Ref,ids:[]base.Entity_Id,wh
 
 // The bodies of the scene with their places from the locals; with ghosts,
 // also what is hidden or turned off.
-@(private="file")
+@(private)
 spatial_items :: proc(s:^Session,w:core.World_Ref,ghosts:bool) -> []Scene_Item {
     out:=make([dynamic]Scene_Item,context.temp_allocator)
     it:=scene_items(s,w,ghosts,locals=true)
@@ -144,7 +144,7 @@ spatial_ray :: proc(s:^Session,w:core.World_Ref,items:[]Scene_Item,ray:mm.Ray,re
 
 // The world box of the meshes of an entity and of what hangs from it, moved
 // by `by`. Without meshes, the point of the entity.
-@(private="file")
+@(private)
 spatial_box :: proc(s:^Session,w:core.World_Ref,items:[]Scene_Item,e:core.Entity,by:mm.Mat4=1) -> (box:mm.Aabb,meshes:bool) {
     box={{1e30,1e30,1e30},{-1e30,-1e30,-1e30}}
     for item in items {

@@ -1,6 +1,7 @@
 package editor
 
 import "base:runtime"
+import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:slice"
@@ -478,6 +479,16 @@ a_filmstrip_cell_comes_before_the_first_tick_and_every_every_ticks_around_its_en
     testing.expect_value(t,api_filmstrip_region({225,100},{64,32},{400,300}),img.Region{193,84,64,32})
     testing.expect_value(t,api_filmstrip_region({1e9,-1e9},{64,32},{400,300}),img.Region{432,-48,64,32})
     testing.expect_value(t,api_filmstrip_region({f32(math.nan_f32()),0},{64,32},{400,300}),img.Region{168,134,64,32})
+    // The answer beside the image is JSON a client reads: its grid and each cell's tick and place.
+    cells:=[2]Api_Filmstrip_Cell{{tick=3,at={1,2},seen=true},{tick=6}}
+    sheet:=img.Sheet{image={width=128,height=32},columns=2,rows=1,tile={64,32}}
+    answer:=api_filmstrip_result("strip.png",sheet,cells[:],true,context.temp_allocator)
+    parsed,parse_error:=json.parse_string(answer,allocator=context.temp_allocator)
+    testing.expectf(t,parse_error==.None,"the answer is not JSON: %s",answer)
+    if object,is:=parsed.(json.Object);is {
+        grid,listed:=object["cell"].(json.Array);testing.expect(t,listed && len(grid)==2,answer)
+        taken,_:=object["cells"].(json.Array);testing.expect(t,len(taken)==2,answer)
+    }
     refused:=[?]struct{params,says:string}{
         {`{"count":4}`,"count is of a filmstrip"},
         {`{"every":3}`,"count: give the cells"},

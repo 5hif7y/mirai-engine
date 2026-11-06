@@ -35,7 +35,7 @@ animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Rea
         case phys.MODE_FLYING:
             if fly,ok:=core.get(flights,entity);ok {goal.desired,goal.acceleration,goal.braking=wish*fly.speed,fly.acceleration,fly.acceleration}
         case:
-            if walk,ok:=core.get(walks,entity);ok {goal.desired,goal.acceleration,goal.braking=wish*walk.max_speed,walk.acceleration,walk.braking}
+            if walk,ok:=core.get(walks,entity);ok {goal.desired,goal.acceleration,goal.braking=walk_goal(walk,character.mode==phys.MODE_FALLING,wish,going.linear)}
         }
         if !anim.match_goal(requests,goal) {
             core.report(problems,entity,"animation.match_goal","the locomotion of this Character was not told to its motion matching: a value of its body is not finite, its mode is past 31, or more than %d characters animate in one tick; fix its Character, or animate fewer of them",anim.MATCH_GOAL_CAPACITY)
@@ -46,4 +46,14 @@ animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Rea
         if !matching {continue}
         anim.motion_locomotion(warps,{rig=entity,velocity={playing.velocity.x,0,playing.velocity.z},source_velocity=mm.quat_rotate(placed.rotation,mm.Vec3{0,0,playing.speed}),weight=1,enabled=character.mode==phys.MODE_WALKING && !playing.forced && playing.speed>0})
     }
+}
+
+// What a Walk does with the velocity of the body, as the Character does: on the ground it goes to
+// the wish at its acceleration and brakes without one; in the air only a wish steers it, at
+// air_control of its acceleration, and without one it keeps its course.
+walk_goal :: proc "contextless" (walk:phys.Walk,falling:bool,wish,velocity:mm.Vec3) -> (desired:mm.Vec3,acceleration,braking:f32) {
+    if !falling {return wish*walk.max_speed,walk.acceleration,walk.braking}
+    air:=walk.air_control*walk.acceleration
+    if wish=={} || walk.air_control<=0 {return {velocity.x,0,velocity.z},air,air}
+    return wish*walk.max_speed,air,air
 }

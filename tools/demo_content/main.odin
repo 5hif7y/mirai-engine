@@ -250,6 +250,10 @@ Scene_Out :: struct {
     failed:bool,
 }
 
+// Half a turn about +Y. A body's front is its +Z (the glTF model front): a spawn turned so looks
+// along -Z, and a camera child of a body turned so looks where the body faces.
+HALF_TURN :: mm.Quat(quaternion(w=0,x=0,y=1,z=0))
+
 @(private)
 entity :: proc(s:^Scene_Out,name:string,position:[3]f32={},scale:[3]f32={1,1,1},parent:base.Entity_Id=0) -> base.Entity_Id {
     s.next+=1
@@ -300,7 +304,7 @@ solid :: proc(s:^Scene_Out,id:base.Entity_Id,material:string) {
 @(private)
 spawn_point :: proc(s:^Scene_Out,position:[3]f32) {
     point:=spawn.Spawn_Point{prefab=game.PLAYER_PREFAB}
-    put(s,entity(s,"Player start",position),"Spawn_Point",&point)
+    put(s,placed(s,"Player start",position,HALF_TURN,{1,1,1}),"Spawn_Point",&point)
 }
 
 write_scene :: proc(o:^Out,hud,sign,lift,hum:base.Asset_Id) {

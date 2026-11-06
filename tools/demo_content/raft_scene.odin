@@ -28,7 +28,7 @@ write_raft_player :: proc(o:^Out) {
     put(&s,1,"Swim",&swim)
     put(&s,1,"Collider",&capsule)
     put(&s,1,"Diver",&diver)
-    eyes:=entity(&s,"Swimmer view",{0,game.EYE_HEIGHT,0},{1,1,1},1)
+    eyes:=placed(&s,"Swimmer view",{0,game.EYE_HEIGHT,0},HALF_TURN,{1,1,1},1)
     put(&s,1,"Drivable",&inp.Drivable{camera=core.Entity(eyes)})
     put(&s,eyes,"Camera",&render.Camera{fov=game.VIEW_FOV,near=0.05})
     put(&s,eyes,"Audio_Listener",&audio.Audio_Listener{})
@@ -141,7 +141,7 @@ write_raft_scene :: proc(o:^Out) {
     floating(&s,"Stone",{-5,0.4,2},{0.5,0.5,0.5},.Sphere,phys.collider_sphere(0.5),2600,{0.5,0.5,0.52,1})
 
     start:=spawn.Spawn_Point{prefab=game.RAFT_PLAYER_PREFAB}
-    put(&s,entity(&s,"Swimmer start",{0,0.7,0}),"Spawn_Point",&start)
+    put(&s,placed(&s,"Swimmer start",{0,0.7,0},HALF_TURN,{1,1,1}),"Spawn_Point",&start)
     holder:=entity(&s,"Raft game")
     put(&s,holder,"Raft_Game",&game.Raft_Game{raft=core.Entity(raft),deck=0.6})
     // After the others, which keep their entities.

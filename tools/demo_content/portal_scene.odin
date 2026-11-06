@@ -198,7 +198,7 @@ write_portal_chamber_scene :: proc(o:^Out) {
     portal_mouth(&s,"Blue portal",.Blue)
     portal_mouth(&s,"Orange portal",.Orange)
     start:=spawn.Spawn_Point{prefab=game.PORTAL_PLAYER_PREFAB}
-    put(&s,entity(&s,"Player start",{0,0,7.5}),"Spawn_Point",&start)
+    put(&s,placed(&s,"Player start",{0,0,7.5},HALF_TURN,{1,1,1}),"Spawn_Point",&start)
     feature_scene_end(&s,o,"portal_chamber")
 }
 
@@ -214,7 +214,7 @@ write_portal_player :: proc(o:^Out) {
     put(&s,1,"Collider",&capsule)
     put(&s,1,"Portal_Gun",&game.Portal_Gun{})
     put(&s,1,"Traveler",&portals.Traveler{point={0,game.EYE_HEIGHT,0}})
-    eyes:=entity(&s,"Player view",{0,game.EYE_HEIGHT,0},{1,1,1},1)
+    eyes:=placed(&s,"Player view",{0,game.EYE_HEIGHT,0},HALF_TURN,{1,1,1},1)
     put(&s,1,"Drivable",&inp.Drivable{camera=core.Entity(eyes)})
     put(&s,eyes,"Camera",&render.Camera{fov=game.VIEW_FOV,near=0.05})
     put(&s,eyes,"Audio_Listener",&audio.Audio_Listener{})

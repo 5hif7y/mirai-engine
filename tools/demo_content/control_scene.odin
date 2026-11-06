@@ -46,7 +46,7 @@ control_visual :: proc(s:^Scene_Out,body:base.Entity_Id,dog:bool) {
 control_spawns :: proc(s:^Scene_Out,name:string,prefab:base.Asset_Id,first:[3]f32) {
     for i in 0..<inp.LOCAL_CAPACITY {
         point:=spawn.Spawn_Point{prefab=prefab}
-        put(s,entity(s,fmt.tprintf("%s %d",name,i+1),first+{f32(i)*2,0,0}),"Spawn_Point",&point)
+        put(s,placed(s,fmt.tprintf("%s %d",name,i+1),first+{f32(i)*2,0,0},HALF_TURN,{1,1,1}),"Spawn_Point",&point)
     }
 }
 

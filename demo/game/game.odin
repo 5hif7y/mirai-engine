@@ -156,8 +156,9 @@ aim_of :: proc "contextless" (yaw,pitch:f32) -> [3]f32 {
     return mm.quat_rotate(mm.quat_from_euler({pitch,yaw,0}),[3]f32{0,0,-1})
 }
 
+// The look yaw of an upright character body: where its front, +Z, heads.
 yaw_of :: proc "contextless" (rotation:mm.Quat) -> f32 {
-    ahead:=mm.quat_rotate(rotation,[3]f32{0,0,-1})
+    ahead:=mm.quat_rotate(rotation,[3]f32{0,0,1})
     return math.atan2(-ahead.x,-ahead.z)
 }
 

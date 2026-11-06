@@ -163,6 +163,10 @@ Scene_Out :: struct {
     failed:bool,
 }
 
+// Half a turn about +Y. A body's front is its +Z (the glTF model front): a spawn turned so looks
+// along -Z, and a camera child of a body turned so looks where the body faces.
+HALF_TURN :: quaternion(w=0,x=0,y=1,z=0)
+
 @(private)
 entity :: proc(s:^Scene_Out,name:string,position:[3]f32={},scale:[3]f32={1,1,1},parent:base.Entity_Id=0) -> base.Entity_Id {
     s.next+=1
@@ -200,6 +204,7 @@ write_player :: proc(o:^Out) {
     put(&s,root,"Player",&player)
     put(&s,root,"Replicate",&multiplayer.Replicate{priority=1,radius=1})
     eyes:=entity(&s,"Player view",{0,game.EYE_HEIGHT,0},parent=root)
+    put(&s,eyes,"Transform",&core.Transform{{0,game.EYE_HEIGHT,0},HALF_TURN,{1,1,1}})
     view:=render.Camera{fov=game.VIEW_FOV,near=0.05,active=true}
     follow:=cam.Camera_Follow{mode=.Eyes,offset={0,game.EYE_HEIGHT,0}}
     put(&s,eyes,"Camera",&view)
@@ -240,7 +245,9 @@ write_scene :: proc(o:^Out,hud,sign,hum:base.Asset_Id) {
     ground:=phys.collider_box({0.5,0.5,0.5})
     put(&s,floor,"Collider",&ground)
     start:=spawn.Spawn_Point{prefab=game.PLAYER_PREFAB}
-    put(&s,entity(&s,"Player start",{0,0,5}),"Spawn_Point",&start)
+    player_start:=entity(&s,"Player start")
+    put(&s,player_start,"Transform",&core.Transform{{0,0,5},HALF_TURN,{1,1,1}})
+    put(&s,player_start,"Spawn_Point",&start)
 
     // The wall breaks into 24 pieces where it is hit; the ones that reach the floor stay.
     wall:=entity(&s,"Wall",{0,1.25,0},{4,2.5,0.4})

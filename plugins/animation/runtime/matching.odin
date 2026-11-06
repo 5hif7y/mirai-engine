@@ -44,7 +44,8 @@ MATCH_INFO_DEFAULT :: Match_Info{
 }
 // A clip the search can pick. modes: bit m for each locomotion mode m it serves; entry: it starts
 // one of them, searched from its start when the body enters the mode.
-Match_Source :: struct {clip:[64]u8 `mirai:"text"`,animation:base.Asset_Id,modes:u32,loop,entry:bool}
+// speed, when positive, is the m/s the clip travels at instead of the one measured from its feet.
+Match_Source :: struct {clip:[64]u8 `mirai:"text"`,animation:base.Asset_Id,modes:u32,loop,entry:bool,speed:f32 `mirai:"unit=m/s"`}
 Match_Profile :: struct {info:Match_Info,clips:[]Match_Source}
 
 match_check :: proc(profile:Match_Profile) -> bool {
@@ -54,7 +55,7 @@ match_check :: proc(profile:Match_Profile) -> bool {
     if !finite(info.trajectory_direction) || info.trajectory_direction<0 || !finite(info.stationary_speed) || info.stationary_speed<0 || info.rate<=0 || info.rate>lib.FRAMES_MAX_RATE || info.min_rate<=0 || info.min_rate>info.max_rate {return false}
     for bone in ([3]Bone_Ref{info.left_foot,info.right_foot,info.hips}) {if !profile_bone(bone) || bone.path[0]==0 {return false}}
     for &clip,i in profile.clips {
-        if !blend_text_valid(clip.clip[:],false) || clip.modes==0 || clip.entry && clip.loop {return false}
+        if !blend_text_valid(clip.clip[:],false) || clip.modes==0 || clip.entry && clip.loop || !finite(clip.speed) || clip.speed<0 {return false}
         for other in profile.clips[:i] {if other.clip==clip.clip && other.animation==clip.animation {return false}}
     }
     return true
@@ -223,7 +224,7 @@ match_database :: proc(content:^Match_Content,library:^host.Content_Animation,st
         clip:=clip
         handle:=lib.clip_find(&library.lib,source_clip_name(source,source_effective(clip.animation,info.animation,source),base.name_hash(base.text_get(clip.clip[:]))))
         if handle==0 || int(handle)>library.clip_count {found=false;break}
-        clips[i]={clip=handle+lib.Clip(library.clip_count if clip.loop else 0),modes=clip.modes,entry=clip.entry}
+        clips[i]={clip=handle+lib.Clip(library.clip_count if clip.loop else 0),modes=clip.modes,entry=clip.entry,speed=clip.speed}
     }
     built:=Match_Built{key=key,error=.Invalid}
     if found {

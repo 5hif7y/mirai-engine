@@ -109,7 +109,7 @@ Asset_Inspect_Result :: struct {
 }
 Asset_Clip_Name :: struct {name:[aa.ANIMATION_NAME_CAPACITY]u8 `mirai:"text"`}
 // entry: it starts its modes, searched from its start when the body enters one of them.
-Asset_Match_Clip :: struct {clip:[64]u8 `mirai:"text"`,animation:base.Asset_Id `mirai:"optional,label=Empty is that of the .match"`,modes:[1][32]u8 `mirai:"text,list"`,loop,entry:bool}
+Asset_Match_Clip :: struct {clip:[64]u8 `mirai:"text"`,animation:base.Asset_Id `mirai:"optional,label=Empty is that of the .match"`,modes:[1][32]u8 `mirai:"text,list"`,loop,entry:bool,speed:f32 `mirai:"optional,unit=m/s,label=The speed it travels at, set by hand; omitted is measured"`}
 Asset_Match_Database :: struct {rows:u32,bytes:u64 `mirai:"optional"`,error:lib.Match_Build_Error `mirai:"label=Memory_Limit: it keeps more than memory; Invalid: a bone or clip is missing on the skeleton"`}
 Asset_Clip_Track :: struct {index:u32,target:[aa.NODE_PATH_CAPACITY]u8 `mirai:"text"`,property:lib.Property,slot:u8,keys_total:u32}
 Asset_Clip_Marker :: struct {index:u32,marker:aa.Animation_Marker}
@@ -369,7 +369,9 @@ match_inspect :: proc(s:^editor.Session,call:^api.Call,id:base.Asset_Id,offset,l
             name,named:=locomotion_mode_name(modes,bit)
             serial.write_u8(out,'"');serial.text_write_raw(out,name if named else fmt.tprintf("%d",bit));serial.write_u8(out,'"')
         }
-        serial.write_u8(out,']');api.write_bool(out,"loop",clip.loop);api.write_bool(out,"entry",clip.entry);serial.write_u8(out,'}')
+        serial.write_u8(out,']');api.write_bool(out,"loop",clip.loop);api.write_bool(out,"entry",clip.entry)
+        if clip.speed>0 {api.write_key(out,"speed");api.write_number(out,clip.speed)}
+        serial.write_u8(out,'}')
     }
     serial.text_write_raw(out,"]");api.write_key(out,"databases");serial.write_u8(out,'[');written:=0
     if cache:=core.world_storage_of(core.world_ref(s.app.shared,s.info,.Shared),anim.Graph_Assets);cache!=nil {

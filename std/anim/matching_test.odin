@@ -90,6 +90,14 @@ match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_f
     testing.expectf(t,costs[0]<.05 && costs[1]>costs[0]+1,"a pose at half its rate is not its own frame: %v",costs)
     testing.expect(t,match_database_size(db)==match_database_bytes(db.rows,len(db.ranges)))
     testing.expect_value(t,match_database_build(&db,&library,rig,clips[:],30,weights,match_database_bytes(db.rows,3)-1),Match_Build_Error.Memory_Limit)
+    // A speed set by hand replaces the measured one along the direction the feet push.
+    told:=clips;told[1].speed=3
+    if testing.expect(t,match_database_build(&db,&library,rig,told[:],30,weights)==.None) {
+        testing.expectf(t,db.ranges[1].speed==3 && abs(db.ranges[1].travel.z-3)<1e-4,"walk told to go 3 m/s: %v",db.ranges[1])
+        testing.expect(t,abs(db.ranges[0].speed-0)<.05)
+    }
+    told[1].speed=-1
+    testing.expect_value(t,match_database_build(&db,&library,rig,told[:],30,weights),Match_Build_Error.Invalid)
 }
 
 @(test)

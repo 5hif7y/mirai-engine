@@ -38,8 +38,9 @@ Match_Query :: [MATCH_LANES]simd.f32x4
 
 // A clip in the database. modes is the set of locomotion modes it serves, bit m for mode m; an
 // entry clip starts one of them (a jump, a landing): it is searched only from its start, when the
-// body enters the mode.
-Match_Clip :: struct {clip:Clip,modes:u32,entry:bool}
+// body enters the mode. speed, when positive, is the m/s the clip travels at instead of the one
+// measured: an in-place clip goes that fast along its measured direction, or forward.
+Match_Clip :: struct {clip:Clip,modes:u32,entry:bool,speed:f32}
 // The rows of a clip. speed is how fast the body goes over the ground in it, m/s: that of its
 // root, or for a clip in place the one its feet push at.
 Match_Range :: struct {clip:Clip,first,count:i32,modes:u32,loop,entry:bool,speed:f32,travel:math.Vec3}
@@ -86,7 +87,7 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
     MAX_FRAMES :: 1<<20
     total,longest:=0,0
     for c in clips {
-        if !clip_valid(lib,c.clip) {return}
+        if !clip_valid(lib,c.clip) || !anim_finite(c.speed) || c.speed<0 {return}
         count,_:=frames_layout(clip_duration(lib,c.clip),rate,MAX_FRAMES)
         if count<2 {return}
         total+=count;longest=max(longest,count)
@@ -114,8 +115,13 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
         ground,grounded:=frames_ground(body_rig,frames,world);if !grounded {return}
         rest_world:=world[count*n:][:n]
         root:=int(ground.root)
-        motion:=Match_Motion{frames=frames,world=world[:count*n],rest=rest_world,root=root,in_place=ground.in_place,travel=ground.travel,forward=forward}
-        ranges[i]={clip=c.clip,first=i32(row),count=i32(count),modes=c.modes,loop=frames.loop,entry=c.entry,speed=linalg.length(ground.travel),travel=ground.travel}
+        travel,speed:=ground.travel,linalg.length(ground.travel)
+        if c.speed>0 {
+            if ground.in_place {direction,moving:=anim_unit(travel);travel=(direction if moving else forward)*c.speed}
+            speed=c.speed
+        }
+        motion:=Match_Motion{frames=frames,world=world[:count*n],rest=rest_world,root=root,in_place=ground.in_place,travel=travel,forward=forward}
+        ranges[i]={clip=c.clip,first=i32(row),count=i32(count),modes=c.modes,loop=frames.loop,entry=c.entry,speed=speed,travel=travel}
         for frame in 0..<count {
             values:=&raw[row+frame]
             at:=f32(frame)

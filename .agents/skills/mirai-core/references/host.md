@@ -470,6 +470,22 @@ row.
   `Keyboard` family whichever one is asked for.
 - An `.anim` is published compressed with `asset.animation_compress` (a cooked one, as it comes);
   if the preparation fails, the previous load stays ([animation storage](../../mirai-std/references/anim-storage.md)).
+- **An `.anim` is compressed once per input** (`host/content_animation.odin`).
+  `App_Desc.animation_cache` (the editor and the player pass `project.ANIMATION_CACHE` of the
+  project) keeps the compression as the cooked document a shipped game carries, named by the asset
+  and a hash of the `.anim`, the skeletons its clips name, `asset.ANIMATION_VERSION`,
+  `anim.COMPRESS_VERSION` and the config. A load takes it only when it is whole and of that asset
+  with the clips, tracks and markers of the `.anim`; else it compresses and writes it, removing the
+  other entries of the asset. Authoring reads the source `.anim`, never the cache.
+- **A compression runs in a job** with two workers or more, at once otherwise: the main thread
+  reads the `.anim` and its skeletons, the job builds the library, and `content_animation` takes it
+  and writes the cache on the main thread once the job ended. Meanwhile a first load is pending:
+  `content_animation` gives nil, `content_animation_pending` says so and the animation runtime
+  plays the entity as one without asset (a rig holds its rest pose) without a problem; a reload
+  keeps the previous library.
+  `content_animation_wait` waits, for whoever needs the library now (an API call). Unloading,
+  reloading again or ending the application waits for the job; a compression that ended is still
+  written.
 
 ## Shaders at run time
 

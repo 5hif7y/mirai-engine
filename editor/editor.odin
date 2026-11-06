@@ -408,6 +408,7 @@ open :: proc(info:^core.World_Info,args:[]string) -> (s:^Session,code:int) {
         // Without a window the mixer plays to nowhere, in real time: what play.record mixes is there.
         audio=windowed || !options.no_gpu?.Device:.None,audio_driver=windowed?"":"dummy",
         assets_root=os.is_dir(assets)?assets:"",assets_cache=project.cache_path(root,project.REGISTRY_CACHE,allocator=context.temp_allocator),
+        animation_cache=project.cache_path(root,project.ANIMATION_CACHE,allocator=context.temp_allocator),
         asset_mounts=mounts[:],shaders_root=root,
     })
     if app==nil {

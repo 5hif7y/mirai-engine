@@ -1,0 +1,268 @@
+package host
+
+import "base:runtime"
+import "core:fmt"
+import "core:mem"
+import "core:os"
+import "core:strings"
+import "mirai:asset"
+import anim "mirai:std/anim"
+import "mirai:std/base"
+import "mirai:std/jobs"
+import "mirai:std/serial"
+
+// The .anim of a project keeps its keys; the runtime plays them compressed into samples
+// (asset.animation_compress). A compression is kept in App.animation_cache as the cooked
+// document a shipped game carries, named by the asset and by a hash of what it is made from:
+// the .anim, the skeletons its clips are measured on, the format and the compressor. A load
+// takes it from there when it is whole and matches the .anim; else it compresses in a job of
+// the application (at once with fewer than two workers), and content_animation takes the
+// library on the main thread once the job ended, writing the cache then. Until then the job
+// owns what it builds: the entry keeps what it had, and one that never loaded is pending.
+
+// What a load of an .anim reads and builds: between content_animation_start and the end of its
+// job, only the job touches it.
+@(private)
+Content_Animation_Load :: struct {
+    allocator:runtime.Allocator,
+    id:base.Asset_Id,
+    file:asset.Asset, // the .anim, or its compression from the cache: view points into it
+    view:asset.Animation_View,
+    skeletons:[]Content_Skeleton, // those its clips name: a job does not read the registry
+    compress:bool,    // its tracks are keys, which the job compresses
+    path:string,      // where the cache keeps the compression; "": nowhere
+    built:Content_Animation,
+    cached:[]u8,      // the cooked document to write at path
+    ok:bool,
+    counter:jobs.Counter,
+}
+
+@(private)
+Content_Skeleton :: struct {
+    id:base.Asset_Id,
+    file:asset.Asset, // closed when it could not be read: the clips are measured on their tracks
+}
+
+// Whether the first load of an .anim compresses: content_animation gives nil until it ends.
+content_animation_pending :: proc(app:^App,id:base.Asset_Id) -> bool {
+    c:=app.content
+    if c==nil {return false}
+    ref,known:=c.index[id]
+    if !known || ref.kind!=.Animation {return false}
+    entry:=&c.animations[ref.index]
+    return entry.load!=nil && entry.generation==0
+}
+
+// content_animation for whoever needs the library now, as an API call: it waits for the
+// compression of its first load.
+content_animation_wait :: proc(app:^App,id:base.Asset_Id) -> ^Content_Animation {
+    content:=content_animation(app,id)
+    if content!=nil || !content_animation_pending(app,id) {return content}
+    entry:=&app.content.animations[app.content.index[id].index]
+    jobs.wait(&app.jobs,jobs.OWNER,&entry.load.counter)
+    return content_animation(app,id)
+}
+
+// Starts loading the file of entry: false when it cannot be read. What is samples already (a
+// cooked .anim or a compression of the cache) is built at once, and so is a compression without
+// job threads; else a job compresses and content_animation_finish takes what it built.
+@(private)
+content_animation_start :: proc(app:^App,entry:^Content_Animation) -> bool {
+    c:=app.content
+    load,error:=new(Content_Animation_Load,c.allocator)
+    if error!=nil {return false}
+    load.allocator,load.id=c.allocator,entry.id
+    if !content_animation_read(app,entry,load) {
+        content_animation_load_free(c,load)
+        return false
+    }
+    entry.load=load
+    if load.compress && jobs.worker_count(&app.jobs)>1 {
+        jobs.run(&app.jobs,jobs.OWNER,content_animation_build,load,&load.counter)
+        return true
+    }
+    content_animation_build(load,jobs.OWNER)
+    content_animation_finish(app,entry)
+    return true
+}
+
+// Takes what the ended load of entry built: its library replaces what entry had, and its
+// compression goes to the cache. One that failed leaves what entry had, and fails a first load.
+@(private)
+content_animation_finish :: proc(app:^App,entry:^Content_Animation) {
+    c,load:=app.content,entry.load
+    entry.load=nil
+    defer content_animation_load_free(c,load)
+    first:=entry.generation==0
+    if !load.ok {
+        if first {content_loaded(c,entry,false)}
+        return
+    }
+    if load.compress {c.stats.compressed+=1}
+    content_animation_cache_write(app.animation_cache,load)
+    content_animation_free(c,entry)
+    built:=&load.built
+    entry.lib,entry.clip_count,entry.markers=built.lib,built.clip_count,built.markers
+    entry.names,entry.roots,entry.morphs=built.names,built.roots,built.morphs
+    built^={}
+    if first {content_loaded(c,entry,true)} else {content_reloaded(c,entry)}
+}
+
+// Waits for the load under way of entry and drops it: entry keeps what it had. A compression
+// that ended is kept in the cache all the same.
+@(private)
+content_animation_drop :: proc(app:^App,entry:^Content_Animation) {
+    load:=entry.load
+    if load==nil {return}
+    entry.load=nil
+    if jobs.pending(&load.counter) {jobs.wait(&app.jobs,jobs.OWNER,&load.counter)}
+    if load.ok {content_animation_cache_write(app.animation_cache,load)}
+    content_animation_load_free(app.content,load)
+}
+
+@(private="file")
+content_animation_load_free :: proc(c:^Content,load:^Content_Animation_Load) {
+    asset.asset_close(&load.file)
+    for &skeleton in load.skeletons {asset.asset_close(&skeleton.file)}
+    delete(load.skeletons,load.allocator)
+    delete(load.path,load.allocator)
+    mem.free_bytes(load.cached,load.allocator)
+    content_animation_free(c,&load.built)
+    free(load,load.allocator)
+}
+
+// Opens the .anim of entry and what its compression is made from, on the main thread; a
+// compression the cache has whole replaces its keys.
+@(private="file")
+content_animation_read :: proc(
+    app:^App,entry:^Content_Animation,
+    load:^Content_Animation_Load,
+) -> bool {
+    a:=app.assets
+    content_open(a,entry.id,asset.KIND_ANIMATION,&load.file,entry) or_return
+    error:asset.Error
+    if load.view,error=asset.animation_view(&load.file,&a.types);error!=.None {return false}
+    for track in load.view.tracks {
+        if track.encoding!=.Raw {return true}
+    }
+    load.compress=true
+    allocation:runtime.Allocator_Error
+    load.skeletons,allocation=make([]Content_Skeleton,len(load.view.clips),load.allocator)
+    if allocation!=nil {return false}
+    count:=0
+    config:=anim.COMPRESS_DEFAULT
+    versions:=u64(anim.COMPRESS_VERSION)<<16|u64(asset.ANIMATION_VERSION)
+    key:=base.hash_combine(load.file.blob.header.content_hash,versions)
+    shell:=u64(transmute(u32)config.precision)|u64(transmute(u32)config.shell)<<32
+    key=base.hash_combine(key,shell)
+    curves:=u64(transmute(u32)config.float_precision)|u64(transmute(u32)config.vector_precision)<<32
+    key=base.hash_combine(key,curves)
+    for clip in load.view.clips {
+        if clip.skeleton=={} {continue}
+        known:=false
+        for skeleton in load.skeletons[:count] {known||=skeleton.id==clip.skeleton}
+        if known {continue}
+        skeleton:=&load.skeletons[count]
+        count+=1
+        skeleton.id=clip.skeleton
+        hash:u64
+        if assets_file(a,clip.skeleton,asset.KIND_SKELETON,&skeleton.file)==.None {
+            hash=skeleton.file.blob.header.content_hash
+        }
+        key=base.hash_combine(key,base.hash_combine(clip.skeleton[0],clip.skeleton[1]))
+        key=base.hash_combine(key,hash)
+    }
+    if app.animation_cache=="" {return true}
+    text:[base.ASSET_ID_TEXT]u8
+    digits:[16]u8
+    name,hex:=base.asset_id_format(entry.id,text[:]),base.hex_format_u64(key,digits[:])
+    load.path=fmt.aprintf("%s/%s-%s.anim",app.animation_cache,name,hex,allocator=load.allocator)
+    cached:asset.Asset
+    if asset.asset_load(&cached,load.path,a.allocator)!=.None {return true}
+    header:=cached.blob.header
+    view:asset.Animation_View
+    error=.Corrupt
+    whole:=asset.blob_verify_hash(&cached.blob) && header.id==entry.id
+    if whole && header.kind==asset.KIND_ANIMATION {view,error=asset.animation_view(&cached,&a.types)}
+    source:=load.view
+    if error!=.None || len(view.clips)!=len(source.clips) || len(view.tracks)!=len(source.tracks) ||
+        len(view.markers)!=len(source.markers) {
+        asset.asset_close(&cached)
+        return true
+    }
+    asset.asset_close(&load.file)
+    load.file,load.view,load.compress=cached,view,false
+    return true
+}
+
+// Builds the library of what a load read, compressing its keys: in a job, or at once.
+@(private="file")
+content_animation_build :: proc(load:^Content_Animation_Load,worker:int) {
+    context.allocator=load.allocator
+    view:=load.view
+    built:=&load.built
+    desc:=asset.animation_library_desc(view)
+    desc.max_clips*=2
+    desc.allocator=load.allocator
+    if !anim.library_init(&built.lib,desc) {return}
+    count:=len(view.clips)
+    e1,e2,e3:runtime.Allocator_Error
+    built.markers,e1=make([]u64,len(view.markers),load.allocator)
+    built.names,e2=make([][asset.ANIMATION_NAME_CAPACITY]u8,count,load.allocator)
+    built.roots,e3=make([]asset.Animation_Root,count,load.allocator)
+    morphing:bool
+    built.morphs,morphing=content_animation_morphs(view,load.allocator)
+    if e1!=nil || e2!=nil || e3!=nil || !morphing {return}
+    if count>0 && asset.animation_clips_add(view,&built.lib,.Once)==0 {return}
+    content_animation_loops(&built.lib,count)
+    built.clip_count=count
+    for &marker,i in view.markers {built.markers[i]=base.name_hash(base.text_get(marker.name[:]))}
+    for clip,i in view.clips {built.names[i]=clip.name;built.roots[i]=clip.root}
+    if !load.compress {
+        built.lib.prepared=true
+        load.ok=true
+        return
+    }
+    types:asset.Types
+    asset.types_init(&types)
+    defer asset.types_destroy(&types)
+    open :: proc(data:rawptr,id:base.Asset_Id,file:^asset.Asset) -> bool {
+        for &skeleton in (^Content_Animation_Load)(data).skeletons {
+            if skeleton.id!=id || skeleton.file.file==nil {continue}
+            return asset.asset_open(file,skeleton.file.file,context.temp_allocator)==.None
+        }
+        return false
+    }
+    if _,error:=asset.animation_compress(view,&built.lib,&types,open,load);error!=.None {return}
+    load.ok=true
+    if load.path=="" {return}
+    doc:asset.Document
+    header:=load.file.blob.header
+    cooked:=asset.animation_cooked_document(
+        &doc,&types,load.id,header.owner,view,&built.lib,context.temp_allocator)
+    if cooked!=.None {return}
+    defer asset.document_destroy(&doc)
+    doc.flags=header.flags
+    load.cached,_=asset.document_bytes(&doc,load.allocator)
+}
+
+// Writes the compression a load made to the cache, where it replaces those of what the asset
+// was before. A cache that cannot be written only costs the next load its compression.
+@(private="file")
+content_animation_cache_write :: proc(folder:string,load:^Content_Animation_Load) {
+    if load.cached==nil || load.path=="" {return}
+    data:=load.cached
+    load.cached=nil
+    defer mem.free_bytes(data,load.allocator)
+    if !os.is_dir(folder) && os.make_directory_all(folder)!=nil {return}
+    if serial.file_write_atomic(load.path,data)!=.None {return}
+    text:[base.ASSET_ID_TEXT]u8
+    prefix:=base.asset_id_format(load.id,text[:])
+    entries,error:=os.read_all_directory_by_path(folder,context.temp_allocator)
+    if error!=nil {return}
+    name:=load.path[len(folder)+1:]
+    for entry in entries {
+        stale:=entry.type==.Regular && strings.has_prefix(entry.name,prefix) && entry.name!=name
+        if stale {_=os.remove(entry.fullpath)}
+    }
+}

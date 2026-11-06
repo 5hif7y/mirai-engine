@@ -263,6 +263,8 @@ animation_tick :: proc(
         state:=state_get(playback,e)
         if state==nil {memory_problem(problems,e,"its animation");continue}
         content,source_error:=animation_content(sources,app,state,animation,blends,graphs,actions)
+        // Until its sources load it plays as an Animation without asset: a rig holds its rest pose.
+        if source_error==.Pending {animation.asset,animation.library,source_error={},{},.None}
         if source_error!=.None {state.program.error=source_error;program_problem(problems,e,app,animation,source_error);continue}
         if content==nil && animation.asset!={} {
             name:[base.ASSET_ID_TEXT]u8
@@ -440,6 +442,7 @@ program_problem :: proc(problems:^core.Problems,e:core.Entity,app:^host.App,anim
     case .Unbound_Mask: core.report(problems,e,"animation.program_mask","a mask or layer of %s names a bone, or a part or region of the body, that this rig does not have; name bones of its skeleton (animation.asset.inspect lists them), or give the skeleton a body with skeleton.body.detect",path)
     case .Unsupported_Mirror: core.report(problems,e,"animation.mirror","%s mirrors a pose, and this rig has no skeleton whose bones say their side to swap; mirror only skeletal rigs with sided bone names",path)
     case .Capacity: core.report(problems,e,"animation.program_capacity","%s plays more clips at once than fit (%d); blend fewer clips at a time",path,PROGRAM_PLAYERS)
+    case .Pending: // its sources still load: it plays once they are ready
     case .Additive_Space: core.report(problems,e,"animation.additive_space","Animation.asset %s is a .blend, an aim offset or additive space that plays only under an Additive node of an .agraph; set asset to that .agraph, and play locomotion with a .match",path)
     }
 }

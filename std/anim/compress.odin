@@ -15,6 +15,9 @@ Compress_Config :: struct {
     float_precision,vector_precision:f32, // per component of Float and Vector tracks
 }
 COMPRESS_DEFAULT :: Compress_Config{precision=.0001,shell=.03,float_precision=.0001,vector_precision=.0001}
+// Advances whenever library_compress gives other samples for the same keys and config: a
+// compression kept by its inputs is made again.
+COMPRESS_VERSION :: 1
 // The sample rate of a clip whose keys have no interval in common.
 COMPRESS_RATE :: 30
 Compress_Error :: enum u8 {None,Invalid,Out_Of_Memory,Prepared}

@@ -15,7 +15,8 @@ Program_Group :: struct {leaves:[PROGRAM_LEAVES]Program_Leaf,count:u8,weight,roo
 Program_Instruction :: struct {kind:Graph_Node_Kind,left,right,group,node:u8,weight,root_weight,reference:f32,over:u64,mask:[64]u8,curves:Curve_Blend}
 Program_Output :: struct {asset:base.Asset_Id,groups:[dynamic]Program_Group,count:u8,instructions:[dynamic]Program_Instruction,instruction_count,output,primary:u8}
 Program_Player :: struct {key:u32,player:lib.Player,seen,advanced:u64,from,to:f32,was_done,active_last:bool}
-Program_Error :: enum u8 {None,Invalid_Asset,Invalid_Parameter,Unknown_Parameter,Missing_Clip,Incompatible_Root,Unbound_Mask,Unsupported_Mirror,Out_Of_Memory,Capacity,Additive_Space}
+// Pending: a source still loads (host.content_animation_pending); nothing plays until it is ready.
+Program_Error :: enum u8 {None,Invalid_Asset,Invalid_Parameter,Unknown_Parameter,Missing_Clip,Incompatible_Root,Unbound_Mask,Unsupported_Mirror,Out_Of_Memory,Capacity,Additive_Space,Pending}
 Program_Playing :: struct {
     error:Program_Error,
     asset:base.Asset_Id,

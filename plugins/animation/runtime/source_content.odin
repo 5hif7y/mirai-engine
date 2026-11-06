@@ -110,7 +110,7 @@ animation_content :: proc(cache:^Source_Assets,app:^host.App,state:^Playing,desc
             }
         }
         state.source_plan=0
-        return host.content_animation(app,primary),.None
+        return source_single(app,primary)
     }
     if cache.allocator.procedure==nil {cache.allocator=app.allocator}
     context.allocator=cache.allocator
@@ -125,7 +125,7 @@ animation_content :: proc(cache:^Source_Assets,app:^host.App,state:^Playing,desc
     content_generation:=app.content.generations if app.content!=nil else 0
     if plan.valid && plan.checked==assets_stamp(app) && plan.content_generation==content_generation {
         state.source_plan=u32(at+1)
-        return source_plan_content(cache,app,plan),.None
+        return source_plan_content(cache,app,plan)
     }
     changed:=!plan.valid
     if !changed && plan.checked!=assets_stamp(app) {for dependency in plan.dependencies {if source_dependency(app,dependency.id)!=dependency {changed=true;break}}}
@@ -149,7 +149,7 @@ animation_content :: proc(cache:^Source_Assets,app:^host.App,state:^Playing,desc
     if changed {delete(plan.dependencies,cache.allocator);plan.dependencies=copied}
     plan.primary,plan.set,plan.checked,plan.valid,plan.content_generation=primary,set,assets_stamp(app),true,content_generation
     state.source_plan=u32(at+1)
-    return source_plan_content(cache,app,plan),.None
+    return source_plan_content(cache,app,plan)
 }
 
 // Gives the markers of a joined library the clip names and .anim of their sources.
@@ -257,8 +257,17 @@ source_playing_set :: proc "contextless" (cache:^Source_Assets,state:^Playing) -
 }
 
 @(private)
-source_plan_content :: proc(cache:^Source_Assets,app:^host.App,plan:^Source_Plan) -> ^host.Content_Animation {
-    return &cache.sets[plan.set-1].content if plan.set>0 else host.content_animation(app,plan.primary)
+source_plan_content :: proc(cache:^Source_Assets,app:^host.App,plan:^Source_Plan) -> (^host.Content_Animation,Program_Error) {
+    if plan.set>0 {return &cache.sets[plan.set-1].content,.None}
+    return source_single(app,plan.primary)
+}
+
+// The library of one .anim; Pending while its first load compresses.
+@(private)
+source_single :: proc(app:^host.App,id:base.Asset_Id) -> (^host.Content_Animation,Program_Error) {
+    content:=host.content_animation(app,id)
+    if content==nil && host.content_animation_pending(app,id) {return nil,.Pending}
+    return content,.None
 }
 
 @(private)
@@ -343,10 +352,14 @@ source_set_find :: proc(cache:^Source_Assets,primary:base.Asset_Id,ids:[]base.As
 @(private)
 source_set_prepare :: proc(cache:^Source_Assets,app:^host.App,primary:base.Asset_Id,ids:[]base.Asset_Id) -> (u32,Program_Error) {
     sources:[ANIMATION_SOURCES]host.Content_Animation
+    pending:=false
     for id,i in ids {
-        content:=host.content_animation(app,id);if content==nil {return 0,.Invalid_Asset}
-        sources[i]=content^
+        content:=host.content_animation(app,id)
+        if content!=nil {sources[i]=content^;continue}
+        if !host.content_animation_pending(app,id) {return 0,.Invalid_Asset}
+        pending=true
     }
+    if pending {return 0,.Pending}
     if len(ids)==1 {return 0,.None}
     joined :: proc(error:Source_Error) -> Program_Error {return .None if error==.None else .Out_Of_Memory if error==.Out_Of_Memory else .Invalid_Asset}
     at:=source_set_find(cache,primary,ids)

@@ -1,13 +1,16 @@
 package anim
 
 import "base:runtime"
+import "core:fmt"
 import "core:mem"
+import "core:os"
 import "core:testing"
 import "mirai:asset"
 import "mirai:core"
 import "mirai:host"
 import lib "mirai:std/anim"
 import "mirai:std/base"
+import "mirai:std/jobs"
 import mm "mirai:std/math"
 
 @(private="file")
@@ -150,4 +153,45 @@ source_plans_share_exact_sets_rebuild_for_source_generations_and_survive_world_c
     stable,stable_error:=animation_content(&cache,&app,&first,description,graphs=&graphs)
     context=saved;cache.allocator=saved.allocator;app.allocator=saved.allocator
     testing.expect(t,stable_error==.None && stable.generation==generation && raw_data(stable.lib.tracks)==pointer)
+}
+
+// While its .anim compresses in a job the entity stays as it is and nothing is reported; the tick
+// after the library is ready animates it.
+@(test)
+an_animation_that_compresses_in_a_job_plays_once_it_is_ready_without_problems :: proc(t:^testing.T) {
+    directory:=fmt.tprintf(".mirai/test-animation-pending-%d",os.get_pid());os.make_directory_all(directory);defer os.remove_all(directory)
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    id:=base.Asset_Id{0x9e1,1}
+    keys:=[2]lib.Keyframe{{time=0},{time=1,value={1,0,0,0}}}
+    tracks:=[1]asset.Animation_Track_Desc{{target="hip",property=.Position,keys=keys[:]}}
+    clips:=[1]asset.Animation_Clip_Desc{{name="walk",tracks=tracks[:]}}
+    if !testing.expect_value(t,asset.animation_save(fmt.tprintf("%s/walk.anim",directory),&types,{id=id,clips=clips[:]}),asset.Error.None) {return}
+    assets:host.Assets;if !testing.expect(t,host.assets_init(&assets,{root=directory,capacity=8})) {return};defer host.assets_destroy(&assets)
+    app:=host.App{assets=&assets,allocator=context.allocator}
+    if !testing.expect(t,jobs.system_init(&app.jobs,{threads=2})) {return}
+    defer {host.app_content_destroy(&app);jobs.system_destroy(&app.jobs)}
+    entities:core.Entities;core.entities_init(&entities);defer core.entities_destroy(&entities)
+    transforms:core.Table(core.Transform);parents:core.Table(core.Parent);names:core.Table(core.Name);targets:core.Table(Animation_Target);animations:core.Table(Animation)
+    defer {core.table_destroy(&transforms);core.table_destroy(&parents);core.table_destroy(&names);core.table_destroy(&targets);core.table_destroy(&animations)}
+    actor,hip:=core.create(&entities),core.create(&entities)
+    core.add(&transforms,actor,core.TRANSFORM_IDENTITY);core.add(&transforms,hip,core.TRANSFORM_IDENTITY);core.add(&parents,hip,{entity=actor})
+    name:core.Name;base.text_set(name.text[:],"hip");core.add(&names,hip,name)
+    animation:=ANIMATION_DEFAULT;animation.asset=id;animation.loop=false;animation.fade=0;base.text_set(animation.clip[:],"walk")
+    core.add(&animations,actor,animation)
+    core.table_settle(&transforms,&entities);core.table_settle(&parents,&entities);core.table_settle(&names,&entities);core.table_settle(&targets,&entities);core.table_settle(&animations,&entities)
+    hierarchy:core.Hierarchy;defer core.value_free(&hierarchy,type_info_of(core.Hierarchy))
+    core.hierarchy_settle(&hierarchy,core.read(&parents),&entities)
+    requests:Animation_Requests;events:Animation_Events;playback:Playback;skeletons:Skeleton_Assets;problems:core.Problems
+    defer {delete(requests.seeks.items);delete(requests.poses.items);delete(requests.distances.items);delete(events.items);playback_free(&playback);skeleton_assets_free(&skeletons)}
+    for ready in 0..<2 {
+        animation_tick(core.read(&animations),&transforms,core.read(&parents),core.ref(&hierarchy),core.read(&names),&requests,&events,core.read(&targets),{},&playback,&app,{dt=.25,playing=true},{},&skeletons,&problems)
+        testing.expect_value(t,problems.count,0)
+        if ready==1 {break}
+        testing.expect(t,host.content_animation_pending(&app,id),"it compresses in a job")
+        testing.expect(t,len(playback.states)==0 || len(playback.states[0].local)==0,"it waits")
+        if !testing.expect(t,host.content_animation_wait(&app,id)!=nil) {return}
+    }
+    if testing.expect(t,len(playback.states)==1 && len(playback.states[0].local)==2) {
+        testing.expect(t,abs(playback.states[0].local[1].position.x-.25)<1e-4,"the tick after it is ready plays it")
+    }
 }

@@ -163,7 +163,7 @@ play :: proc(s:^editor.Session,call:^api.Call) {
     if !present {value=anim.ANIMATION_DEFAULT}
     if p.asset!={} {value.asset=p.asset}
     source,loaded:=program_source(s,call,value.asset,value.library);if !loaded {return}
-    content:=host.content_animation(s.app,source)
+    content:=host.content_animation_wait(s.app,source)
     if content==nil {authoring_failure(call,"asset","Invalid_Asset","a loadable animation source","source load failed","The animation asset could not be loaded");return}
     name:=base.text_get(p.clip[:])
     if source!=value.asset && p.layer==0 && name!="" {authoring_failure(call,"clip","Program_Source","a clip on a layer over a .match or .agraph","base clip supplied","A base clip requires an .anim asset",fix="Pass layer 1 to 3 to play it over, or ask the .match for it with animation.request plays");return}

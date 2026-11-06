@@ -9,6 +9,7 @@ import "mirai:project"
 import render "mirai:render"
 import anim "mirai:std/anim"
 import "mirai:std/base"
+import "mirai:std/jobs"
 import mm "mirai:std/math"
 import "mirai:std/serial"
 import "mirai:ui"
@@ -53,6 +54,7 @@ Content_Animation :: struct {
     markers:[]u64, // name_hash of each marker: anim.Marker.id is its index
     names:[][asset.ANIMATION_NAME_CAPACITY]u8, // of each clip
     morphs:[]Content_Morph, // its curves of morph weights, each once
+    load:^Content_Animation_Load, // a load of its file under way (content_animation.odin)
 }
 // A curve "<path>/@morph/<target>": the name_hash of the curve and of the target, which binds a
 // mesh that names no path to the curve of each of its targets.
@@ -135,6 +137,7 @@ Sound_Pick :: struct {
 
 Content_Stats :: struct {
     loads,reloads:int,
+    compressed:int, // .anim whose keys were compressed: neither cooked nor in the cache
     unloads:int, // entries content_collect unloaded
 }
 
@@ -197,7 +200,9 @@ app_content_destroy :: proc(app:^App) {
         if entry.id!={} {content_ui_free(c,&entry)}
     }
     for &entry in c.animations {
-        if entry.id!={} {content_animation_free(c,&entry)}
+        if entry.id=={} {continue}
+        content_animation_drop(app,&entry)
+        content_animation_free(c,&entry)
     }
     for &entry in c.sounds {
         if entry.id!={} {content_sound_free(app,&entry,true)}
@@ -215,7 +220,7 @@ app_content_destroy :: proc(app:^App) {
 }
 
 // Opens the file of an asset of one kind, whole and matching its hash.
-@(private="file")
+@(private)
 content_open :: proc(a:^Assets,id:base.Asset_Id,kind:asset.Fourcc,file:^asset.Asset,stamp:^Content_Stamp) -> bool {
     record,found:=asset.registry_find(&a.registry,id)
     if !found || record.kind!=kind {return false}
@@ -235,11 +240,11 @@ content_ui_free :: proc(c:^Content,entry:^Content_Ui) {
     delete(entry.textures,c.allocator);delete(entry.widgets,c.allocator)
     entry.textures,entry.widgets=nil,nil
 }
-@(private="file")
+@(private)
 content_animation_free :: proc(c:^Content,entry:^Content_Animation) {
     anim.library_destroy(&entry.lib)
     delete(entry.markers,c.allocator);delete(entry.names,c.allocator);delete(entry.roots,c.allocator);delete(entry.morphs,c.allocator)
-    entry.markers,entry.names,entry.morphs,entry.clip_count=nil,nil,nil,0
+    entry.markers,entry.names,entry.roots,entry.morphs,entry.clip_count=nil,nil,nil,nil,0
 }
 // The mixer reads the file of a stream until its audio thread lets go of the
 // sound, which nothing reports: the file of a stream that is replaced stays
@@ -327,43 +332,6 @@ content_ui_load :: proc(app:^App,id:base.Asset_Id,entry:^Content_Ui) -> bool {
     entry.textures,entry.revision=textures,a.revision
     entry.widgets=widgets
     entry.low,entry.high=ui.tree_layers(&entry.tree)
-    return true
-}
-
-@(private="file")
-content_animation_load :: proc(app:^App,id:base.Asset_Id,entry:^Content_Animation) -> bool {
-    a,c:=app.assets,app.content
-    file:asset.Asset
-    content_open(a,id,asset.KIND_ANIMATION,&file,entry) or_return
-    defer asset.asset_close(&file)
-    view,error:=asset.animation_view(&file,&a.types)
-    if error!=.None {return false}
-    desc:=asset.animation_library_desc(view)
-    desc.max_clips*=2
-    desc.allocator=c.allocator
-    lib:anim.Library
-    if !anim.library_init(&lib,desc) {return false}
-    markers,allocation:=make([]u64,len(view.markers),c.allocator)
-    count:=len(view.clips)
-    names,naming:=make([][asset.ANIMATION_NAME_CAPACITY]u8,count,c.allocator)
-    roots,rooting:=make([]asset.Animation_Root,count,c.allocator)
-    morphs,morphing:=content_animation_morphs(view,c.allocator)
-    if allocation!=nil || naming!=nil || rooting!=nil || !morphing || count>0 && asset.animation_clips_add(view,&lib,.Once)==0 {
-        anim.library_destroy(&lib)
-        delete(markers,c.allocator);delete(names,c.allocator);delete(roots,c.allocator);delete(morphs,c.allocator)
-        return false
-    }
-    content_animation_loops(&lib,count)
-    for &marker,i in view.markers {markers[i]=base.name_hash(base.text_get(marker.name[:]))}
-    for clip,i in view.clips {names[i]=clip.name;roots[i]=clip.root}
-    open :: proc(data:rawptr,id:base.Asset_Id,file:^asset.Asset) -> bool {return assets_file((^Assets)(data),id,asset.KIND_SKELETON,file)==.None}
-    if _,compressed:=asset.animation_compress(view,&lib,&a.types,open,a);compressed!=.None {
-        anim.library_destroy(&lib)
-        delete(markers,c.allocator);delete(names,c.allocator);delete(roots,c.allocator);delete(morphs,c.allocator)
-        return false
-    }
-    content_animation_free(c,entry)
-    entry.lib,entry.clip_count,entry.markers,entry.names,entry.roots,entry.morphs=lib,count,markers,names,roots,morphs
     return true
 }
 
@@ -522,12 +490,21 @@ content_slot :: proc(c:^Content,list:^[dynamic]$T,id:base.Asset_Id,kind:Content_
     return entry,true
 }
 
-@(private="file")
+@(private)
 content_loaded :: proc(c:^Content,stamp:^Content_Stamp,ok:bool) {
     stamp.failed=!ok
     c.generations+=1
     stamp.generation=c.generations
     if ok {c.stats.loads+=1}
+}
+
+// What loaded again replaces what loaded before.
+@(private)
+content_reloaded :: proc(c:^Content,stamp:^Content_Stamp) {
+    stamp.failed=false
+    c.generations+=1
+    stamp.generation=c.generations
+    c.stats.reloads+=1
 }
 
 // The interface of a .ui, loaded the first time, with its images already
@@ -554,13 +531,17 @@ content_ui :: proc(app:^App,id:base.Asset_Id) -> ^Content_Ui {
     return entry
 }
 
+// The clips of an .anim, loaded the first time. nil for the zero id, an asset that is not an
+// .anim or cannot be loaded, when no room is left, and while its first load compresses
+// (content_animation_pending), which is not a failure.
 content_animation :: proc(app:^App,id:base.Asset_Id) -> ^Content_Animation {
     c:=app_content(app)
     if c==nil || id=={} {return nil}
     entry,fresh:=content_slot(c,&c.animations,id,.Animation)
     if entry==nil {return nil}
-    if fresh {content_loaded(c,entry,content_animation_load(app,id,entry))}
-    return entry.failed?nil:entry
+    if fresh && !content_animation_start(app,entry) {content_loaded(c,entry,false)}
+    if entry.load!=nil && !jobs.pending(&entry.load.counter) {content_animation_finish(app,entry)}
+    return nil if entry.failed || entry.generation==0 else entry
 }
 
 // The sound of a .sound in the mixer of the application. Zero when it cannot
@@ -761,10 +742,7 @@ content_refresh :: proc(app:^App) -> (reloaded:int) {
     }
     done :: proc(c:^Content,stamp:^Content_Stamp,ok:bool,reloaded:^int) {
         if !ok {return}
-        stamp.failed=false
-        c.generations+=1
-        stamp.generation=c.generations
-        c.stats.reloads+=1
+        content_reloaded(c,stamp)
         reloaded^+=1
     }
     for &entry in c.fonts {
@@ -789,7 +767,12 @@ content_refresh :: proc(app:^App) -> (reloaded:int) {
         if stale {done(c,&entry,content_ui_load(app,entry.id,&entry),&reloaded)}
     }
     for &entry in c.animations {
-        if entry.id!={} && changed(registry,&entry) {done(c,&entry,content_animation_load(app,entry.id,&entry),&reloaded)}
+        if entry.id=={} || !changed(registry,&entry) {continue}
+        content_animation_drop(app,&entry)
+        generation:=entry.generation
+        if !content_animation_start(app,&entry) {
+            if generation==0 {content_loaded(c,&entry,false)}
+        } else if generation!=0 && entry.generation!=generation {reloaded+=1}
     }
     for &entry in c.sounds {
         if entry.id!={} && changed(registry,&entry) {done(c,&entry,content_sound_load(app,entry.id,&entry),&reloaded)}
@@ -821,6 +804,7 @@ content_collect :: proc(app:^App) -> (unloaded:int) {
             content_ui_free(c,&c.uis[ref.index])
             c.uis[ref.index]={}
         case .Animation:
+            content_animation_drop(app,&c.animations[ref.index])
             content_animation_free(c,&c.animations[ref.index])
             c.animations[ref.index]={}
         case .Sound:

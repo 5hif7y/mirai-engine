@@ -27,7 +27,7 @@ Targets, jobs, fingerprint, project shaders, cooking and shipped game (`cook/bui
     game/           shipped game, if no other folder is requested
     shaders/        shader generation of the project
     build/          files of the jobs, sources and fingerprint of the last build per target
-    cache/          machine caches (asset registry, textures and built meshes)
+    cache/          machine caches (asset registry, textures, built meshes, compressed .anim)
     thumbs/         asset previews of the editor
 ```
 
@@ -165,7 +165,8 @@ the `Project` owns everything it points to.
   and, apart from that, in the project's order. A cycle between inactive plugins is not an error.
 - The caches of `.mirai/cache` (`cache_path`) and `.mirai/thumbs` cost only time if deleted: the
   [registry](../../mirai-assets/references/formats.md#registry), the
-  [textures](../../mirai-imports/references/imports.md#texture-cache) and the
+  [textures](../../mirai-imports/references/imports.md#texture-cache), the
+  [compressed animations](../../mirai-core/references/host.md#content) and the
   [previews](../../mirai-editor/references/panels.md#previews) are made again.
 - `shader_generation(root)` is where a build publishes the shader generation;
   `shader_generation_find(root)` gives the one a run loads (that one, or `<root>/shaders` of a

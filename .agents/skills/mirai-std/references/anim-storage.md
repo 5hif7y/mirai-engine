@@ -5,7 +5,9 @@ immutable during a load, as the runtime plays it: the transform, `Float` and `Ve
 clip become uniform samples quantized against the error they make on the skeleton (the approach of
 [ACL](https://github.com/nfrechette/acl), which Unreal uses by default). A prepared library rejects
 `clip_add` and a second preparation. The `.anim` of a project keeps its keys; a
-[cooked one](../../mirai-assets/references/kinds.md#animation) keeps the samples.
+[cooked one](../../mirai-assets/references/kinds.md#animation) keeps the samples. A change that
+gives other samples for the same keys and config advances `COMPRESS_VERSION`: the
+[project cache](../../mirai-core/references/host.md#content) keys compressions by it.
 
 ## Error
 

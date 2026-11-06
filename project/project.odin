@@ -32,6 +32,7 @@ CACHE_FOLDER :: "cache"
 REGISTRY_CACHE :: "registry"   // in it: what the registry of the assets saw
 TEXTURE_CACHE :: "textures"    // in it: built textures, by image and settings
 MESH_CACHE :: "meshes"         // in it: built meshes, by geometry and settings
+ANIMATION_CACHE :: "animations" // in it: compressed .anim libraries, by asset and inputs
 THUMBNAIL_FOLDER :: "thumbs"   // beside it: the previews of the editor
 
 Plugin :: struct {

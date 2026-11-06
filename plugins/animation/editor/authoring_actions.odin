@@ -75,10 +75,10 @@ action_authoring_prepare :: proc(s:^editor.Session,call:^api.Call,p:^Action_Writ
         profile.windows[i]={action=u16(action),name=window.name,start=window.start,end=window.end}
     }
     if !anim.action_profile_check(profile) {authoring_failure(call,"definition","Invalid_Profile","unique names, finite positive speed, valid layer/root policy and time ranges","invalid action definition","Action profile validation failed");return}
-    if host.content_animation(s.app,p.animation)==nil {authoring_failure(call,"animation","Invalid_Asset","a loadable .anim asset","unavailable","The action source could not be loaded");return}
+    if host.content_animation_wait(s.app,p.animation)==nil {authoring_failure(call,"animation","Invalid_Asset","a loadable .anim asset","unavailable","The action source could not be loaded");return}
     for &definition,i in profile.actions {
         source:=definition.animation if definition.animation!={} else p.animation
-        content:=host.content_animation(s.app,source)
+        content:=host.content_animation_wait(s.app,source)
         if content==nil {authoring_failure(call,fmt.tprintf("actions[%d].animation",i),"Invalid_Asset","a loadable .anim asset","unavailable","The action source could not be loaded");return}
         clip:=lib.clip_find(&content.lib,base.name_hash(base.text_get(definition.clip[:])))
         if clip==0 {authoring_failure(call,fmt.tprintf("actions[%d].clip",i),"Missing_Clip","a clip in animation",base.text_get(definition.clip[:]),"The action clip does not exist");return}

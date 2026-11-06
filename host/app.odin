@@ -61,6 +61,7 @@ App_Desc :: struct {
     options:string,              // folder of the options the player chose (settings of the machine and input bindings) over those of the project; "": none, as in the editor
     assets_root:string,          // folder of cooked assets; its changes are reloaded
     assets_cache:string,         // file where the registry of assets_root keeps what it saw; "": none
+    animation_cache:string,      // folder where the content keeps the .anim it compressed; "": none
     shaders_root:string,         // folder whose shader generation is loaded; "": the one that holds assets_root
     asset_mounts:[]asset.Registry_Mount,
 }
@@ -146,6 +147,7 @@ App :: struct {
     reserved:map[rawptr]int,    // the address space of each struct of a place it made (world_alloc)
     scratch:rawptr,  // a World app_world_replace prepares the replacements in; made the first time
     root,engine_root,options:string, // those of App_Desc
+    animation_cache:string,          // App_Desc.animation_cache
     start_ns:u64,
     seconds:f64, // the frames so far, each as long as its dt: the fixed one in a manual run
     quit:bool,
@@ -239,6 +241,7 @@ app_create :: proc(desc:App_Desc) -> (app:^App,error:App_Error) {
     app.pixel_density=1
     app.root,app.engine_root=strings.clone(desc.root,allocator),strings.clone(desc.engine_root,allocator)
     app.options=strings.clone(desc.options,allocator)
+    app.animation_cache=strings.clone(desc.animation_cache,allocator)
     app.paced=desc.window && desc.fixed_dt<=0
     app.game_window=desc.window && desc.game_window
     app.window=desc.window_desc
@@ -325,6 +328,7 @@ app_destroy :: proc(app:^App) {
     profile_release(app)
     if app.platform!=nil {platform.destroy(app.platform)}
     delete(app.root,app.allocator);delete(app.engine_root,app.allocator);delete(app.options,app.allocator)
+    delete(app.animation_cache,app.allocator)
     free(app,app.allocator)
 }
 

@@ -2,8 +2,11 @@ package asset
 
 import "core:mem"
 import "core:os"
+import cmath "core:math"
+import "core:slice"
 import "core:testing"
 import anim "mirai:std/anim"
+import math "mirai:std/math"
 import "mirai:std/base"
 import "mirai:std/serial"
 
@@ -60,6 +63,10 @@ animation_round_trips_and_fills_a_library :: proc(t:^testing.T) {
     testing.expect_value(t,asset_load(&a,path),Error.None)
     defer asset_close(&a)
     testing.expect(t,a.blob.header.kind==KIND_ANIMATION && a.blob.header.kind_version==ANIMATION_VERSION && a.blob.header.id==desc.id)
+    // The track targets are mostly zeros: their table goes in LZ.
+    packed:=false
+    for i in 0..<int(a.blob.header.chunk_count) {packed||=blob_chunk(&a.blob,i).compression==.LZ}
+    testing.expect(t,packed,"the tables of an animation are compressed")
     view,error:=animation_view(&a,&types)
     testing.expect_value(t,error,Error.None)
     testing.expect(t,len(view.clips)==2 && len(view.tracks)==3 && len(view.keys)==7 && len(view.markers)==2)
@@ -163,27 +170,29 @@ animation_checks_cubic_tangents_and_adds_libraries_atomically :: proc(t:^testing
 }
 
 @(test)
-sound_round_trips_decoded_and_as_a_file :: proc(t:^testing.T) {
+sound_round_trips_lossless_and_as_a_file :: proc(t:^testing.T) {
     defer free_all(context.temp_allocator)
     types:Types;types_init(&types);defer types_destroy(&types)
-    samples:=make([]i16,2*480);defer delete(samples)
-    for &s,i in samples {s=i16(i*37-9000)}
+    // The bytes are the coding's own business: the asset checks its magic.
+    lossless:=make([]u8,96);defer delete(lossless)
+    copy(lossless,"MLPC")
+    for &b,i in lossless[4:] {b=u8(i*37)}
     source:Import_Info
     text_set(source.source[:],"sounds/step.wav")
     text_set(source.importer[:],"sound")
     path:=test_path("step.sound")
     defer os.remove(path)
-    testing.expect_value(t,sound_save(path,&types,{id={0x50,1},channels=2,sample_rate=48000,frames=480,samples=samples,source=&source}),Error.None)
+    testing.expect_value(t,sound_save(path,&types,{id={0x50,1},channels=2,sample_rate=48000,frames=480,lossless=lossless,source=&source}),Error.None)
     a:Asset
     testing.expect_value(t,asset_load(&a,path),Error.None)
     defer asset_close(&a)
     testing.expect(t,a.blob.header.kind==KIND_SOUND && .Cooked in a.blob.header.flags)
     view,error:=sound_view(&a,&types)
     testing.expect_value(t,error,Error.None)
-    testing.expect(t,view.info^==Sound_Info{2,48000,480,.PCM16,{}} && len(view.file)==0 && view.source!=nil)
-    testing.expect(t,mem.compare(mem.slice_to_bytes(view.samples),mem.slice_to_bytes(samples))==0)
-    // Stored as they are, the samples are the file, where an i16 can be read.
-    testing.expect(t,uintptr(raw_data(view.samples))>=uintptr(raw_data(a.file)) && uintptr(raw_data(view.samples))%SOUND_BULK_ALIGNMENT==uintptr(raw_data(a.file))%SOUND_BULK_ALIGNMENT)
+    testing.expect(t,view.info^==Sound_Info{2,48000,480,.Lossless,{}} && len(view.file)==0 && view.source!=nil)
+    testing.expect(t,mem.compare(view.lossless,lossless)==0)
+    // Stored without LZ, the coded samples are read from the file without a copy.
+    testing.expect(t,uintptr(raw_data(view.lossless))>=uintptr(raw_data(a.file)) && uintptr(raw_data(view.lossless))%SOUND_BULK_ALIGNMENT==uintptr(raw_data(a.file))%SOUND_BULK_ALIGNMENT)
     doc:Document
     testing.expect_value(t,document_from_asset(&doc,&a),Error.None)
     same_through_text(t,&doc)
@@ -191,7 +200,7 @@ sound_round_trips_decoded_and_as_a_file :: proc(t:^testing.T) {
 
     file:=make([]u8,64);defer delete(file)
     copy(file,"RIFF\x38\x00\x00\x00WAVEfmt ")
-    testing.expect_value(t,sound_document(&doc,&types,{id={0x51,1},channels=1,sample_rate=22050,frames=10,file=file,flags={.Stream},compression=.LZ4}),Error.None)
+    testing.expect_value(t,sound_document(&doc,&types,{id={0x51,1},channels=1,sample_rate=22050,frames=10,file=file,flags={.Stream},compression=.LZ}),Error.None)
     w:serial.Writer;serial.writer_init(&w);defer serial.writer_destroy(&w)
     testing.expect_value(t,document_write(&doc,&w),Error.None)
     same_through_text(t,&doc)
@@ -201,16 +210,16 @@ sound_round_trips_decoded_and_as_a_file :: proc(t:^testing.T) {
     defer asset_close(&b)
     view,error=sound_view(&b,&types)
     testing.expect_value(t,error,Error.None)
-    testing.expect(t,view.info.encoding==.File && .Stream in view.info.flags && len(view.samples)==0 && mem.compare(view.file,file)==0)
+    testing.expect(t,view.info.encoding==.File && .Stream in view.info.flags && len(view.lossless)==0 && mem.compare(view.file,file)==0)
 
     refuse :: proc(t:^testing.T,types:^Types,desc:Sound_Desc,what:string) {
         doc:Document
         testing.expect(t,sound_document(&doc,types,desc)==.Invalid && doc.tables==nil,what)
     }
-    refuse(t,&types,{channels=3,sample_rate=48000,frames=160,samples=samples[:480]},"three channels")
-    refuse(t,&types,{channels=2,sample_rate=0,frames=480,samples=samples},"no sample rate")
-    refuse(t,&types,{channels=2,sample_rate=48000,frames=100,samples=samples},"frames that are not the samples")
-    refuse(t,&types,{channels=2,sample_rate=48000,frames=480,samples=samples,flags={.Stream}},"a stream of decoded samples")
+    refuse(t,&types,{channels=3,sample_rate=48000,frames=160,lossless=lossless},"three channels")
+    refuse(t,&types,{channels=2,sample_rate=0,frames=480,lossless=lossless},"no sample rate")
+    refuse(t,&types,{channels=2,sample_rate=48000,frames=480,lossless=lossless[1:]},"lossless data without its magic")
+    refuse(t,&types,{channels=2,sample_rate=48000,frames=480,lossless=lossless,file=file},"both a file and lossless data")
     refuse(t,&types,{channels=1,sample_rate=48000,file=file[4:]},"a file that is neither WAV nor Ogg")
 
     kind,found:=kind_of_extension("hud/main.ui")
@@ -219,4 +228,74 @@ sound_round_trips_decoded_and_as_a_file :: proc(t:^testing.T) {
     testing.expect(t,found && kind==KIND_SOUND)
     info,known:=kind_info(KIND_ANIMATION)
     testing.expect(t,known && info.extension==".anim")
+}
+
+@(test)
+animation_cooks_its_clips_into_samples_that_play_as_the_runtime_compresses_them :: proc(t:^testing.T) {
+    defer free_all(context.temp_allocator)
+    types:Types;types_init(&types);defer types_destroy(&types)
+    storage:Test_Animation
+    desc:=test_animation(&storage)
+    COUNT :: 31
+    hips,leg:[COUNT]anim.Keyframe
+    for k in 0..<COUNT {
+        phase:=f32(k)/30
+        hips[k]={time=phase,value=anim.quat_vec4(math.quat_axis_angle({1,0,0},cmath.sin(phase*6)*.5))}
+        leg[k]={time=phase,value={0,-.4,cmath.sin(phase*4)*.05,0}}
+    }
+    walk:=[2]Animation_Track_Desc{{target="hips",property=.Rotation,keys=hips[:]},{target="hips/leg",property=.Position,keys=leg[:]}}
+    clips:=[3]Animation_Clip_Desc{storage.clips[0],storage.clips[1],{name="walk",tracks=walk[:]}}
+    desc.clips=clips[:]
+    doc:Document
+    testing.expect_value(t,animation_document(&doc,&types,desc),Error.None)
+    w:serial.Writer;serial.writer_init(&w);defer serial.writer_destroy(&w)
+    testing.expect_value(t,document_write(&doc,&w),Error.None)
+    document_destroy(&doc)
+    a:Asset
+    testing.expect_value(t,asset_open(&a,serial.writer_bytes(&w)),Error.None)
+    defer asset_close(&a)
+    view,_:=animation_view(&a,&types)
+    parents,_:=animation_parents(view,context.temp_allocator)
+    testing.expect(t,parents[0]==1 && parents[1]==-1 && parents[3]==-1 && parents[4]==3)
+    lib:anim.Library
+    testing.expect(t,anim.library_init(&lib,animation_library_desc(view)))
+    defer anim.library_destroy(&lib)
+    testing.expect_value(t,animation_clips_add(view,&lib),anim.Clip(1))
+    stats,compressed:=animation_compress(view,&lib,&types)
+    testing.expect(t,compressed==.None && stats.sampled_tracks>=2 && stats.error<=anim.COMPRESS_DEFAULT.precision)
+
+    testing.expect_value(t,animation_cooked_document(&doc,&types,desc.id,{},view,&lib),Error.None)
+    cooked_bytes:serial.Writer;serial.writer_init(&cooked_bytes);defer serial.writer_destroy(&cooked_bytes)
+    testing.expect_value(t,document_write(&doc,&cooked_bytes),Error.None)
+    document_destroy(&doc)
+    cooked:Asset
+    testing.expect_value(t,asset_open(&cooked,serial.writer_bytes(&cooked_bytes)),Error.None)
+    defer asset_close(&cooked)
+    cooked_view,error:=animation_view(&cooked,&types)
+    testing.expect_value(t,error,Error.None)
+    testing.expect(t,cooked_view.tracks[3].encoding==.Sampled && cooked_view.tracks[4].encoding==.Sampled && len(cooked_view.keys)<len(view.keys))
+    _,editable:=animation_descs(cooked_view,context.temp_allocator)
+    testing.expect(t,!editable)
+    played:anim.Library
+    testing.expect(t,anim.library_init(&played,animation_library_desc(cooked_view)))
+    defer anim.library_destroy(&played)
+    testing.expect_value(t,animation_clips_add(cooked_view,&played),anim.Clip(1))
+    _,prepared:=animation_compress(cooked_view,&played,&types)
+    testing.expect(t,prepared==.None && played.prepared)
+    for clip in 1..=3 {
+        testing.expect_value(t,anim.clip_duration(&played,anim.Clip(clip)),anim.clip_duration(&lib,anim.Clip(clip)))
+        for track,i in anim.clip_tracks(&played,anim.Clip(clip)) {
+            for step in 0..=90 {
+                time:=f32(step)/45
+                testing.expect_value(t,anim.clip_evaluate(&played,track,time),anim.clip_evaluate(&lib,anim.clip_tracks(&lib,anim.Clip(clip))[i],time))
+            }
+        }
+    }
+    // A sampled row that contradicts itself does not open.
+    sampled:=slice.clone(cooked_view.sampled,context.temp_allocator)
+    sampled[0].rate=transmute(f32)u32(0x7fc00000)
+    broken:=cooked_view;broken.sampled=sampled
+    testing.expect(t,!animation_check(broken))
+    broken.sampled=cooked_view.sampled;broken.samples=cooked_view.samples[:len(cooked_view.samples)-anim.SAMPLED_PADDING]
+    testing.expect(t,!animation_check(broken))
 }

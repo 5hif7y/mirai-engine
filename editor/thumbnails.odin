@@ -14,6 +14,8 @@ import gpu "mirai:render"
 import "mirai:std/base"
 import "mirai:std/geom"
 import mm "mirai:std/math"
+import "mirai:std/compressor"
+import "mirai:std/compressor/lz"
 import "mirai:std/serial"
 import "mirai:ui"
 
@@ -54,8 +56,22 @@ THUMBNAIL_SHAPE_TINT :: [4]f32{0.7,0.7,0.7,1}
 THUMBNAIL_RENDERER :: 3
 THUMBNAIL_LOADS :: 8
 THUMBNAIL_FILE_MAGIC :: u32('M')|u32('T')<<8|u32('H')<<16|u32('B')<<24
-THUMBNAIL_FILE_VERSION :: 1
-THUMBNAIL_FILE_HEADER :: 24 // magic, version, key, side and the bytes of the LZ4 image after it
+THUMBNAIL_FILE_VERSION :: 2
+THUMBNAIL_FILE_HEADER :: 24 // magic, version, key, side and the bytes of the LZ image after it
+
+// A stored preview as its file holds it, and the coders of its image.
+Thumbnail_File :: struct {
+    bytes:[dynamic]u8,
+    decoder:compressor.Decoder,
+    encoder:lz.Encoder,
+}
+
+thumbnail_file_destroy :: proc(file:^Thumbnail_File) {
+    delete(file.bytes)
+    compressor.decoder_destroy(&file.decoder)
+    lz.encoder_destroy(&file.encoder)
+    file^={}
+}
 
 // What a preview is drawn from. Its bytes are its signature.
 Thumbnail_Subject :: struct {
@@ -113,7 +129,7 @@ Thumbnails :: struct {
     pixels:[dynamic]u8,   // the atlas; allocated with the first preview
     readback:[dynamic]u8, // what the renderer drew, before it is reduced
     image:[dynamic]u8,    // the preview being drawn
-    file:[dynamic]u8,     // a preview of the thumbs folder, as its file holds it
+    file:Thumbnail_File,  // a preview of the thumbs folder, as its file holds it
     loads:int,            // previews looked for there in the frame loaded
     loaded:u64,
     cells:[THUMBNAIL_CELLS]Thumbnail_Cell,
@@ -149,7 +165,7 @@ thumbnails_destroy :: proc(s:^Session) {
         for &target in p.targets {gpu.thumbnail_destroy(p.renderer.device,&target)}
     }
     if p.capture_renderer!=nil {gpu.thumbnail_values_destroy(p.capture_renderer.device,&p.capture)}
-    delete(p.pixels);delete(p.readback);delete(p.image);delete(p.file)
+    delete(p.pixels);delete(p.readback);delete(p.image);thumbnail_file_destroy(&p.file)
     p^={}
 }
 
@@ -424,27 +440,27 @@ thumbnail_store_forget :: proc(folder:string,ids:[]base.Asset_Id) {
 // The stored preview of an asset under key, into image: false when its file
 // is not there, has another key or cannot be read.
 @(private)
-thumbnail_load :: proc(folder:string,id:base.Asset_Id,side:int,key:u64,file,image:^[dynamic]u8) -> bool {
+thumbnail_load :: proc(folder:string,id:base.Asset_Id,side:int,key:u64,file:^Thumbnail_File,image:^[dynamic]u8) -> bool {
     pixels:=side*side*4
-    resize(file,THUMBNAIL_FILE_HEADER+serial.lz4_bound(pixels))
-    head,size,error:=serial.file_read_head(thumbnail_file(folder,id,side),file[:])
+    resize(&file.bytes,THUMBNAIL_FILE_HEADER+asset.pack_bound(pixels))
+    head,size,error:=serial.file_read_head(thumbnail_file(folder,id,side),file.bytes[:])
     if error!=.None || size!=i64(len(head)) || len(head)<THUMBNAIL_FILE_HEADER {return false}
     r:=serial.reader_init(head)
     if serial.read_u32(&r)!=THUMBNAIL_FILE_MAGIC || serial.read_u32(&r)!=THUMBNAIL_FILE_VERSION || serial.read_u64(&r)!=key || serial.read_u32(&r)!=u32(side) {return false}
     packed:=int(serial.read_u32(&r))
     if r.failed || packed!=len(head)-THUMBNAIL_FILE_HEADER {return false}
+    if len(file.decoder.scratch)==0 && compressor.decoder_init(&file.decoder)!=.None {return false}
     resize(image,pixels)
-    written,ok:=serial.lz4_decompress(head[THUMBNAIL_FILE_HEADER:],image[:])
-    return ok && written==pixels
+    return asset.unpack(&file.decoder,head[THUMBNAIL_FILE_HEADER:],image[:])==.None
 }
 
 // Keeps the preview of an asset under key; false when it cannot be written.
 @(private)
-thumbnail_save :: proc(folder:string,id:base.Asset_Id,side:int,key:u64,image:[]u8,file:^[dynamic]u8) -> bool {
+thumbnail_save :: proc(folder:string,id:base.Asset_Id,side:int,key:u64,image:[]u8,file:^Thumbnail_File) -> bool {
     if len(image)!=side*side*4 {return false}
-    resize(file,THUMBNAIL_FILE_HEADER+serial.lz4_bound(len(image)))
-    packed,ok:=serial.lz4_compress(image,file[THUMBNAIL_FILE_HEADER:])
-    if !ok {return false}
+    resize(&file.bytes,THUMBNAIL_FILE_HEADER+asset.pack_bound(len(image)))
+    packed,error:=asset.pack(&file.encoder,.Edit,image,file.bytes[THUMBNAIL_FILE_HEADER:])
+    if error!=.None {return false}
     w:serial.Writer
     serial.writer_init(&w,allocator=context.temp_allocator)
     serial.write_u32(&w,THUMBNAIL_FILE_MAGIC)
@@ -452,9 +468,9 @@ thumbnail_save :: proc(folder:string,id:base.Asset_Id,side:int,key:u64,image:[]u
     serial.write_u64(&w,key)
     serial.write_u32(&w,u32(side))
     serial.write_u32(&w,u32(packed))
-    copy(file[:THUMBNAIL_FILE_HEADER],serial.writer_bytes(&w))
+    copy(file.bytes[:THUMBNAIL_FILE_HEADER],serial.writer_bytes(&w))
     if !os.is_dir(folder) && os.make_directory_all(folder)!=nil {return false}
-    return serial.file_write_atomic(thumbnail_file(folder,id,side),file[:THUMBNAIL_FILE_HEADER+packed])==.None
+    return serial.file_write_atomic(thumbnail_file(folder,id,side),file.bytes[:THUMBNAIL_FILE_HEADER+packed])==.None
 }
 
 // The image of a cell in the atlas, which goes to the renderer with the next flush.

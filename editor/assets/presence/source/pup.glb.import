@@ -1,6 +1,7 @@
 {
   "max_texture_size": 512,
   "textures": "Blocks",
+  "rdo_lambda": 0,
   "image": "Data",
   "alpha_coverage": 0,
   "lods": "Auto",

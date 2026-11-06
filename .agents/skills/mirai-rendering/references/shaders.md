@@ -198,6 +198,12 @@
   that `shader_assets_load` reads.
 - The engine generation also compiles the RHI test shaders and writes `render/shaders_gen.odin`
   and `rhi/shaders_gen_test.odin`, `@(rodata)` tables.
+- The `render` table embeds the code of its stages and then of its program stages as one LZ
+  stream per backend (`shaders/build/shaders.spv.lz`, `.metal.lz`), each stage an
+  `Embedded_Shader` with its size in it. It is packed `Edit`, and `Ship` when the generation is
+  asked to ship (`Options.ship`: the release builds of the engine); either serves every build.
+  `renderer_init` decodes it once (`embedded_shaders_decode`) unless it starts with a loaded
+  generation. The `rhi` test table loads each stage as it is.
 - The `rhi` table stays under `rhi.TEST_SHADERS` (`MIRAI_TEST_SHADERS`, true in test builds and in
   `mirai check`); the tests read it with `test_shader(name)`. This way `rhi` and the `mirai` tool,
   which imports it, compile before the first generation.
@@ -212,7 +218,9 @@
   Each entry is named by its fingerprint:
   - `stages/<fingerprint>.json`, `.spv` and `.metal`: a compiled stage and its code;
   - `reflection/<fingerprint>.json` and `<fingerprint>.attributes.json`: the reflection of the
-    `Parameters` and of the `Attributes` of a program.
+    `Parameters` and of the `Attributes` of a program;
+  - `embedded/<digest>.edit.spv.lz`, `.ship.spv.lz` and their `.metal.lz`: the stream
+    `render` embeds, by the hashes of the code it holds, taken only if it decodes to that code.
 - Each file is written separately and renamed into place (process- and thread-own temporary), and
   the stage's `.json` last. Whoever reads takes an entry only if all its hashes match; if not, it
   compiles and stores it again. An entry without the code of a requested backend is completed

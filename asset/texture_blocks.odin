@@ -21,13 +21,14 @@ texture_bc1_palette :: proc "contextless" (c0,c1:u16) -> [4][3]f32 {
 }
 
 // Texels of a color block, row by row, in 0..1. alpha tells the texels the
-// three color mode leaves transparent.
-texture_bc1_block_decode :: proc "contextless" (block:[8]u8) -> (texels:[16][3]f32,alpha:[16]f32) {
+// three color mode leaves transparent. The color block of BC3 is always four
+// color, whatever the order of its endpoints.
+texture_bc1_block_decode :: proc "contextless" (block:[8]u8,four_color:=false) -> (texels:[16][3]f32,alpha:[16]f32) {
     c0:=u16(block[0])|u16(block[1])<<8
     c1:=u16(block[2])|u16(block[3])<<8
     palette:=texture_bc1_palette(c0,c1)
     opaque:=[4]f32{1,1,1,1}
-    if c0<=c1 {
+    if c0<=c1 && !four_color {
         palette[2]=(palette[0]+palette[1])/2
         palette[3]={}
         opaque[3]=0
@@ -89,7 +90,7 @@ texture_level_rgba8 :: proc "contextless" (format:Texture_Format,level:[]u8,widt
                 for c,i in colors {texels[i]={to_byte(c.r),to_byte(c.g),to_byte(c.b),to_byte(alpha[i])}}
             case .BC3:
                 alpha:=texture_bc4_block_decode(first)
-                colors,_:=texture_bc1_block_decode(second)
+                colors,_:=texture_bc1_block_decode(second,four_color=true)
                 for c,i in colors {texels[i]={to_byte(c.r),to_byte(c.g),to_byte(c.b),to_byte(alpha[i])}}
             case .BC5:
                 xs,ys:=texture_bc4_block_decode(first),texture_bc4_block_decode(second)

@@ -159,6 +159,7 @@ import_file :: proc(s:^Session,source:string,into:base.Asset_Id={},folder:="",pr
         root=strings.clone(s.project_root,allocator),into=into,
         texture_cache=project.cache_path(s.project_root,project.TEXTURE_CACHE,allocator=allocator),
         mesh_cache=project.cache_path(s.project_root,project.MESH_CACHE,allocator=allocator),
+        fast_textures=true,
     }
     // A source outside the project keeps no settings next to it: the editor
     // writes only into the project, and reimporting finds it by its path.

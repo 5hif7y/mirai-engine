@@ -72,7 +72,7 @@ canvas_load :: proc(c:^Canvas,a:^host.Assets,id:base.Asset_Id,allocator:=context
         first:=u32(len(deltas))
         for delta in view.morph_deltas[target.first:][:target.count] {
             if at:=canvas_vertex[delta.vertex];at>=0 {
-                moved:=delta
+                moved:=asset.morph_decode(delta,view.morph_step)
                 moved.vertex=u32(at)
                 append(&deltas,moved)
             }

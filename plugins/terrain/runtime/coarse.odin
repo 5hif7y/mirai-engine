@@ -5,7 +5,6 @@ import "base:runtime"
 import "core:math/linalg"
 import "core:mem"
 import "mirai:std/jobs"
-import "mirai:std/serial"
 
 // The coarse grid of a Heightfield: its heights, and the weights of its
 // layers, every COARSE samples and at its last row and column, in memory
@@ -110,7 +109,7 @@ coarse_vertex :: proc "contextless" (s:^Source,x,z,step:int) -> (position,normal
 // The values of page i of a grid, from memory or read from its block into
 // scratch; a uniform page gives its fill.
 @(private)
-coarse_page :: proc(g:^Grid($T),i:int,file:string,read:[]u8,scratch:[]T) -> (values:[]T,fill:T,ok:bool) {
+coarse_page :: proc(g:^Grid($T),i:int,file:string,read:^Page_Reader,scratch:[]T) -> (values:[]T,fill:T,ok:bool) {
     page:=&g.pages[i]
     if page.values!=nil {return page.values,{},true}
     if !grid_absent(g,i) {return nil,page.fill,true}
@@ -148,9 +147,10 @@ source_coarse_build :: proc(s:^Source,ranges:[][2]f32,errors:[]Lod_Errors=nil,js
     count:=chunk_counts(s).z
     if js!=nil && jobs.worker_count(js)>1 && count>1 {jobs.parallel_for(js,worker,count,1,coarse_rows,&rows)} else {coarse_rows(&rows,0,count,worker)}
     if intrinsics.atomic_load(&rows.failed) {return false}
-    read,read_error:=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),context.temp_allocator)
-    if read_error!=nil {return false}
-    if !coarse_grid(&next.weights,size,s.allocator) || !coarse_weights_fill(s,&next,read) {return false}
+    read:Page_Reader
+    if !page_reader_init(&read,context.temp_allocator) {return false}
+    defer page_reader_destroy(&read,context.temp_allocator)
+    if !coarse_grid(&next.weights,size,s.allocator) || !coarse_weights_fill(s,&next,&read) {return false}
     coarse_destroy(&s.coarse,s.allocator)
     s.coarse=next
     ok=true
@@ -207,16 +207,18 @@ coarse_rows :: proc(rows:^Coarse_Rows,first,last:int,worker:int) {
     counts:=chunk_counts(s)
     // The rows of a row of chunks, from the line of the coarse grid below it to the one above.
     band_rows:=cells+2*COARSE+1
-    read,read_error:=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),context.temp_allocator)
+    read:Page_Reader
+    read_ok:=page_reader_init(&read,context.temp_allocator)
+    defer page_reader_destroy(&read,context.temp_allocator)
     heights,heights_error:=make([]f32,PAGE*PAGE,context.temp_allocator)
     band,band_error:=make([]f32,band_rows*nx,context.temp_allocator)
-    if read_error!=nil || heights_error!=nil || band_error!=nil {intrinsics.atomic_store(&rows.failed,true);return}
+    if !read_ok || heights_error!=nil || band_error!=nil {intrinsics.atomic_store(&rows.failed,true);return}
     g:=&s.heights
     for cz in first..<last {
         low,high:=cz*cells,min(cz*cells+cells,nz-1)
         b0,b1:=low/COARSE*COARSE,min((high+COARSE-1)/COARSE*COARSE,nz-1)
         for pz in b0/PAGE..=b1/PAGE {for px in 0..<g.counts.x {
-            values,fill,read_ok:=coarse_page(g,px+g.counts.x*pz,s.file,read,heights)
+            values,fill,read_ok:=coarse_page(g,px+g.counts.x*pz,s.file,&read,heights)
             if !read_ok {intrinsics.atomic_store(&rows.failed,true);return}
             for z in max(b0,pz*PAGE)..=min(b1,pz*PAGE+PAGE-1) {for x in px*PAGE..<min(px*PAGE+PAGE,nx) {
                 band[(z-b0)*nx+x]=values==nil?fill:values[(x-px*PAGE)+min(PAGE,nx-px*PAGE)*(z-pz*PAGE)]
@@ -236,7 +238,7 @@ coarse_rows :: proc(rows:^Coarse_Rows,first,last:int,worker:int) {
 }
 
 @(private)
-coarse_weights_fill :: proc(s:^Source,c:^Coarse,read:[]u8) -> bool {
+coarse_weights_fill :: proc(s:^Source,c:^Coarse,read:^Page_Reader) -> bool {
     weights,error:=make([]Weights,PAGE*PAGE,context.temp_allocator)
     if error!=nil {return false}
     nx,nz:=int(s.samples.x),int(s.samples.z)
@@ -255,9 +257,10 @@ coarse_weights_fill :: proc(s:^Source,c:^Coarse,read:[]u8) -> bool {
 source_coarse_weights :: proc(s:^Source) -> bool {
     if s.kind!=.Heightfield || len(s.coarse.heights.pages)==0 {return true}
     c:=&s.coarse
-    read,error:=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),context.temp_allocator)
-    if error!=nil {return false}
-    return coarse_grid(&c.weights,c.size,s.allocator) && coarse_weights_fill(s,c,read)
+    read:Page_Reader
+    if !page_reader_init(&read,context.temp_allocator) {return false}
+    defer page_reader_destroy(&read,context.temp_allocator)
+    return coarse_grid(&c.weights,c.size,s.allocator) && coarse_weights_fill(s,c,&read)
 }
 
 // The coarse grid over the inclusive region of samples of an edit, whose

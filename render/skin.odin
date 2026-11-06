@@ -12,9 +12,16 @@ Skin_Influence :: asset.Skin_Vertex
 
 // The morph targets of a pose, by vertex: the deltas of a vertex are a range
 // of deltas, by target, each what its target at weight 1 adds before skinning.
+// A delta is quantized as a mesh stores it (asset.Morph_Cluster_Delta), its
+// position in steps of step, and skin.comp reads it as it is.
 Morph_Range :: struct {first,count:u32}
-Morph_Delta :: struct {position,normal,tangent:Vec3,target:u32}
-Morph_Data :: struct {ranges:[]Morph_Range,deltas:[]Morph_Delta,count:u32}
+Morph_Delta :: struct {
+    target:u32,
+    position,normal:[3]i16,
+    tangent:u32,
+}
+#assert(size_of(Morph_Delta)==size_of(asset.Morph_Cluster_Delta) && offset_of(Morph_Delta,tangent)==offset_of(asset.Morph_Cluster_Delta,tangent))
+Morph_Data :: struct {ranges:[]Morph_Range,deltas:[]Morph_Delta,count:u32,step:f32}
 MORPH_MAX_TARGETS :: 256
 
 // The part of a pose that a view which does not draw its layers draws
@@ -28,7 +35,7 @@ SKIN_REBUILD_INTERVAL :: 120
 @(private) Skin_Joint :: struct {current,previous:[3]Vec4}
 // skin.comp: mesh is the row of the mesh table it reads clusters from,
 // clusters those it poses, output and previous words of the vertex pool.
-@(private) Skin_Params :: struct {mesh,clusters,output,previous,morph_count:u32,pad:[3]u32}
+@(private) Skin_Params :: struct {mesh,clusters,output,previous,morph_count:u32,morph_step:f32,pad:[2]u32}
 // How far the deltas of a target move the vertices of a joint, at weight 1.
 @(private) Morph_Joint_Bounds :: struct {joint,target:u32,lo,hi:Vec3}
 // The threads of a batched pass from start on work on one pose. Triangles:
@@ -94,14 +101,14 @@ skin_palette_valid :: proc(palette:[]Mat4)->bool {
 
 // The deltas of a pose without targets are not read: the source stands in for their buffers.
 @(private)
-Skin_Morph_Buffers :: struct {ranges,deltas,weights:rhi.Buffer,weights_offset:u64,count:u32}
+Skin_Morph_Buffers :: struct {ranges,deltas,weights:rhi.Buffer,weights_offset:u64,count:u32,step:f32}
 
 // Poses the clusters of a mesh of the table bound at SLOT_MESHES, reading
 // its clusters and vertices from the pools bound there too.
 @(private)
 skin_dispatch :: proc(r:^Renderer,cmd:^rhi.Command_List,source,palette:rhi.Buffer,palette_offset:u64,meshes,vertices,indices:rhi.Buffer,params:Skin_Params,constants:rhi.Buffer=0,morph:Skin_Morph_Buffers={}) {
     params:=params
-    params.morph_count=morph.count
+    params.morph_count,params.morph_step=morph.count,morph.step
     rhi.cmd_bind_pipeline(cmd,r.pipelines[.Skin])
     rhi.cmd_bind_buffer(cmd,SLOT_PASS0,source)
     rhi.cmd_bind_buffer(cmd,SLOT_PASS1,palette,palette_offset)
@@ -138,19 +145,18 @@ skin_binding_release :: proc(r:^Renderer,binding:^Skin_Binding) {
 }
 
 // Ranges that cover the deltas one after another, each delta of a target of
-// the pose, after the target of the delta before it in its range, with finite amounts.
+// the pose, after the target of the delta before it in its range, on a step
+// that is a positive finite number.
 @(private)
 skin_morph_valid :: proc(morph:Morph_Data,vertices:int) -> bool {
     if morph.count==0 {return len(morph.ranges)==0 && len(morph.deltas)==0}
     if morph.count>MORPH_MAX_TARGETS || len(morph.ranges)!=vertices {return false}
+    if !(morph.step>0) || math.is_inf(morph.step) {return false}
     used:u64
     for range in morph.ranges {
         if u64(range.first)!=used || u64(range.first)+u64(range.count)>u64(len(morph.deltas)) {return false}
         for delta,i in morph.deltas[range.first:][:range.count] {
             if delta.target>=morph.count || i>0 && delta.target<=morph.deltas[int(range.first)+i-1].target {return false}
-            for axis in 0..<3 {
-                if math.is_nan(delta.position[axis]) || math.is_inf(delta.position[axis]) || math.is_nan(delta.normal[axis]) || math.is_inf(delta.normal[axis]) || math.is_nan(delta.tangent[axis]) || math.is_inf(delta.tangent[axis]) {return false}
-            }
         }
         used+=u64(range.count)
     }
@@ -159,7 +165,7 @@ skin_morph_valid :: proc(morph:Morph_Data,vertices:int) -> bool {
 
 @(private)
 skin_morph_equal :: proc(a,b:Morph_Data) -> bool {
-    return a.count==b.count && len(a.ranges)==len(b.ranges) && len(a.deltas)==len(b.deltas) &&
+    return a.count==b.count && a.step==b.step && len(a.ranges)==len(b.ranges) && len(a.deltas)==len(b.deltas) &&
         mem.compare(slice_bytes(a.ranges),slice_bytes(b.ranges))==0 && mem.compare(slice_bytes(a.deltas),slice_bytes(b.deltas))==0
 }
 
@@ -169,7 +175,7 @@ skin_morph_equal :: proc(a,b:Morph_Data) -> bool {
 skin_morph_binding :: proc(r:^Renderer,binding:^Skin_Binding,morph:Morph_Data) -> bool {
     if morph.count==0 {return true}
     error:mem.Allocator_Error
-    binding.morph.count=morph.count
+    binding.morph.count,binding.morph.step=morph.count,morph.step
     binding.morph.ranges,error=make([]Morph_Range,len(morph.ranges),r.allocator);if error!=nil {return false}
     binding.morph.deltas,error=make([]Morph_Delta,len(morph.deltas),r.allocator);if error!=nil {return false}
     copy(binding.morph.ranges,morph.ranges);copy(binding.morph.deltas,morph.deltas)
@@ -189,7 +195,8 @@ skin_morph_binding :: proc(r:^Renderer,binding:^Skin_Binding,morph:Morph_Data) -
                     if _,appended:=append(&bounds,Morph_Joint_Bounds{joint=joint,target=delta.target});appended!=nil {return false}
                     if map_insert(&rows,key,row)==nil {return false}
                 }
-                bounds[row].lo=linalg.min(bounds[row].lo,delta.position);bounds[row].hi=linalg.max(bounds[row].hi,delta.position)
+                position:=asset.morph_position(delta.position,morph.step)
+                bounds[row].lo=linalg.min(bounds[row].lo,position);bounds[row].hi=linalg.max(bounds[row].hi,position)
             }
         }
     }
@@ -698,7 +705,7 @@ poses_record :: proc(r:^Renderer,cmd:^rhi.Command_List)->bool {
             weights:=rhi.frame_alloc(r.device,u64(bytes),16)
             if weights.ptr==nil {set_error(r,"transient ring exhausted uploading morph weights");return false}
             mem.copy(weights.ptr,raw_data(skin.morph_weights),bytes)
-            morph.ranges,morph.deltas,morph.weights,morph.weights_offset=skin.binding.morph_ranges,skin.binding.morph_deltas,weights.buffer,weights.offset
+            morph.ranges,morph.deltas,morph.weights,morph.weights_offset,morph.step=skin.binding.morph_ranges,skin.binding.morph_deltas,weights.buffer,weights.offset,skin.binding.morph.step
             rhi.cmd_barrier_buffer(cmd,morph.ranges,.Shader_Read);rhi.cmd_barrier_buffer(cmd,morph.deltas,.Shader_Read)
         } else {morph.count=0}
         params:=Skin_Params{mesh=u32(handle),clusters=posed_clusters(s,mesh),output=mesh.posed_word,previous=mesh.previous_word}

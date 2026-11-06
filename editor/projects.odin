@@ -183,7 +183,7 @@ projects_rows_read :: proc(s:^Session) {
 // image: the PNG its manifest names as its thumbnail, else the view an editor
 // of it kept of its start scene in its thumbs folder. False for neither.
 @(private)
-projects_thumbnail_read :: proc(folder:string,m:^project.Manifest,side:int,file,image:^[dynamic]u8) -> bool {
+projects_thumbnail_read :: proc(folder:string,m:^project.Manifest,side:int,file:^Thumbnail_File,image:^[dynamic]u8) -> bool {
     if thumbnail:=base.text_get(m.thumbnail[:]);thumbnail!="" {
         if bytes,read_error:=os.read_entire_file(project.path(folder,thumbnail,allocator=context.temp_allocator),context.temp_allocator);read_error==nil {
             if picture,error:=textures.image_decode(bytes,context.temp_allocator);error==.None && picture.width>0 && picture.height>0 {

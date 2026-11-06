@@ -1,6 +1,7 @@
 package textures
 
 import "core:hash/xxhash"
+import "core:os"
 import "core:slice"
 import "mirai:asset"
 import "mirai:cook/cache"
@@ -24,6 +25,11 @@ cache_key_build :: proc(bytes:[]u8,made:Source,options:Build_Options) -> u64 {
 // The blocks of a texture that stores RGBA8, by the content hash of its file.
 cache_key_blocks :: proc(content_hash:u64) -> u64 {
     return base.hash_combine(base.hash_combine(content_hash,u64(BUILD_VERSION)),0x626c6f636b73)|1
+}
+
+// Whether the cache keeps a texture under key, without reading it.
+cache_has :: proc(folder:string,key:u64) -> bool {
+    return folder!="" && os.exists(cache.file_path(folder,key,".tex"))
 }
 
 // The texture the cache keeps under key, its levels in allocator. False

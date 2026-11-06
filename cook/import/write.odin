@@ -255,7 +255,6 @@ Texture_Job :: struct {
     alpha_cutoff:f32,
     index:int,
     version:u32,
-    compression:asset.Compression, // of the levels in the file
     cooked:^Cooked_Texture,        // built ahead (model_cook); nil when not
 }
 
@@ -271,7 +270,14 @@ write_texture :: proc(w:^Writer,job:Texture_Job,id,owner:base.Asset_Id,path,sour
     options:=texture_options(w,job)
     info:=import_info(source,job.name,job.index,job.size,job.hash,textures.settings_hash(options),job.version)
     file:asset.Asset
-    if writer_kept(w,path,asset.KIND_TEXTURE,asset.TEXTURE_VERSION,id,owner,&info,&file) {
+    kept:=writer_kept(w,path,asset.KIND_TEXTURE,asset.TEXTURE_VERSION,id,owner,&info,&file)
+    // A Fast texture stays until the cache keeps it as Final.
+    if !kept && w.options.fast_textures && !textures.cache_has(w.options.texture_cache,textures.cache_key_build(job.bytes,job.made,options)) {
+        fast:=info
+        fast.settings_hash=fast_settings(options)
+        if kept=writer_kept(w,path,asset.KIND_TEXTURE,asset.TEXTURE_VERSION,id,owner,&fast,&file);kept {info=fast}
+    }
+    if kept {
         defer asset.asset_close(&file)
         if view,error:=asset.texture_view(&file,&w.types);error==.None {
             record(w,id,asset.KIND_TEXTURE,job.name,path,source,true,texture_detail(view.info.format,int(view.info.width),int(view.info.height),len(view.mips)),kept=true)
@@ -280,7 +286,7 @@ write_texture :: proc(w:^Writer,job:Texture_Job,id,owner:base.Asset_Id,path,sour
     }
     cooked:=job.cooked
     own:Cooked_Texture
-    if cooked==nil || cooked.settings!=info.settings_hash || cooked.size!=job.size || cooked.hash!=job.hash {
+    if cooked==nil || cooked.settings!=info.settings_hash && (!w.options.fast_textures || cooked.settings!=fast_settings(options)) || cooked.size!=job.size || cooked.hash!=job.hash {
         texture_cook(job.bytes,job.made,job.decoded,options,w.options,&own,context.temp_allocator)
         cooked=&own
     }
@@ -290,7 +296,8 @@ write_texture :: proc(w:^Writer,job:Texture_Job,id,owner:base.Asset_Id,path,sour
         return false
     }
     built:=&cooked.built
-    desc:=textures.built_desc(built,id,&info,job.compression)
+    info.settings_hash=cooked.settings
+    desc:=textures.built_desc(built,id,&info)
     desc.owner=owner
     existed:=os.exists(path)
     zone(w.options,"texture.save")
@@ -543,13 +550,33 @@ write_model :: proc(w:^Writer,model:^Imported_Model) -> bool {
         part:=&parts[animation]
         import_data:=import_info(source,name,0,model.source_size,model.source_hash,0,model.version)
         existed:=os.exists(part.path)
-        desc:=asset.Animation_Desc{id=part.id,owner=part.owner,clips=model.animations,source=&import_data}
+        clips:=make([]asset.Animation_Clip_Desc,len(model.animations),context.temp_allocator)
+        copy(clips,model.animations)
+        for &clip in clips {clip.skeleton=clip_skeleton(model,clip,w.report.skeleton_ids)}
+        desc:=asset.Animation_Desc{id=part.id,owner=part.owner,clips=clips,source=&import_data}
         if error:=asset.animation_save(part.path,&w.types,desc);error!=.None {return save_failed(w,error,part.path)}
         w.report.animation_id=part.id
         record(w,part.id,asset.KIND_ANIMATION,name,part.path,source,existed,fmt.tprintf("%d clips",len(model.animations)))
     }
     earlier_left(w)
     return true
+}
+
+// The skeleton a clip plays on: the one with the most bones its transform tracks move.
+@(private="file")
+clip_skeleton :: proc(model:^Imported_Model,clip:asset.Animation_Clip_Desc,ids:[]base.Asset_Id) -> (id:base.Asset_Id) {
+    best:=0
+    for skeleton,i in model.skeletons {
+        if i>=len(ids) {break}
+        moved:=0
+        for track in clip.tracks {
+            if track.property>.Scale {continue}
+            target:=base.name_hash(track.target)
+            for &bone in skeleton.bones {if bone.target==target {moved+=1;break}}
+        }
+        if moved>best {best,id=moved,ids[i]}
+    }
+    return
 }
 
 // "12034/3008/752 triangles, 3 hulls of 87 points, 1 box": the levels and the colliders of a mesh.

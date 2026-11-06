@@ -378,6 +378,8 @@ registry_probe :: proc(r:^Registry,full:string,file:^Registry_File,dependencies:
         if entry.tag!=TAG_DEPS {continue}
         count:=entry.uncompressed_size/size_of(base.Asset_Id)
         if entry.uncompressed_size%size_of(base.Asset_Id)!=0 || count>REGISTRY_MAX_DEPENDENCIES {return}
+        // Writers store the dependencies as they are, so a scan reads them without decoding.
+        if entry.compression!=.None {return}
         stored:=make([]u8,int(entry.size),r.allocator)
         defer delete(stored,r.allocator)
         if entry.offset+entry.size<=u64(len(bytes)) {copy(stored,bytes[entry.offset:])}
@@ -385,11 +387,7 @@ registry_probe :: proc(r:^Registry,full:string,file:^Registry_File,dependencies:
         first:=len(dependencies)
         resize(dependencies,first+int(count))
         target:=mem.slice_to_bytes(dependencies[first:])
-        if entry.compression==.None {copy(target,stored)}
-        else if written,ok:=serial.lz4_decompress(stored,target);!ok || written!=len(target) {
-            resize(dependencies,first)
-            return
-        }
+        copy(target,stored)
         listed:=dependencies[first:]
         slice.sort_by(listed,proc(a,b:base.Asset_Id) -> bool {return a[0]<b[0] || a[0]==b[0] && a[1]<b[1]})
         unique:=0

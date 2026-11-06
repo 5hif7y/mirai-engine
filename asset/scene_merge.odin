@@ -231,9 +231,9 @@ records_fix :: proc(m:^Merge,doc,origin,theirs:^Document,types:^Types,before:^Sc
         if table,found:=document_table(doc,name);found {document_table_remove(doc,table)}
     }
     if len(now.info)>0 || len(before.info)>0 {document_put_row(doc,types,TABLE_SCENE,&info) or_return}
-    if len(now.instances)>0 {document_put(doc,types,TABLE_INSTANCES,now.instances[:],{},.LZ4) or_return}
-    if len(now.members)>0 {document_put(doc,types,TABLE_MEMBERS,now.members[:],{},.LZ4) or_return}
-    if len(now.overrides)>0 {document_put(doc,types,TABLE_OVERRIDES,now.overrides[:],{},.LZ4) or_return}
-    if len(now.off)>0 {document_put(doc,types,TABLE_OFF,now.off[:],{},.LZ4) or_return}
+    if len(now.instances)>0 {document_put(doc,types,TABLE_INSTANCES,now.instances[:],{},.LZ) or_return}
+    if len(now.members)>0 {document_put(doc,types,TABLE_MEMBERS,now.members[:],{},.LZ) or_return}
+    if len(now.overrides)>0 {document_put(doc,types,TABLE_OVERRIDES,now.overrides[:],{},.LZ) or_return}
+    if len(now.off)>0 {document_put(doc,types,TABLE_OFF,now.off[:],{},.LZ) or_return}
     return .None
 }

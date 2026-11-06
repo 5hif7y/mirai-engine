@@ -6,9 +6,17 @@ import "core:strings"
 import "core:testing"
 import "mirai:rhi"
 
+// The stages the executable embeds, with their code decoded into the temporary allocator.
+@(private="file")
+embedded :: proc(t:^testing.T) -> (codes:[Shader_Id]rhi.Shader_Code,programs:[len(PROGRAM_SHADERS)]rhi.Shader_Code) {
+    _,problem:=embedded_shaders_decode(&codes,&programs,context.temp_allocator)
+    testing.expect_value(t,problem,"")
+    return
+}
+
 @(test)
 shader_assets_match_uses_contents_instead_of_generation_storage :: proc(t:^testing.T) {
-    codes:=SHADERS
+    codes,_:=embedded(t)
     next:=codes[.Ui_Vert]
     next.name=strings.clone(next.name);defer delete(next.name)
     next.bindings=make([]rhi.Binding_Info,len(next.bindings));defer delete(next.bindings)
@@ -20,7 +28,7 @@ shader_assets_match_uses_contents_instead_of_generation_storage :: proc(t:^testi
         next.spirv=make([]u8,len(next.spirv));defer delete(next.spirv)
         copy(next.spirv,codes[.Ui_Vert].spirv)
     }
-    assets:=Shader_Assets{codes=SHADERS,owned=true}
+    assets:=Shader_Assets{codes=codes,owned=true}
     assets.codes[.Ui_Vert]=next
     testing.expect(t,shader_assets_match_codes(&assets,&codes),"A freshly loaded generation with identical target code and reflection keeps the pipelines")
     testing.expect(t,codes[.Ui_Vert].name==SHADERS[.Ui_Vert].name && codes[.Ui_Vert].bindings[0]==SHADERS[.Ui_Vert].bindings[0],"Comparison preserves the active code storage")
@@ -28,8 +36,8 @@ shader_assets_match_uses_contents_instead_of_generation_storage :: proc(t:^testi
 
 @(test)
 shader_assets_match_rejects_code_and_pipeline_contract_changes :: proc(t:^testing.T) {
-    codes:=SHADERS
-    assets:=Shader_Assets{codes=SHADERS}
+    codes,_:=embedded(t)
+    assets:=Shader_Assets{codes=codes}
     original:=codes[.Ui_Vert]
     next:=&assets.codes[.Ui_Vert]
     testing.expect(t,len(original.bindings)>0)
@@ -74,6 +82,8 @@ shader_assets_match_rejects_code_and_pipeline_contract_changes :: proc(t:^testin
 @(private)
 GENERATION :: #directory+"/../shaders/build"
 
+// Every stage and program stage the executable embeds decodes to the code the
+// generation wrote, with the same reflection.
 @(test)
 shader_generation_of_the_engine_is_the_one_embedded :: proc(t:^testing.T) {
     testing.expect(t,shader_generation_current(GENERATION),"shaders/build was generated from the sources this build embeds: run `mirai shaders`")
@@ -82,8 +92,8 @@ shader_generation_of_the_engine_is_the_one_embedded :: proc(t:^testing.T) {
     if problem!="" {return}
     defer shader_assets_destroy(&assets)
     testing.expect(t,assets.owned)
-    for code,id in assets.codes {
-        embedded:=SHADERS[id]
+    codes,programs:=embedded(t)
+    same :: proc(t:^testing.T,code,embedded:rhi.Shader_Code) {
         testing.expect_value(t,code.name,embedded.name)
         testing.expect_value(t,code.stage,embedded.stage)
         testing.expect_value(t,code.threadgroup,embedded.threadgroup)
@@ -92,10 +102,15 @@ shader_generation_of_the_engine_is_the_one_embedded :: proc(t:^testing.T) {
             if i<len(code.bindings) {testing.expectf(t,code.bindings[i]==binding,"%s binding %d: %v, embedded %v",code.name,i,code.bindings[i],binding)}
         }
         when ODIN_OS==.Darwin {
-            testing.expectf(t,code.msl==embedded.msl && code.msl_entry==embedded.msl_entry,"%s: the Metal source on disk is the embedded one",code.name)
+            testing.expectf(t,len(code.msl)>0 && code.msl==embedded.msl && code.msl_entry==embedded.msl_entry,"%s: the Metal source on disk is the embedded one",code.name)
         } else {
-            testing.expectf(t,string(code.spirv)==string(embedded.spirv),"%s: the SPIR-V on disk is the embedded one",code.name)
+            testing.expectf(t,len(code.spirv)>0 && string(code.spirv)==string(embedded.spirv),"%s: the SPIR-V on disk is the embedded one",code.name)
         }
+    }
+    for code,id in assets.codes {same(t,code,codes[id])}
+    testing.expect_value(t,len(assets.programs),len(programs))
+    for code,i in assets.programs {
+        if i<len(programs) {same(t,code,programs[i])}
     }
 }
 

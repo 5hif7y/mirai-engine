@@ -230,6 +230,10 @@ texture cache of the project; a failure is `Cook_Failed` with `Result.cook.error
   another key, `Manifest_Invalid`; in both cases nothing is cooked.
 - **Plugins.** The folder of each plugin is mounted under `plugins/<name>` and everything in it is
   a root (its code uses it).
+- **Parallel.** Files are cooked on a job system (`Cook_Desc.worker`, else one of the cook with a
+  thread per core), the largest first; what is written and the report are those of a cook on one
+  thread, and an error is the first by path. Prefab resolution and texture cache writes take a lock.
+  A `--dev` game is cooked with `asset.Pack.Quick` (`Cook_Desc.quick`), a release one with `Ship`.
 - **Scope.** The roots and, transitively, the dependencies each asset declares; the rest goes to
   `dropped`. A dependency that is not any file goes to `missing` and does not stop the cooking.
 - **Textures.** With `"textures": "blocks"` (default), an RGBA8 texture is written in blocks
@@ -237,11 +241,23 @@ texture cache of the project; a failure is `Cook_Failed` with `Result.cook.error
   which is copied; `"keep"` copies them all. The blocks stay in the texture cache by the
   `content_hash` of the `.tex`
   ([texture cache](../../mirai-imports/references/imports.md#texture-cache)).
+- **Fast textures.** A texture the editor imported Fast ships Final, whatever `"textures"` says:
+  the cook imports its source again (by `Import_Info.source`, relative to `Cook_Desc.root`, with
+  the settings of its `.import`) into a temporary folder and writes the texture of the same image
+  with the id it has. The import runs in the engine's import program (`Cook_Desc.import_program`,
+  what `mirai import` runs), since the tool builds without the importers; `import_source` lets a
+  caller that has them import in-process. The import fills the texture cache, so the editor takes that Final from
+  then on. A source that is missing, no longer has the image or builds another texture fails the
+  cook with `Source_Failed` and says how to fix it.
+- **Animations.** An `.anim` is written cooked: its clips sampled as the runtime plays them
+  (`asset.animation_compress`, [storage](../../mirai-std/references/anim-storage.md)).
 - **Prefab instances.** A scene or a prefab with a stale instance is written with its instances up
   to date, by an `asset.Prefab_Resolver` of the project prefabs
   ([instances](../../mirai-assets/references/scenes.md#resolution-against-the-current-prefab)); the
   shipped game loads them without checking them. If it cannot, `Resolve_Failed` with the file.
-- Every other file is copied byte by byte.
+- Every other asset is written again compressed for shipping (`asset.document_repack` with
+  `Ship`, [compression](../../mirai-assets/references/formats.md#compression)), and so are the
+  textures it writes in blocks; a file that is not an asset is copied byte by byte.
 - **Index.** The folder receives `.index` (`asset.REGISTRY_INDEX`), what a scan would find; with
   it `host.assets_init` does not look at the files
   ([registry](../../mirai-assets/references/formats.md#registry)).
@@ -265,8 +281,7 @@ them with `cook/shaders`.
 
 ## Known limits
 
-- Cooking does not group assets in a file or compress their buffers: they are loose files with an
-  index.
+- Cooking does not group assets in a file: they are loose files with an index.
 - What code refers to and is not in `cook.mirai` is not shipped: cooking does not read code.
 - The first shader generation of a project and each edit of the code of a Surface program compile
   all the stages that evaluate materials for the system's backend, because each one contains the

@@ -543,7 +543,7 @@ same_layers :: proc(a,b:^End) -> bool {
     if sa==nil || sb==nil || sa.layer_count!=sb.layer_count || sa.layers!=sb.layers {return false}
     _,_,counts,ok:=terrain.terrain_grid_pages(core.ref(&a.data),SOURCE,.Weights,{},{-1,-1,-1})
     if !ok {return sa.layer_count==0}
-    ra,rb:=make([]u8,terrain.PAGE_VALUES*4,context.temp_allocator),make([]u8,terrain.PAGE_VALUES*4,context.temp_allocator)
+    ra,rb:=make([]u8,terrain.PAGE_BYTES_MAX,context.temp_allocator),make([]u8,terrain.PAGE_BYTES_MAX,context.temp_allocator)
     for i in 0..<counts.x*counts.y*counts.z {
         size_a,fill_a,read_a:=terrain.terrain_page_bytes(core.ref(&a.data),SOURCE,.Weights,i,ra)
         size_b,fill_b,read_b:=terrain.terrain_page_bytes(core.ref(&b.data),SOURCE,.Weights,i,rb)
@@ -688,7 +688,7 @@ traffic_of_a_long_stroke :: proc(t:^testing.T) {
         for _ in 0..<120 {round(&f,&s,&c)}
         same,differ:=same_ground(&c,&s)
         testing.expectf(t,same,"the client holds the ground of the server after the stroke: %d samples differ",differ)
-        log.infof("stroke of %d touches, the client %s: %d edits sent of %d bytes each; %d parts (%d LZ4 bytes) after the base; %d resyncs; %d desyncs",
+        log.infof("stroke of %d touches, the client %s: %d edits sent of %d bytes each; %d parts (%d LZ bytes) after the base; %d resyncs; %d desyncs",
             STROKE,differs?"otherwise":"the same",s.net.stats.sent,size_of(Net_Terrain_Edit),s.net.stats.pages_sent-base_sent,s.net.stats.bytes_sent-base_bytes,c.net.stats.resyncs,c.net.stats.desyncs)
         end_destroy(&s);end_destroy(&c)
     }

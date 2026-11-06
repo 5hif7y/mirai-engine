@@ -342,7 +342,7 @@ Editor and skinning:
 - Offline, `animation_editor.retarget_bake` writes an `.anim` for the destination skeleton from
   validated views and a `Pose_Profile`, by bones or semantic chains
   ([bake](animation-rigs.md#bake)). The `.anim` stays editable; the [resident
-  storage](../../mirai-std/references/anim-storage.md) prepares reduced keys at load.
+  storage](../../mirai-std/references/anim-storage.md) compresses it at load.
 - Live, `Animation.source` and `Animation.retarget` name the source rig and its `.pose` profile. The
   correspondences are prepared when the bind, source or profile changes, and the sampled pose of the
   source is read before its constraints.

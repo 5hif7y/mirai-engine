@@ -9,8 +9,9 @@ description: Mirai binary assets (.scene, .prefab, .mat, .mesh, .tex, .anim, .so
 
 # Mirai assets
 
-The packages are `std/serial` (streams, LZ4, schemas, migration, paths, JSON) and `asset`
-(container, typed tables, asset types, scene/prefab, registry).
+The packages are `std/serial` (streams, schemas, migration, paths, JSON), the codecs (`std/compressor`
+and its packages, `cook/compressor/bc7split`) and `asset` (container, compression, typed tables, asset
+types, scene/prefab, registry).
 
 ## Map
 
@@ -18,7 +19,9 @@ The packages are `std/serial` (streams, LZ4, schemas, migration, paths, JSON) an
   [merge](references/cli.md#merge).
 - Container, tables, `Asset`/`Document`, types, versions, registry and asset JSON:
   [formats.md](references/formats.md).
-- Streams, LZ4, schemas, migration, paths, text: [serial.md](references/serial.md).
+- LZ, packs and decoders: [compression](references/formats.md#compression); what each codec
+  package does: [codec packages](references/formats.md#codec-packages).
+- Streams, schemas, migration, paths, text: [serial.md](references/serial.md).
 - Mesh, skeleton, texture, material, fracture, animation, sound, sound set, `.ui`, font, texts,
   prompts and game data tables (`.records`): [kinds.md](references/kinds.md). A plugin's types are
   its own: `.particle` ([vfx](../mirai-plugins/references/vfx.md#format)), `.terrain`, `.foliage`.
@@ -72,7 +75,18 @@ The packages are `std/serial` (streams, LZ4, schemas, migration, paths, JSON) an
 - **Nothing in the file is trusted without validating.** `blob_open`, `schema_read` and
   `asset_open` validate header, directory, schema and tables; each `*_view` validates ranges of its
   type. Code that indexes with file data validates first or uses checked accesses. The decoders
-  (`lz4_decompress`, `schema_read`, `text_read`) allocate no more than the input backs.
+  (`unpack`, `bc7split.decode`, `schema_read`, `text_read`) allocate no more than the input backs.
+- **LZ is the only codec** (the user's choice), for every class of data: load-once chunks,
+  streamed mesh pages and texture levels (BC7 after BC7Split). Its decode with the loader's jobs
+  keeps up with an NVMe; the levels of `Edit` and `Ship` are `PACK_LEVELS`, and a stream of
+  another codec is `Unsupported`.
+- **Decoders are preallocated.** `compressor.Decoder` and `bc7split.Decoder` hold all the scratch,
+  allocated once by whoever reads; `decompress` and `bc7split.decode` never allocate, and for any
+  input never read outside `src` nor write outside `dst`.
+- **The decoder side stays light.** `std/compressor` and `std/compressor/bc7split` import no encoder; the
+  encoders import the decoder's format. A rule both sides share (a header, a constant, the
+  prediction of packed code lengths) is written once, in `std/compressor/format.odin`.
+- **The encoders are deterministic**: the same input, codec and level give the same bytes.
 - `asset.Types` is the context with the schema of the program's types: it is created once and
   passed to reads and writes.
 - **Atomic writing.** `document_save` and `scene_save` write a temporary and rename;
@@ -91,9 +105,10 @@ The packages are `std/serial` (streams, LZ4, schemas, migration, paths, JSON) an
     `stale_prefab_instances_resolve_against_the_files_of_their_prefabs` (`asset/scene_test.odin`),
     `mirai test engine/scene` (on loading) and
     `a_cook_brings_the_prefab_instances_of_what_it_ships_up_to_date` (`cook/build`, on cooking);
-  - textures: `texture_round_trips_every_format_and_checks_level_sizes` and
-    `texture_layers_keep_each_image_of_every_level` (`kinds_test.odin`), and the blocks in
-    `texture_blocks_test.odin`;
+  - textures: `texture_round_trips_every_format_and_checks_level_sizes`,
+    `texture_layers_keep_each_image_of_every_level` and
+    `a_read_of_the_small_levels_decodes_only_the_start_of_the_texels` (`kinds_test.odin`), and
+    the blocks and planes of fields in `texture_blocks_test.odin`;
   - animation, skeleton, skin and fracture: `content_test.odin`, `kinds_test.odin`,
     `skeleton_test.odin` and `fracture_test.odin` of `asset`; font, texts and prompts:
     `asset/interface_kinds_test.odin`; game data tables: `asset/records_test.odin`;
@@ -115,6 +130,11 @@ The packages are `std/serial` (streams, LZ4, schemas, migration, paths, JSON) an
   `hostile_schema_binary` and `hostile_random_schemas_validate` with `--release` and
   `-define:SERIAL_HOSTILE_ROUNDS=20000`.
 - `.pose`, `.blend` and `.agraph` are verified in their [plugin](../mirai-plugins/SKILL.md).
-- Benchmarks (not routine):
-  `mirai test std/serial lz4_benchmark --release -define:SERIAL_BENCH=true` and
+- Compression: `mirai test std/compressor/lz` (every level decodes through `std/compressor`),
+  `blob_round_trips_chunks_with_alignment_and_compression` and the pages in
+  `asset/mesh_page_code_test.odin`. Codec packages: `mirai test` of `std/compressor` (library streams,
+  hostile streams, `decompress_does_not_allocate`), of each package under `std/compressor/lz` (hostile
+  inputs, determinism), of `std/compressor/bc7split` and of `cook/compressor/bc7split`
+  (`encode_matches_the_library`).
+- Benchmark (not routine):
   `mirai test asset scene_file_against_a_file_per_entity --release -define:ASSET_BENCH=true`.

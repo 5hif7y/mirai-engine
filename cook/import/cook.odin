@@ -92,7 +92,7 @@ model_settings :: proc(model:^Imported_Model,options:Import_Options) -> Import_S
 
 // The options a texture of an image is built with.
 image_build_options :: proc(image:Imported_Image,settings:Import_Settings) -> textures.Build_Options {
-    return {max_size=settings.max_texture_size,srgb=image.srgb,normal_map=image.normal_map,green_down=image.green_down,alpha_coverage=image.alpha_cutoff,keep_precision=image.keep_precision,encoding=settings.textures}
+    return {max_size=settings.max_texture_size,srgb=image.srgb,normal_map=image.normal_map,green_down=image.green_down,alpha_coverage=image.alpha_cutoff,keep_precision=image.keep_precision,encoding=settings.textures,rdo_lambda=settings.rdo_lambda}
 }
 
 // What a mesh is made from: its geometry as read, the settings of its levels
@@ -171,6 +171,7 @@ mesh_cook :: proc(mesh:^Imported_Mesh,settings:Import_Settings,options:Import_Op
 // bytes that were decoded already, which an image of more than 8 bits does
 // not build from.
 texture_cook :: proc(bytes:[]u8,made:textures.Source,decoded:textures.Image,build:textures.Build_Options,options:Import_Options,cooked:^Cooked_Texture,parent:mem.Allocator) {
+    build:=build
     mem.dynamic_arena_init(&cooked.arena,parent,parent,block_size=1<<20,out_band_size=1<<20)
     allocator:=base.dynamic_arena_allocator(&cooked.arena)
     cooked.settings=textures.settings_hash(build)
@@ -187,6 +188,16 @@ texture_cook :: proc(bytes:[]u8,made:textures.Source,decoded:textures.Image,buil
             if built,cached:=textures.cache_read(folder,key,&types,allocator);cached {cooked.built=built;return}
         }
     }
+    if options.fast_textures {
+        build.speed=.Fast
+        cooked.settings=textures.settings_hash(build)
+        if folder!="" {
+            key=textures.cache_key_build(bytes,made,build)
+            if !options.rebuild {
+                if built,cached:=textures.cache_read(folder,key,&types,allocator);cached {cooked.built=built;return}
+            }
+        }
+    }
     jobs.worker_zone(options.worker,"texture.build")
     switch {
     case made.width>0:
@@ -197,6 +208,14 @@ texture_cook :: proc(bytes:[]u8,made:textures.Source,decoded:textures.Image,buil
         cooked.built,cooked.error=textures.from_bytes(bytes,build,allocator,options.worker)
     }
     if cooked.error==.None {textures.cache_write(folder,key,&types,&cooked.built)}
+}
+
+// The settings hash of a texture of build built Fast.
+@(private)
+fast_settings :: proc(build:textures.Build_Options) -> u64 {
+    fast:=build
+    fast.speed=.Fast
+    return textures.settings_hash(fast)
 }
 
 // The bytes a texture of an image is built from: the image file, the encoded
@@ -233,7 +252,7 @@ model_cook :: proc(model:^Imported_Model,options:Import_Options,known:^Known) {
     }
     for &image,i in model.images {
         build:=image_build_options(image,settings)
-        if image.cooked!=nil && image.cooked.settings==textures.settings_hash(build) {continue}
+        if image.cooked!=nil && (image.cooked.settings==textures.settings_hash(build) || options.fast_textures && image.cooked.settings==fast_settings(build)) {continue}
         // An image file that cannot be read is the writer's to tell.
         bytes,_,ok:=image_bytes(image)
         if !ok || !options.rebuild && ([3]u64{u64(len(bytes)),base.hash64(bytes),textures.settings_hash(build)} in known.textures) {continue}

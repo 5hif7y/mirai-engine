@@ -13,11 +13,13 @@ Marker :: struct {
 // One property of one target over time. `target` is the name_hash of whatever
 // the caller drives (a node, a bone, a material); `slot` tells apart several
 // Float or Vector tracks of one target.
+// A track is its keys or, when sampled.track.count>0, its samples.
 Track_Desc :: struct {
     target:u64,
     property:Property,
     slot:u8,
     keys:[]Keyframe,
+    sampled:Sampled_Desc,
 }
 Clip_Desc :: struct {
     name:u64,
@@ -28,8 +30,7 @@ Clip_Desc :: struct {
 
 Track :: struct {
     target:u64,
-    first,count:u32, // keys of the library
-    bounds:u32,
+    first,count:u32, // keys of the library; for a sampled track, its row of Library.sampled and 1
     property:Property,
     slot:u8,
     encoding:Key_Encoding,
@@ -49,36 +50,44 @@ Clip :: distinct u32
 // are fixed at init; clip_add refuses what does not fit and says why.
 Library :: struct {
     keys:[]Keyframe,
-    packed_keys:[]Packed_Key,
-    packed_bounds:[]Packed_Bounds,
+    sampled:[]Sampled_Track,
+    segments:[]u32,
+    samples:[]u8, // segments of the sampled tracks, with SAMPLED_PADDING bytes after the last
     tracks:[]Track,
     clips:[]Clip_Data,
     markers:[]Marker,
     key_count,track_count,clip_count,marker_count:int,
+    sampled_count,segment_count,sample_count:int,
     prepared:bool,
     allocator:runtime.Allocator,
 }
 Library_Desc :: struct {
     max_keys,max_tracks,max_clips,max_markers:int,
+    max_sampled,max_segments,max_samples:int, // sampled tracks added by clip_add, their segments and bytes
     allocator:runtime.Allocator, // context.allocator when unset
 }
 
 library_init :: proc(lib:^Library,desc:Library_Desc) -> bool {
     allocator:=desc.allocator if desc.allocator.procedure!=nil else context.allocator
     lib^={allocator=allocator}
-    if desc.max_keys<=0 || desc.max_tracks<=0 || desc.max_clips<=0 || desc.max_markers<0 {return false}
-    e1,e2,e3,e4:runtime.Allocator_Error
+    if desc.max_keys<=0 || desc.max_tracks<=0 || desc.max_clips<=0 || desc.max_markers<0 || desc.max_sampled<0 || desc.max_segments<0 || desc.max_samples<0 {return false}
+    e1,e2,e3,e4,e5,e6,e7:runtime.Allocator_Error
     lib.keys,e1=make([]Keyframe,desc.max_keys,allocator)
     lib.tracks,e2=make([]Track,desc.max_tracks,allocator)
     lib.clips,e3=make([]Clip_Data,desc.max_clips,allocator)
     lib.markers,e4=make([]Marker,desc.max_markers,allocator)
-    if e1!=nil || e2!=nil || e3!=nil || e4!=nil {library_destroy(lib);return false}
+    if desc.max_sampled>0 {
+        lib.sampled,e5=make([]Sampled_Track,desc.max_sampled,allocator)
+        lib.segments,e6=make([]u32,desc.max_segments,allocator)
+        lib.samples,e7=make([]u8,desc.max_samples+SAMPLED_PADDING,allocator)
+    }
+    if e1!=nil || e2!=nil || e3!=nil || e4!=nil || e5!=nil || e6!=nil || e7!=nil {library_destroy(lib);return false}
     return true
 }
 library_destroy :: proc(lib:^Library) {
     if lib.allocator.procedure==nil {lib^={};return}
     delete(lib.keys,lib.allocator);delete(lib.tracks,lib.allocator);delete(lib.clips,lib.allocator);delete(lib.markers,lib.allocator)
-    delete(lib.packed_keys,lib.allocator);delete(lib.packed_bounds,lib.allocator)
+    delete(lib.sampled,lib.allocator);delete(lib.segments,lib.allocator);delete(lib.samples,lib.allocator)
     lib^={}
 }
 
@@ -87,7 +96,8 @@ Clip_Error :: enum u8 {
     None,
     Prepared, // the library was prepared: it takes no more clips
     Unsorted, // the keys of a track are not sorted by time
-    Full,     // the clip passes max_clips, max_tracks, max_keys or max_markers of the library
+    Full,     // the clip passes max_clips, max_tracks, max_keys, max_markers or the sampled capacities of the library
+    Invalid,  // a sampled track whose header or bytes are not consistent
 }
 
 // Adds a clip, copying its keys and markers; markers are stored sorted by
@@ -95,18 +105,37 @@ Clip_Error :: enum u8 {
 // why when it is refused.
 clip_add :: proc(lib:^Library,desc:Clip_Desc) -> (Clip,Clip_Error) {
     if lib.prepared {return 0,.Prepared}
-    keys:=0
+    keys,sampled,segments,samples:=0,0,0,0
     for track in desc.tracks {
         keys+=len(track.keys)
         for i in 1..<len(track.keys) {
             if track.keys[i].time<track.keys[i-1].time {return 0,.Unsorted}
         }
+        if track.sampled.track.count==0 {continue}
+        s:=track.sampled.track;s.data=0
+        if len(track.keys)>0 {return 0,.Invalid}
+        bytes,count,ok:=sampled_walk(s,track.property,track.sampled.data,padding=0)
+        if !ok || bytes!=len(track.sampled.data) {return 0,.Invalid}
+        sampled+=1;segments+=count;samples+=bytes
     }
-    if lib.clip_count>=len(lib.clips) || lib.track_count+len(desc.tracks)>len(lib.tracks) || lib.key_count+keys>len(lib.keys) || lib.marker_count+len(desc.markers)>len(lib.markers) {
+    if lib.clip_count>=len(lib.clips) || lib.track_count+len(desc.tracks)>len(lib.tracks) || lib.key_count+keys>len(lib.keys) || lib.marker_count+len(desc.markers)>len(lib.markers) || sampled>0 && (lib.sampled_count+sampled>len(lib.sampled) || lib.segment_count+segments>len(lib.segments) || lib.sample_count+samples>len(lib.samples)-SAMPLED_PADDING) {
         return 0,.Full
     }
     data:=Clip_Data{name=desc.name,loop=desc.loop,first_track=u32(lib.track_count),track_count=u32(len(desc.tracks)),first_marker=u32(lib.marker_count),marker_count=u32(len(desc.markers))}
     for track in desc.tracks {
+        if track.sampled.track.count>0 {
+            s:=track.sampled.track
+            s.data,s.first_segment=u32(lib.sample_count),u32(lib.segment_count)
+            copy(lib.samples[lib.sample_count:],track.sampled.data)
+            _,count,_:=sampled_walk(s,track.property,lib.samples,lib.segments[lib.segment_count:])
+            // By copy: assigning `s` makes Odin warn at callers that clip_add may keep their stack memory.
+            header:=[1]Sampled_Track{s}
+            copy(lib.sampled[lib.sampled_count:],header[:])
+            lib.tracks[lib.track_count]={target=track.target,property=track.property,slot=track.slot,encoding=.Sampled,first=u32(lib.sampled_count),count=1}
+            lib.sampled_count+=1;lib.segment_count+=count;lib.sample_count+=len(track.sampled.data);lib.track_count+=1
+            data.duration=max(data.duration,s.duration)
+            continue
+        }
         lib.tracks[lib.track_count]={target=track.target,property=track.property,slot=track.slot,first=u32(lib.key_count),count=u32(len(track.keys))}
         lib.track_count+=1
         copy(lib.keys[lib.key_count:],track.keys)
@@ -154,9 +183,7 @@ track_keys :: #force_inline proc "contextless" (lib:^Library,track:Track) -> []K
 // The value of one track of a clip at a time inside the clip.
 clip_evaluate :: #force_inline proc "contextless" (lib:^Library,track:Track,time:f32) -> math.Vec4 {
     if track.encoding==.Raw {return track_evaluate(track_keys(lib,track),track.property,time)}
-    source,valid:=track_source(lib,track)
-    if !valid {return {}}
-    return track_source_evaluate(source,track.property,time)
+    return sampled_evaluate(lib,track,time)
 }
 
 clip_curve :: proc "contextless" (lib:^Library,player:Player,target:u64,slot:u8,default_value:f32=0) -> f32 {

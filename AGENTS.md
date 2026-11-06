@@ -162,11 +162,20 @@ Verify in steps and stop at the first one that is enough for what changed:
 
 **Render check.** A global change of the image or its cost (GI, light, shadows, TAA, exposure,
 tonemap, demo materials, a pass that runs in every scene) is accepted only with
-`mirai render check demo`, once at the end, with no regressions against `main`: the full one if
-it can move the cost (a pass, a resource, a shader that does more or less work), `--quality` if
-it changes only the image (a constant, a value of a scene, an asset of the same size); while
-working, `--views` and `--quality`
+`mirai render check demo`, once at the end, with no regressions against `main`
 ([render check](.agents/skills/mirai-rendering/references/verification.md#render-check)).
+Which one depends on what the GPU receives and does:
+
+- **Nothing the GPU receives changes**: how assets are stored, compressed or loaded when they
+  decode to the same data, tools, editor UI. No render check; the captures of step 4 if the image
+  could differ.
+- **Only the image changes**: a constant, a value of a scene, an asset of the same size and
+  format, an encoding setting such as the RDO lambda. `--quality`, which measures no cost.
+- **The work can change**: a pass, a resource, a shader that does more or less work, a texture
+  format or resolution. The full one, which measures cost: only on a machine with no other load.
+  With a game or another GPU job running its times are not valid, so it waits for the machine.
+
+While working, `--views` and `--quality`.
 
 The table is a guide: the agent decides how far to go according to the size of the change, and its
 report says what ran and what it left for integration. Full suites, reference captures of all

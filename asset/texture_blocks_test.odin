@@ -1,5 +1,6 @@
 package asset
 
+import "core:mem"
 import "core:testing"
 
 @(test)
@@ -16,6 +17,9 @@ block_formats_decode_to_the_texels_a_gpu_shows :: proc(t:^testing.T) {
     colors,alpha=texture_bc1_block_decode(block)
     testing.expect(t,colors[2]==[3]f32{0.5,0,0.5} && colors[3]==[3]f32{0,0,0})
     testing.expect(t,alpha[0]==1 && alpha[1]==1 && alpha[2]==1 && alpha[3]==0 && alpha[4]==1)
+    // The color block of BC3 reads the same endpoints in four color mode, all opaque.
+    colors,alpha=texture_bc1_block_decode(block,four_color=true)
+    testing.expect(t,abs(colors[2].b-2.0/3)<1e-6 && abs(colors[3].b-1.0/3)<1e-6 && alpha[3]==1)
 
     // Eight values between a high and a low endpoint, and the six value mode with its 0 and 1.
     values:=texture_bc4_block_decode({200,60,0b10_001_000,0b1_100_011_0,0b111_110_10,0,0,0})
@@ -63,7 +67,7 @@ a_level_of_any_format_becomes_rgba8 :: proc(t:^testing.T) {
 // that run from the first endpoint to the second through 16 weights.
 @(private="file")
 bc6h_block :: proc(first,second:[3]u32,indices:[16]u32) -> (block:[16]u8) {
-    bits:u128=TEXTURE_BC6H_MODE_11
+    bits:u128=0b00011
     for c in 0..<3 {
         bits|=u128(first[c])<<(5+u32(c)*10)
         bits|=u128(second[c])<<(35+u32(c)*10)
@@ -93,7 +97,7 @@ bc6h_blocks_decode_to_the_half_floats_a_gpu_shows :: proc(t:^testing.T) {
     one:=f32(transmute(f16)texture_bc6h_block_decode(bc6h_block({495,495,495},{495,495,495},{}))[0][0])
     testing.expect_value(t,one,f32(1))
     other:=bc6h_block({1023,1023,1023},{1023,1023,1023},{})
-    other[0]=0b00111
+    other[0]=0b10011 // a reserved mode
     testing.expect_value(t,texture_bc6h_block_decode(other)[0],[3]u16{0,0,0})
 
     halves:[4*4*8]u8
@@ -104,5 +108,34 @@ bc6h_blocks_decode_to_the_half_floats_a_gpu_shows :: proc(t:^testing.T) {
     testing.expect(t,texture_level_linear(.BC6H,{},bright[:],4,4,linear[:]) && linear[5]=={65504,65504,65504,1},"HDR is not clipped")
     wide:=[8]u8{0xff,0xff,0,0,0x00,0x80,0xff,0xff}
     testing.expect(t,texture_level_linear(.RGBA16,{.Srgb},wide[:],1,1,linear[:1]) && linear[0].r==1 && linear[0].g==0 && abs(linear[0].b-32768.0/65535)<1e-6,"16 bits are linear")
+    free_all(context.temp_allocator)
+}
+
+@(test)
+fields_split_and_join_give_back_the_same_blocks :: proc(t:^testing.T) {
+    state:=u64(11)
+    for format in Texture_Format {
+        // 5x3 blocks in each of three layers.
+        blocks:=make([]u8,texture_level_size(format,20,12)*3,context.temp_allocator)
+        for &b in blocks {b=u8(test_random(&state))}
+        planes:=make([]u8,len(blocks),context.temp_allocator)
+        joined:=make([]u8,len(blocks),context.temp_allocator)
+        if !texture_fields_format(format) {
+            testing.expectf(t,!texture_fields_split(format,blocks,planes) && !texture_fields_join(format,blocks,joined),"%v has no planes of fields",format)
+            continue
+        }
+        testing.expect(t,texture_fields_split(format,blocks,planes))
+        testing.expectf(t,texture_fields_join(format,planes,joined) && mem.compare(joined,blocks)==0,"%v joins back to its blocks",format)
+        stride:=8 if format==.BC1 else 16
+        testing.expect(t,!texture_fields_split(format,blocks[:len(blocks)-stride/2],planes[:len(blocks)-stride/2]),"a part of a block")
+        testing.expect(t,!texture_fields_join(format,planes,joined[:len(joined)-stride]),"planes and blocks of other sizes")
+    }
+    // The endpoints of a BC5 block go first, those of both channels, then the indices of both.
+    blocks:=make([]u8,2*16,context.temp_allocator)
+    for &b,i in blocks {b=u8(i)}
+    planes:=make([]u8,len(blocks),context.temp_allocator)
+    texture_fields_split(.BC5,blocks,planes)
+    testing.expect_value(t,[6]u8{planes[0],planes[1],planes[2],planes[3],planes[4],planes[5]},[6]u8{0,1,16,17,8,9})
+    testing.expect_value(t,[3]u8{planes[8],planes[13],planes[20]},[3]u8{2,7,10})
     free_all(context.temp_allocator)
 }

@@ -96,9 +96,9 @@ the assets.
   single thread, in the usual order. Importing with or without the job system gives the same
   files.
 - **Without an optimizer, close and with the same bytes.** The hot loops (BLAKE3 of the payloads,
-  BC7 error and fit, the quadrics of simplification) do four values per instruction with
-  `#simd[4]` and add in the order of the scalar loop: the tool and the `--dev` engine
-  (`-o:minimal`) write the same as `--release`.
+  the quadrics of simplification) do four values per instruction with `#simd[4]` and add in the
+  order of the scalar loop: the tool and the `--dev` engine (`-o:minimal`) write the same as
+  `--release`.
 - **Importing is a transaction.** `import_model` leaves nothing if it fails (own arena, freed by
   `model_destroy`); `import_write` removes the files it created if it fails midway. Errors name
   the file, the line or the prim.
@@ -132,9 +132,14 @@ the assets.
 - **Simple collision: the source's wins.** The colliders the source brings are the mesh's
   collision; the `collision` setting builds them from the geometry only if the source brings
   none, or with `force_collision` (`--force-collision`).
-- **One algorithm, once.** Mips, color rules and block compression in `cook/textures`; PBR
-  conversions in `cook/import/pbr.odin`; triangulation, simplification, hulls and convex
-  decomposition in `std/geom`; transforms with `std/math`.
+- **Textures in blocks are encoded with a perceptual metric and RDO** at
+  `RDO_LAMBDA_DEFAULT` unless the setting `rdo_lambda` says otherwise.
+- **The editor never waits for the final encode** (`textures.Encode_Speed`): its imports take the
+  Final of the texture cache, else build Fast (no RDO, low effort, `Texture_Flag.Fast`), and the
+  cook encodes a Fast texture again as Final from its source. `mirai import` and tools build Final.
+- **One algorithm, once.** Mips, color rules and block compression in `cook/textures` (the
+  encoder is `cook/compressor/texture`); PBR conversions in `cook/import/pbr.odin`; triangulation,
+  simplification, hulls and convex decomposition in `std/geom`; transforms with `std/math`.
 - USD is composed with the prebuilt `usdcat` when it exists; without it only USDA that needs no
   composition is read.
 
@@ -148,13 +153,14 @@ the assets.
   `an_animal_rig_fits_the_joints_a_person_placed_and_rests_as_its_clips` and
   `meshopt_clips_decode_to_continuous_keys`), `cook/import/usd`, `cook/import/fbx` (each format
   with its fixtures) and `cook/import/sources` (sniffing, writing, cache, settings, fuzz, CLI);
-  `cook/textures` (decoding, mips, BC blocks, inverted green, round trip through `.tex`, cache by
-  content; HDR, 16-bit and layers in `layers_test.odin`). The fixtures of `assets/fixtures/` and
-  the models of `demo/source/models` import (without warnings) and what is written reads back with
-  `asset`.
+  `cook/textures` (decoding, mips, BC blocks and their RDO lambda, inverted green, round trip
+  through `.tex`, cache by content; HDR, every BC6H mode, 16-bit and layers in `layers_test.odin`).
+  The fixtures of `assets/fixtures/` and the models of `demo/source/models` import (without
+  warnings) and what is written reads back with `asset`.
 - Texture cache: `built_textures_are_kept_by_image_and_settings_and_read_back_whole`,
   `an_import_takes_a_texture_that_another_import_built_from_the_texture_cache` and, in
-  `cook/build`, `a_cook_takes_the_blocks_of_a_texture_from_the_cache_of_its_content`. Mesh cache:
+  `cook/build`, `a_cook_takes_the_blocks_of_a_texture_from_the_cache_of_its_content` and
+  `a_cook_encodes_a_fast_texture_again_as_final_from_its_source`. Mesh cache:
   `an_import_takes_a_mesh_that_another_import_built_from_the_mesh_cache`.
 - Parallel: import a map with `mirai import --rebuild` over a copy of an import made without the
   job system (or before the change) and compare the trees with `diff -r`: the same bytes.

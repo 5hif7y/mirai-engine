@@ -193,9 +193,10 @@ skin_rigs_pack_the_influences_and_morph_deltas_of_every_level_in_the_order_the_r
     for vertex,i in ([3]int{0,3,4}) {
         range:=rig.morph.ranges[vertex]
         testing.expect_value(t,range.count,u32(1))
-        testing.expect_value(t,rig.morph.deltas[range.first].position.y,expected[i])
+        testing.expect(t,abs(asset.morph_position(rig.morph.deltas[range.first].position,rig.morph.step).y-expected[i])<=rig.morph.step/2)
     }
-    testing.expect_value(t,rig.morph.deltas[rig.morph.ranges[0].first].tangent,[3]f32{0,0,.5})
+    tangent:=asset.morph_tangent(rig.morph.deltas[rig.morph.ranges[0].first].tangent)
+    testing.expect(t,abs(tangent.z-.5)<=asset.MORPH_TANGENT_STEP/2 && tangent.x==0 && tangent.y==0)
     testing.expect_value(t,rig.morphs[0].weight,f32(.7))
 }
 

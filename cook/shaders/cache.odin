@@ -480,6 +480,8 @@ artifacts_stage :: proc(files:[Backend][]u8,names:[Backend]string,staging:string
 //   stages/<digest>.json, .spv, .metal    a compiled stage: its entry and its code
 //   reflection/<digest>.json              the Parameters of a program
 //   reflection/<digest>.attributes.json   the Attributes of a Vfx program
+//   embedded/<digest>.<edit|ship>.spv.lz, .metal.lz
+//                                         the code render embeds (embedded_pack)
 //
 // Each file is written whole and renamed into place, the entry of a stage
 // last; a reader takes an entry only when every hash it names matches, and
@@ -561,7 +563,7 @@ cache_prune :: proc(shared:string,now:time.Time) {
         end:=strings.index_byte(name,'.')
         return name[:end] if end>=0 else name
     }
-    for folder in ([]string{CACHE_STAGES,CACHE_REFLECTION}) {
+    for folder in ([]string{CACHE_STAGES,CACHE_REFLECTION,CACHE_EMBEDDED}) {
         files,err:=os.read_all_directory_by_path(path_join(shared,folder,allocator=context.temp_allocator),context.temp_allocator)
         if err!=nil {continue}
         newest:=make(map[string]time.Time,context.temp_allocator)

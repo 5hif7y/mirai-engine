@@ -20,7 +20,7 @@ sources_test_content :: proc(t:^testing.T,id:base.Asset_Id,duration,distance,mor
     markers:=[1]lib.Marker{{time=.25,id=0}}
     walk,_:=lib.clip_add(&content.lib,{name=base.name_hash("Walk"),tracks=tracks[:],markers=markers[:]})
     testing.expect(t,walk==1)
-    _,error:=lib.library_optimize(&content.lib);testing.expect_value(t,error,lib.Optimize_Error.None)
+    _,error:=lib.library_compress(&content.lib);testing.expect_value(t,error,lib.Compress_Error.None)
     host.content_animation_loops(&content.lib,1)
     content.names=make([][asset.ANIMATION_NAME_CAPACITY]u8,1);base.text_set(content.names[0][:],"Walk")
     content.roots=make([]asset.Animation_Root,1);base.text_set(content.roots[0].bone[:],"hip");content.roots[0].translation=true
@@ -44,7 +44,7 @@ multiple_animation_sources_keep_duplicate_clip_names_curves_markers_root_and_act
     combined:=&cache.sets[0].content
     alias:=source_clip_name(sources[0].id,sources[1].id,base.name_hash("Walk"))
     testing.expect(t,lib.clip_find(&combined.lib,base.name_hash("Walk"))==1 && lib.clip_find(&combined.lib,alias)==2 && combined.clip_count==2)
-    testing.expect(t,len(combined.lib.packed_keys)>0 && combined.markers[0]==combined.markers[1] && combined.lib.markers[1].id==1)
+    testing.expect(t,combined.lib.sample_count>0 && combined.markers[0]==combined.markers[1] && combined.lib.markers[1].id==1)
     testing.expect(t,combined.generation&SOURCE_GENERATION!=0 && source_clip_label(combined,2)==sources[1].names[0])
     nodes:=[3]Graph_Node{GRAPH_NODE_DEFAULT,GRAPH_NODE_DEFAULT,GRAPH_NODE_DEFAULT}
     for &node,i in nodes {base.text_set(node.name[:],"source" if i==0 else "other" if i==1 else "blend");node.loop=false;node.sync_mode=.Independent}
@@ -102,14 +102,14 @@ joining_sources_without_memory_or_with_invalid_sources_keeps_the_published_libra
     append(&cache.sets,Source_Set{primary=sources[0].id})
     set:=&cache.sets[0]
     testing.expect_value(t,source_join(&cache,set,sources[0].id,sources[:]),Source_Error.None)
-    keys,generation:=raw_data(set.content.lib.packed_keys),set.content.generation
+    keys,generation:=raw_data(set.content.lib.samples),set.content.generation
     cache.allocator=runtime.nil_allocator()
     testing.expect_value(t,source_join(&cache,set,sources[0].id,sources[:]),Source_Error.Out_Of_Memory)
     cache.allocator=context.allocator
-    testing.expect(t,raw_data(set.content.lib.packed_keys)==keys && set.content.generation==generation && set.content.clip_count==2)
+    testing.expect(t,raw_data(set.content.lib.samples)==keys && set.content.generation==generation && set.content.clip_count==2)
     sources[1].id=sources[0].id
     testing.expect_value(t,source_join(&cache,set,sources[0].id,sources[:]),Source_Error.Invalid)
-    testing.expect(t,raw_data(set.content.lib.packed_keys)==keys && set.content.generation==generation)
+    testing.expect(t,raw_data(set.content.lib.samples)==keys && set.content.generation==generation)
 }
 
 @(test)

@@ -438,64 +438,6 @@ hostile_stream_reader :: proc(t:^testing.T) {
     reader_seek(&r,0)
 }
 
-// -------------------------------------------------------------------- lz4
-
-@(private="file")
-hostile_lz4_source :: proc(h:^Hostile,size:int) -> []u8 {
-    data:=make([]u8,size,context.temp_allocator)
-    switch hostile_int(h,4) {
-    case 0: hostile_fill(h,data)
-    case 1: for &b in data {b=u8(hostile_int(h,3))}
-    case 2: pattern:=hostile_bytes(h,1+hostile_int(h,20));for &b,i in data {b=pattern[i%len(pattern)]}
-    case 3: hostile_fill(h,data);for i in 0..<size/2 {data[size-1-i]=data[i%max(size/4,1)]}
-    }
-    return data
-}
-
-@(test)
-hostile_lz4 :: proc(t:^testing.T) {
-    h:=Hostile{6+HOSTILE_SEED}
-    for _ in 0..<HOSTILE_ROUNDS {
-        size:=hostile_int(&h,hostile_int(&h,8)==0?4000:300)
-        source:=hostile_lz4_source(&h,size)
-        small:=make([]u8,hostile_int(&h,lz4_bound(size)+4),context.temp_allocator)
-        _,_=lz4_compress(source,small)
-        full:=make([]u8,lz4_bound(size),context.temp_allocator)
-        packed,ok:=lz4_compress(source,full)
-        testing.expect(t,ok)
-        out:=make([]u8,size+hostile_int(&h,40),context.temp_allocator)
-        restored,restored_ok:=lz4_decompress(full[:packed],out)
-        testing.expect(t,restored_ok && restored==size && string(out[:size])==string(source))
-        step:=max(packed/150,1)
-        for cut:=0;cut<=packed;cut+=step {
-            _,_=lz4_decompress(full[:cut],out[:hostile_int(&h,len(out)+1)])
-        }
-        for _ in 0..<8 {
-            mutated:=hostile_copy(full[:packed])
-            hostile_mutate(&h,mutated)
-            for limit in ([]int{0,1,size-1,size,size+1,len(out)}) {_,_=lz4_decompress(mutated,out[:clamp(limit,0,len(out))])}
-            _,_=lz4_decompress(mutated,nil)
-        }
-        noise:=hostile_bytes(&h,hostile_int(&h,200))
-        _,_=lz4_decompress(noise,out[:hostile_int(&h,len(out)+1)])
-        _,_=lz4_decompress(nil,out)
-        _,_=lz4_decompress(nil,nil)
-        _,_=lz4_compress(nil,nil)
-        _,_=lz4_compress(nil,small)
-        _,_=lz4_compress(source,nil)
-        _=lz4_bound(hostile_wild(&h))
-        free_all(context.temp_allocator)
-    }
-    runs:=make([]u8,1<<18,context.temp_allocator)
-    out:=make([]u8,1<<18,context.temp_allocator)
-    packed:=make([]u8,lz4_bound(len(runs)),context.temp_allocator)
-    size,ok:=lz4_compress(runs,packed)
-    testing.expect(t,ok)
-    restored,restored_ok:=lz4_decompress(packed[:size],out)
-    testing.expect(t,restored_ok && restored==len(runs))
-    _,_=lz4_decompress(packed[:size],out[:len(out)-1])
-}
-
 // ------------------------------------------------------- schema and walkers
 
 @(private="file")

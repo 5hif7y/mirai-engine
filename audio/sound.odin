@@ -5,7 +5,8 @@ import "mirai:std/base"
 
 // Sounds: PCM held by the mixer as interleaved f32, mono or stereo, at the
 // sample rate they were recorded at. A streamed sound keeps its encoded file
-// instead and decodes a little ahead of what plays.
+// instead and decodes a little ahead of what plays. A file is a WAV, an Ogg
+// Vorbis or the lossless coding of lossless.odin.
 
 Sound :: distinct base.Handle
 
@@ -71,7 +72,7 @@ sound_create_pcm16 :: proc(m:^Mixer,samples:[]i16,channels,sample_rate:int) -> (
     for sample,i in samples {converted[i]=f32(sample)*(1.0/32768)}
     return sound_slot_fill(m,index,converted,channels,sample_rate,-1),.None
 }
-// Decodes a whole WAV or Ogg Vorbis file into a new sound.
+// Decodes a whole file into a new sound.
 sound_load :: proc(m:^Mixer,file:[]u8) -> (sound:Sound,error:Error) {
     index:=sound_slot_take(m) or_return
     pcm:=decode(file,m.allocator) or_return
@@ -119,9 +120,10 @@ sound_seconds :: proc(m:^Mixer,sound:Sound) -> f32 {
     return f32(sound_frames(m,sound))/f32(rate) if rate>0 else 0
 }
 
-// WAV or Ogg Vorbis, told apart by the first bytes of the file.
+// WAV, Ogg Vorbis or lossless, told apart by the first bytes of the file.
 decode :: proc(file:[]u8,allocator:runtime.Allocator) -> (pcm:Pcm,error:Error) {
     if len(file)>=12 && string(file[:4])=="RIFF" && string(file[8:12])=="WAVE" {return wav_decode(file,allocator)}
     if len(file)>=4 && string(file[:4])=="OggS" {return vorbis_decode(file,allocator)}
+    if len(file)>=4 && string(file[:4])==LOSSLESS_MAGIC {return lossless_decode(file,allocator)}
     return {},.Invalid_Data
 }

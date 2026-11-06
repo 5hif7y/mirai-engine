@@ -6,10 +6,12 @@ import "core:mem"
 import "mirai:core"
 import input "mirai:engine/input"
 import "mirai:engine/scene"
+import "mirai:asset"
 import "mirai:host"
 import "mirai:std/base"
 import mm "mirai:std/math"
-import "mirai:std/serial"
+import "mirai:std/compressor"
+import "mirai:std/compressor/lz"
 import multiplayer "plugins:multiplayer/runtime"
 import terrain "plugins:terrain/runtime"
 
@@ -38,7 +40,7 @@ import terrain "plugins:terrain/runtime"
 // server left stands as the edit; one that did not, a refused one or an edit
 // of another whose check differs here asks for the parts of that region
 // (Net_Terrain_Resync): the pages of its grids, and the sections of a Mesh,
-// which the server sends whole, LZ4. Nothing depends on two architectures
+// which the server sends whole, in LZ. Nothing depends on two architectures
 // giving the same bits: what differs comes back as the server's parts.
 //
 // A client asks for a base of each source it loads, or cannot read, with the
@@ -136,7 +138,7 @@ Net_Terrain_Resync :: struct {
 Net_Part :: enum u8 {Head,Grid,Section,End}
 
 // A part of a source as the server holds it after edit after, in pieces:
-// total bytes of LZ4 of raw bytes; a page of raw 0 is all fill. A head starts
+// total bytes of LZ of raw bytes; a page of raw 0 is all fill. A head starts
 // a base: it stands for every edit up to after, and whole says the parts
 // that follow are all of them.
 @(net_message,reliable)
@@ -188,7 +190,7 @@ Net_Logged :: struct {
     verified:bool,
 }
 
-// A part a client received, or is receiving: its LZ4 bytes until they are all
+// A part a client received, or is receiving: its LZ bytes until they are all
 // here, then its raw values.
 @(private)
 Net_Part_State :: struct {
@@ -275,7 +277,7 @@ Net_Stats :: struct {
     desyncs:u64,       // client: edits after which a region differed from the server
     resyncs:u64,       // client: Net_Terrain_Resync sent
     pages_sent,pages_applied:u64, // parts: heads, pages and sections
-    bytes_sent:u64,    // server: LZ4 bytes of parts
+    bytes_sent:u64,    // server: LZ bytes of parts
 }
 
 // What this library knows of the network: one for each World, never copied.
@@ -290,6 +292,8 @@ Terrain_Net :: struct {
     entered:[dynamic]multiplayer.Connection, // server: in its world, where what it sends reaches them
     refused:[dynamic]Net_Refused,   // client
     raw:[dynamic]u8,
+    decoder:compressor.Decoder, // client: of the parts received
+    encoder:lz.Encoder,    // server: of the parts sent
     stats:Net_Stats,
     launched:bool, // client of a session the player was launched with: it tells the person how it went
 }
@@ -301,6 +305,8 @@ net_free :: proc(n:^Terrain_Net) {
     net_forget(n)
     delete(n.sources);delete(n.asks);delete(n.applying);delete(n.rates);delete(n.serves);delete(n.entered);delete(n.refused)
     delete(n.raw)
+    compressor.decoder_destroy(&n.decoder)
+    lz.encoder_destroy(&n.encoder)
     n^={}
 }
 
@@ -462,7 +468,7 @@ log_put :: proc(src:^Net_Source,edit:Net_Terrain_Edit) -> bool {
 page_chunk :: proc(n:^Terrain_Net,chunk:Net_Terrain_Page) {
     src:=net_source(n,chunk.source,true)
     if chunk.offset==0 {
-        raw_max:=terrain.PAGE_VALUES*4
+        raw_max:=terrain.PAGE_BYTES_MAX
         switch chunk.part {
         case .Head:    raw_max=terrain.HEAD_BYTES
         case .Grid:
@@ -470,7 +476,7 @@ page_chunk :: proc(n:^Terrain_Net,chunk:Net_Terrain_Page) {
         case .End:     raw_max=0
         }
         state:=Net_Part_State{after=chunk.after,base=chunk.base,whole=chunk.whole,part=chunk.part,grid=chunk.grid,page=chunk.page,fill=chunk.fill,raw=chunk.raw,total=chunk.total}
-        if chunk.part>max(Net_Part) || chunk.grid>max(terrain.Grid_Kind) || int(chunk.raw)>raw_max || int(chunk.total)>serial.lz4_bound(int(chunk.raw)) {
+        if chunk.part>max(Net_Part) || chunk.grid>max(terrain.Grid_Kind) || int(chunk.raw)>raw_max || int(chunk.total)>asset.pack_bound(int(chunk.raw)) {
             state.complete,state.broken=true,true
         } else {
             error:mem.Allocator_Error
@@ -497,7 +503,8 @@ page_chunk :: proc(n:^Terrain_Net,chunk:Net_Terrain_Page) {
     if a.raw==0 {return}
     values,error:=make([]u8,int(a.raw))
     if error!=nil {a.broken=true;return}
-    if size,ok:=serial.lz4_decompress(packed,values);!ok || size!=int(a.raw) {delete(values);a.broken=true;return}
+    if len(n.decoder.scratch)==0 && compressor.decoder_init(&n.decoder)!=.None {delete(values);a.broken=true;return}
+    if asset.unpack(&n.decoder,packed,values)!=.None {delete(values);a.broken=true;return}
     a.bytes=values
 }
 
@@ -1050,7 +1057,7 @@ serve_pack :: proc(n:^Terrain_Net,sv:^Net_Serve,src:^Net_Source,data:core.Ref(te
             if !terrain.terrain_section_bytes(data,sv.source,index,&n.raw) {continue}
             chunk.raw=u32(len(n.raw))
         } else {
-            if resize(&n.raw,terrain.PAGE_VALUES*4)!=nil {return false}
+            if resize(&n.raw,terrain.PAGE_BYTES_MAX)!=nil {return false}
             size,fill,read:=terrain.terrain_page_bytes(data,sv.source,sv.grid,index,n.raw[:])
             if !read {continue}
             chunk.raw,chunk.fill=u32(size),fill
@@ -1060,16 +1067,16 @@ serve_pack :: proc(n:^Terrain_Net,sv:^Net_Serve,src:^Net_Source,data:core.Ref(te
     return false
 }
 
-// Server: the raw bytes of a part, LZ4, ready to go in pieces.
+// Server: the raw bytes of a part, in LZ, ready to go in pieces.
 @(private)
 serve_packed :: proc(n:^Terrain_Net,sv:^Net_Serve,chunk:Net_Terrain_Page) -> bool {
     sv.chunk=chunk
     raw:=int(chunk.raw)
-    if resize(&sv.packed,serial.lz4_bound(raw))!=nil {return false}
+    if resize(&sv.packed,asset.pack_bound(raw))!=nil {return false}
     total:=0
     if raw>0 {
-        packed:bool
-        if total,packed=serial.lz4_compress(n.raw[:raw],sv.packed[:]);!packed {return false}
+        error:asset.Error
+        if total,error=asset.pack(&n.encoder,.Edit,n.raw[:raw],sv.packed[:]);error!=.None {return false}
     }
     resize(&sv.packed,total)
     sv.chunk.total,sv.chunk.offset=u32(total),0
@@ -1091,7 +1098,7 @@ serves_run :: proc(n:^Terrain_Net,data:core.Ref(terrain.Terrain_Data),time:core.
             name:[base.ASSET_ID_TEXT]u8
             how:=""
             if sv.base {how=sv.whole?fmt.tprintf(" as a base of every part: its origin there %016x, here %016x",sv.origin,sv.served_origin):" as a base of what was written since its origin"}
-            tell(session,"terrain: %d parts of source %s (%d LZ4 bytes) went to connection %d%s",sv.parts,base.asset_id_format(sv.source,name[:]),sv.bytes,sv.connection,how)
+            tell(session,"terrain: %d parts of source %s (%d LZ bytes) went to connection %d%s",sv.parts,base.asset_id_format(sv.source,name[:]),sv.bytes,sv.connection,how)
             delete(sv.packed)
             ordered_remove(&n.serves,i)
             continue

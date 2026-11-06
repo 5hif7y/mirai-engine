@@ -18,7 +18,7 @@ Voice_Desc :: struct {
     paused:bool,  // created paused; voice_set_paused starts it
     priority:u8,  // when no voice is free, the one of lowest priority is stolen, the oldest among equals; never one of higher priority
     fade_in:f32,  // seconds
-    offset:f32,   // seconds into the sound where it starts; streams start at their beginning
+    offset:f32,   // seconds into the sound where it starts; a loop starts over from the beginning
     // Mixer clock (mixer_clock) of the frame in which the first sample
     // plays. 0, or a frame already rendered, starts as soon as possible.
     start_frame:u64,
@@ -98,10 +98,15 @@ voice_play :: proc(m:^Mixer,sound:Sound,desc:Voice_Desc=VOICE_DEFAULT) -> Voice 
         attenuation=desc.attenuation,doppler=desc.doppler,
         lowpass=max(desc.lowpass,0),reverb=max(desc.reverb,0),
     }
-    if slot.stream<0 && slot.frames>0 {
-        start.offset=u32(min(max(f64(desc.offset),0)*rate,f64(slot.frames-1)))
+    frames:=slot.frames
+    if slot.stream>=0 {frames=u32(min(m.streams[slot.stream].decoder.frames,int(max(u32))))}
+    offset:=frames>0?u32(min(max(f64(desc.offset),0)*rate,f64(frames-1))):0
+    if slot.stream>=0 {
+        // The ring begins at the offset.
+        stream_begin(m,&m.streams[slot.stream],desc.loop,int(offset))
+    } else {
+        start.offset=offset
     }
-    if slot.stream>=0 {stream_begin(m,&m.streams[slot.stream],desc.loop)}
     if !command_push(m,{kind=.Voice_Play,index=index,start=start}) {
         if !stolen {m.free_voices[m.free_count]=index;m.free_count+=1}
         return 0

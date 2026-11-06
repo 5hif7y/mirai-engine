@@ -5,7 +5,7 @@
 // under the 3-clause BSD license, Copyright (c) 2017-2026 Bartosz Taudul.
 //
 // These are the records and writers used by the native client; the socket,
-// handshake, queue drain and LZ4 framing (std/serial blocks, which the server
+// handshake, queue drain and LZ4 framing (lz4.odin blocks, which the server
 // decodes as independent ones) live in tracy_transport.odin.
 package tracy
 
@@ -18,7 +18,7 @@ HANDSHAKE_SIZE :: 8
 HANDSHAKE :: [HANDSHAKE_SIZE]u8{'T', 'r', 'a', 'c', 'y', 'P', 'r', 'f'}
 
 TARGET_FRAME_SIZE :: 256 * 1024
-LZ4_SIZE :: TARGET_FRAME_SIZE + TARGET_FRAME_SIZE / 255 + 16 // serial.lz4_bound of a whole frame
+LZ4_SIZE :: TARGET_FRAME_SIZE + TARGET_FRAME_SIZE / 255 + 16 // lz4_bound of a whole frame
 
 // The order is part of the trace format: only add at the end.
 Gpu_Context_Type :: enum u8 {

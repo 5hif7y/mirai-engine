@@ -342,11 +342,11 @@ a_mesh_a_load_takes_over_frames_and_its_skinned_copy_are_drawn_once_all_of_them_
         influence.weights[1]=255-influence.weights[0]
         ranges[i].first=u32(len(deltas))
         if i%7==0 {
-            append(&deltas,render.Morph_Delta{position={0,0,0.1},target=0})
+            append(&deltas,render.Morph_Delta{position={0,0,100},target=0})
             ranges[i].count=1
         }
     }
-    pose,made:=render.skin_create(r,handle,influences,2,{ranges=ranges,deltas=deltas[:],count=1})
+    pose,made:=render.skin_create(r,handle,influences,2,{ranges=ranges,deltas=deltas[:],count=1,step=0.001})
     if !testing.expect(t,made,r.error) {return}
     testing.expect(t,render.mesh_uploading(r,pose),"more than a frame uploads goes over frames")
     // As engine/render shows a copy that replaces the mesh of an entity: that mesh hidden, the copy outlined.
@@ -394,7 +394,7 @@ a_cube_loads_whole_and_a_material_does_not_sample_it :: proc(t:^testing.T) {
     mips:=make([dynamic][]u8,context.temp_allocator)
     for side:=SIZE;;side/=2 {
         level:=make([]u8,asset.texture_level_size(.BC6H,side,side)*6,context.temp_allocator)
-        for at:=0;at<len(level);at+=16 {level[at]=asset.TEXTURE_BC6H_MODE_11}
+        for at:=0;at<len(level);at+=16 {level[at]=0b00011} // mode 11
         append(&mips,level)
         if side==1 {break}
     }

@@ -144,6 +144,8 @@ mirai_import_writes_assets_that_mirai_asset_verifies :: proc(t:^testing.T) {
     testing.expect_value(t,import_run(DEMO+"models/vase.obj","--out",out,"--srgb").code,2)
     testing.expect_value(t,import_run(DEMO+"models/vase.obj","--out",out,"--alpha-coverage","0.5").code,2)
     testing.expect_value(t,import_run(DEMO+"textures/bricks_color.png","--out",out,"--alpha-coverage","1.5").code,2)
+    testing.expect_value(t,import_run(DEMO+"textures/bricks_color.png","--out",out,"--rdo-lambda","101").code,2)
+    testing.expect_value(t,import_run(DEMO+"textures/bricks_color.png","--out",out,"--rdo-lambda","-1").code,2)
     testing.expect_value(t,import_run(DEMO+"models/vase.obj","--out",out,"--nope").code,2)
     missing:=import_run(fmt.tprintf("%s/missing.obj",folder),"--out",out)
     testing.expect(t,missing.code==1 && strings.contains(missing.err,"mirai import:") && strings.contains(missing.err,"missing.obj"),missing.err)

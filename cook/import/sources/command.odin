@@ -8,6 +8,7 @@ import "core:strings"
 import "core:time"
 import "mirai:asset"
 import importer "mirai:cook/import"
+import "mirai:cook/textures"
 import "mirai:std/base"
 import "mirai:std/jobs"
 
@@ -19,11 +20,13 @@ import "mirai:std/jobs"
 // A model or an image is imported with the settings kept next to it in
 // <file>.import, changed by the options given; the result is written back
 // there, so importing again without options gives the same assets. --no-save
-// leaves that file as it is. An asset whose file already is the one the
-// import gives is kept as it is, unless --rebuild. Importing a source again
-// keeps the ids and files of what an earlier import of it wrote under --root
-// (or --out); --into <id> names that import by its prefab, texture or sound
-// when the source was moved or renamed. Only models and images have settings.
+// leaves that file as it is. --rdo-lambda 0 encodes the blocks of textures
+// for the least error and a higher lambda for smaller files. An asset whose
+// file already is the one the import gives is kept as it is, unless
+// --rebuild. Importing a source again keeps the ids and files of what an
+// earlier import of it wrote under --root (or --out); --into <id> names that
+// import by its prefab, texture or sound when the source was moved or
+// renamed. Only models and images have settings.
 // The report goes to output, one asset per line: id, kind, bytes and path, and
 // under it, indented, what the asset holds; then the settings file and the
 // warnings. A failure goes to errors as "mirai import: <file>: <reason>".
@@ -34,14 +37,14 @@ import "mirai:std/jobs"
 // Exit codes: 0 done, 1 failed, 2 misuse.
 
 @(private="file")
-IMPORT_USAGE :: "Usage: mirai import <file> --out <folder> [--max-texture N] [--uncompressed|--blocks] [--root <folder>] [--into <id>] [--srgb|--normal|--normal-green-down|--data] [--alpha-coverage C] [--lods auto|none] [--max-triangles N] [--collision none|hull|pieces|mesh] [--force-collision] [--hulls N] [--parts auto|all|none] [--rig source|humanoid|fox|horse|bird|dragon|kaiju|shark|snake|spider] [--rig-crotch M] [--rig-neck M] [--rebuild] [--no-save] [--profile] [--dev|--release]"
+IMPORT_USAGE :: "Usage: mirai import <file> --out <folder> [--max-texture N] [--uncompressed|--blocks] [--rdo-lambda L] [--root <folder>] [--into <id>] [--srgb|--normal|--normal-green-down|--data] [--alpha-coverage C] [--lods auto|none] [--max-triangles N] [--collision none|hull|pieces|mesh] [--force-collision] [--hulls N] [--parts auto|all|none] [--rig source|humanoid|fox|horse|bird|dragon|kaiju|shark|snake|spider] [--rig-crotch M] [--rig-neck M] [--rebuild] [--no-save] [--texture-cache <folder>] [--mesh-cache <folder>] [--profile] [--dev|--release]"
 
 command :: proc(args:[]string,output,errors:io.Writer) -> int {
     file,out:string
     options:importer.Import_Options
     profiled:bool
     // What the options change of the settings the source has.
-    Change :: enum {Max_Texture,Textures,Image,Alpha_Coverage,Lods,Max_Triangles,Collision,Force_Collision,Hulls,Parts,Rig,Rig_Crotch,Rig_Neck}
+    Change :: enum {Max_Texture,Textures,Rdo_Lambda,Image,Alpha_Coverage,Lods,Max_Triangles,Collision,Force_Collision,Hulls,Parts,Rig,Rig_Crotch,Rig_Neck}
     given:importer.Import_Settings
     changed:bit_set[Change]
     at:=0
@@ -69,6 +72,15 @@ command :: proc(args:[]string,output,errors:io.Writer) -> int {
                 if !parsed || size<=0 || size>asset.TEXTURE_MAX_SIZE {fmt.wprintfln(errors,"mirai import: --max-texture needs an integer from 1 to %d",asset.TEXTURE_MAX_SIZE);return 2}
                 given.max_texture_size=size
                 changed+={.Max_Texture}
+            }
+        case "--rdo-lambda":
+            text:string
+            text,ok=value(args,&at)
+            if ok {
+                lambda,parsed:=strconv.parse_int(text)
+                if !parsed || lambda<0 || lambda>textures.RDO_LAMBDA_MAX {fmt.wprintfln(errors,"mirai import: --rdo-lambda needs an integer from 0 (the least error) to %d (the smallest files)",textures.RDO_LAMBDA_MAX);return 2}
+                given.rdo_lambda=lambda if lambda>0 else -1
+                changed+={.Rdo_Lambda}
             }
         case "--hulls":
             text:string
@@ -99,6 +111,8 @@ command :: proc(args:[]string,output,errors:io.Writer) -> int {
             }
         case "--force-collision": given.force_collision=true;changed+={.Force_Collision}
         case "--no-save": options.no_save=true
+        case "--texture-cache": options.texture_cache,ok=value(args,&at)
+        case "--mesh-cache": options.mesh_cache,ok=value(args,&at)
         case "--profile": profiled=true
         case "--rebuild": options.rebuild=true
         case "--uncompressed": given.textures=.Uncompressed;changed+={.Textures}
@@ -183,6 +197,7 @@ command :: proc(args:[]string,output,errors:io.Writer) -> int {
         options.settings,options.ignore_stored=stored,true
         if .Max_Texture in changed {options.max_texture_size=given.max_texture_size}
         if .Textures in changed {options.textures=given.textures}
+        if .Rdo_Lambda in changed {options.rdo_lambda=given.rdo_lambda}
         if .Image in changed {options.image=given.image}
         if .Alpha_Coverage in changed {options.alpha_coverage=given.alpha_coverage}
         if .Lods in changed {options.lods=given.lods}

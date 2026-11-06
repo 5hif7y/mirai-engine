@@ -109,6 +109,7 @@ Load_Job :: struct {
     next:int,          // the next item a job prepares
     taken:int,         // items given to the assets
     budget:u64,        // its id in the budget of the loads
+    pieces:asset.Piece_Decoders, // the pieces of a large chunk decode at once on the job workers
 }
 
 @(private)
@@ -173,6 +174,7 @@ load_free :: proc(job:^Load_Job) {
     }
     delete(job.documents)
     for &item in job.items {host.app_assets_release(job.app,&item.prepared)}
+    asset.piece_decoders_destroy(&job.pieces)
     delete(job.items,heap);delete(job.names)
     asset.types_destroy(&job.types)
     free(job,heap)
@@ -343,6 +345,7 @@ load_named :: proc(job:^Load_Job) {
     job.phase=.Warming
     job.budget=host.assets_load_open(a)
     if workers:=jobs.worker_count(&app.jobs);workers>1 {
+        asset.piece_decoders_init(&job.pieces,&app.jobs,runtime.heap_allocator())
         for _ in 0..<min(max(workers/LOAD_WORKERS_SHARE,1),count) {jobs.run(&app.jobs,jobs.OWNER,load_prepare,job,&job.counter)}
     }
 }
@@ -354,10 +357,15 @@ load_prepare :: proc(job:^Load_Job,worker:int) {
     types:asset.Types
     asset.types_init(&types)
     defer asset.types_destroy(&types)
+    decoder:=new(asset.Decoder)
+    defer free(decoder)
+    lent:=decoder if decoder!=nil && asset.decoder_init(decoder)==.None else nil
+    defer if decoder!=nil {asset.decoder_destroy(decoder)}
+    if lent!=nil && job.pieces.decoders!=nil {lent.pieces,lent.worker=&job.pieces,worker}
     for {
         at:=intrinsics.atomic_add(&job.next,1)
         if at>=len(job.items) {return}
-        host.assets_prepare(&job.items[at].prepared,job.limits,&types)
+        host.assets_prepare(&job.items[at].prepared,job.limits,&types,lent)
         intrinsics.atomic_store(&job.items[at].ready,true)
     }
 }

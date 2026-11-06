@@ -31,18 +31,24 @@ belongs to [destruction](../../mirai-physics/references/destruction.md).
   its cluster's minimum corner: a vertex that two clusters share decodes the same in both and no
   cracks open. The normal is octahedral and the tangent a signed angle
   (`math.tangent_angle_pack`); `uv1` and `color` are separate streams, only with `Has_Uv1` and
-  `Has_Colors`. Every bulk column goes in LZ4, except `page_data`, which is LZ4 page by page.
+  `Has_Colors`. Every bulk column goes in LZ, except `page_data`, which is LZ page by
+  page, each page coded or as its raw words, whichever is smaller (`coded_bytes`, 0 for raw).
 - Clusters go in pages (`Mesh_Page`): whole groups (the clusters that share a parent) of a single
   level, contiguous, up to `MESH_PAGE_WORDS`; a DAG group never crosses two pages. Their clusters,
   vertices and triangle words are contiguous ranges of the mesh's, from the finest to the coarsest.
   A page's block (`mesh_page_layout`) is its vertices, uv1, colors, surfaces and triangles, in words
-  the renderer copies as they are; `mesh_page_decode` decodes one. Each cluster names its page
-  (`page`) and that of the group it was simplified from (`child_page`, that of its children). The
-  pages from `root_page` are the root, always loaded: the coarsest levels as long as they fit in
-  `MESH_ROOT_WORDS`, at least the coarsest, and every cluster nothing replaces; meshes with skin,
-  morphs or `Levels` are entirely root. What `mesh_build` makes has no `page_data` until
-  `mesh_pages_pack` compresses its blocks as a file stores them (the far mesh does it when its root
-  is not the whole mesh).
+  the renderer copies as they are; `mesh_page_decode` decodes one on the CPU, bit for bit, with
+  preallocated scratch (`MESH_PAGE_SCRATCH_BYTES`) and without allocating. `page_data` stores each
+  block coded (`asset/mesh_page_code.odin`) when that is smaller: each field split in low and high
+  byte planes, tangent and normal kept as whole records so the repeats of a vertex that clusters
+  share stay for LZ, and triangle bytes relative to the vertices met. Any words code back
+  exactly, and a damaged coding fails, it does not crash. Each
+  cluster names its page (`page`) and that of the group it was simplified from (`child_page`, that
+  of its children). The pages from `root_page` are the root, always loaded: the coarsest levels as
+  long as they fit in `MESH_ROOT_WORDS`, at least the coarsest, and every cluster nothing replaces;
+  meshes with skin, morphs or `Levels` are entirely root. What `mesh_build` makes has no
+  `page_data` until `mesh_pages_pack` codes its blocks as a file stores them (the far mesh does it
+  when its root is not the whole mesh).
 - Every mesh of finite positions and uvs fits in the grids: the step is the smallest power of two
   with which the widest cluster fits in 16 bits and the vertex farthest from the origin in 2^30
   steps; precision drops with size, it does not fail. The builders reject a NaN or an infinity
@@ -68,6 +74,11 @@ belongs to [destruction](../../mirai-physics/references/destruction.md).
   1 adds to its position, normal and tangent, before skin. `mesh_build` receives deltas of the
   source's vertices and copies them to each cluster that uses the vertex. An entity sets weights by
   name (`Morph_Weights`).
+  - Deltas are stored quantized (`Morph_Cluster_Delta`) and the renderer reads them as they are:
+    positions in steps of `morph_step`, the finest power of two that reaches the largest component
+    of the mesh; normals and tangents, clamped to [-2, 2], in `MORPH_NORMAL_STEP` and
+    `MORPH_TANGENT_STEP`. Each component is off by at most half its step. The builder rejects a
+    delta that is not finite or names a vertex or a range the source does not have.
 - A mesh of another `MESH_VERSION`, with skin or without, is rejected and must be reimported
   ([versions](formats.md#versions)). With skin it keeps bind positions and normals:
   `Mesh_Info.skeleton` references the skeleton, `joints` keeps indices of its bones and the mesh's
@@ -96,8 +107,18 @@ per bone.
 
 - 8-bit formats `RGBA8`, `BC1`, `BC3`, `BC5` and `BC7`; `RGBA16` (16 linear bits, data that keeps
   its precision), `RGBA16F` and `BC6H` (linear half floats: HDR, light above 1; BC6H unsigned and
-  without alpha). Levels are concatenated in `texels` and `texture_mip` gives their bytes.
-  `cook/textures` encodes them.
+  without alpha). `cook/textures` encodes them ([compression](formats.md#compression)).
+- **Levels, smallest first.** `texels` holds the levels from the smallest to level 0, in LZ:
+  `texture_open` reads a texture without its texels and `texture_decode` from a level decodes only
+  the blocks of the stream that hold that level and the smaller ones (`texture_view` decodes all);
+  `texture_mip` gives the bytes of a level, empty for one before `first`. A BC7 texture that
+  `cook/textures` writes stores two BC7Split streams, which restore only whole: its tail (the levels
+  of side `TEXTURE_TAIL` or less, which every read takes) and its larger levels; a stream per level
+  compresses larger.
+- **Planes of fields.** A BC1, BC3 or BC5 texture whose blocks are not `Fast` stores each level as
+  planes of the fields of its blocks (`Fields`: endpoints and indices apart,
+  `asset/texture_fields.odin`) when that stream is smaller, which the writer decides per texture
+  compressing both layouts at `TEXTURE_FIELDS_LEVEL`; the read joins them back.
 - `Srgb` says it is color: stored with the sRGB curve in `RGBA8`, `BC1`, `BC3` and `BC7`, linear in
   the others.
 - **Layers.** `layers` is the number of images of each level (one if the file does not store it):
@@ -108,8 +129,8 @@ per bone.
 - `texture_level_rgba8` (`asset/texture_blocks.odin`) writes an image of an 8-bit level as RGBA8; a
   BC5 receives in blue the third component of its unit vector. `texture_level_rgba16f` gives
   `RGBA16F` and `BC6H` as half floats and `texture_level_linear` gives any format as linear values,
-  HDR included. `texture_bc6h_block_decode` reads mode 11, the only one `cook/textures` writes; a
-  block of another mode decodes to black.
+  HDR included. `texture_bc6h_block_decode` reads every mode of BC6H; a reserved mode decodes to
+  black.
 
 ## Material
 
@@ -144,20 +165,28 @@ is what the source gave in the last import and `material`, what the material is.
 ## Animation
 
 `asset/animation.odin`. An `.anim` stores `std/anim` clips with their written names, their tracks,
-keys and markers.
+keys and markers. The project's keeps every track as keys, which the editor edits; the cooked one
+of a shipped game keeps what `anim.library_compress` samples as samples
+([storage](../../mirai-std/references/anim-storage.md)).
 
 - A track's `target` is the textual identity of what it moves (empty for whoever plays the clip).
   glTF imports use escaped nominal paths independent of the source index; authored clips can use
   names.
 - How a clip repeats is not stored: whoever plays it decides. Root options go in
-  `Animation_Clip.root`; named sockets, in the `.skeleton`.
+  `Animation_Clip.root`; named sockets, in the `.skeleton`. `Animation_Clip.skeleton` names the
+  `.skeleton` it plays on, which the importer, retarget bakes and clip edits fill: compression
+  measures on its rest pose.
 - `animation_document` checks capacities (`ANIMATION_MAX_*`), names, key order and finite numbers
   before building the document.
 - `Cubic_Spline` requires explicit tangents and keeps glTF's per-component interpolation (Hermite,
   also for rotations); `Cubic` uses squad for rotations.
 - `animation_clips_add` fills an `anim.Library`: clips and tracks carry the `base.name_hash` of
   their names and each marker's `id` is its row. If the view is invalid or not all clips fit, it
-  returns 0 without touching the library.
+  returns 0 without touching the library. `animation_compress` then prepares it as the runtime plays
+  it, on the skeletons a `Skeleton_Open` opens (`skeleton_open_registry`, or the host's assets) and
+  the hierarchy of `animation_parents`; a cooked view is already sampled.
+- `animation_cooked_document` writes the cooked `.anim` from that library; `animation_descs`
+  refuses a cooked view: it is not edited.
 - `.pose`, `.blend`, `.agraph` and authoring by API (clips, tracks, keys, markers, skeletons) belong
   to the [animation plugin](../../mirai-animation/references/animation.md). Its edits validate the
   whole document and publish the file atomically keeping its identity; they are distinct from the
@@ -165,9 +194,11 @@ keys and markers.
 
 ## Sound
 
-`asset/sound.odin`. A `.sound` stores `PCM16` (interleaved samples in the bulk table `samples`,
-which are read from the file without a copy) or `File` (a WAV or Ogg Vorbis as is in the bulk table
-`file`; the `Stream` flag asks to decode it while it plays instead of whole on loading). What the
+`asset/sound.odin`. A `.sound` stores `Lossless` (16 bit samples coded without loss by
+`audio.lossless_encode`, in the bulk table `lossless`, read from the file without a copy) or `File`
+(a WAV or Ogg Vorbis as is in the bulk table `file`). Either is decoded whole on loading or, with
+the `Stream` flag, while it plays ([audio](../../mirai-platform/references/audio.md#sounds)). The
+lossless table is stored without LZ: the residual coding leaves it nothing to gain. What the
 importer stores: [imports guide](../../mirai-imports/references/imports.md#sounds).
 
 ## Sound set

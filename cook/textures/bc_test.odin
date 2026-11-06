@@ -1,82 +1,37 @@
 package textures
 
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:testing"
 import "mirai:asset"
 import "mirai:std/base"
+import "mirai:std/jobs"
 
 @(private="file")
-bc1_error :: proc(texels:^[16][4]u8) -> (worst:f32) {
-    decoded,_:=asset.texture_bc1_block_decode(bc1_encode_block(texels))
-    for t,i in texels {
-        for c in 0..<3 {worst=max(worst,abs(decoded[i][c]*255-f32(t[c])))}
-    }
-    return
+Random :: struct {state:u64}
+
+@(private="file")
+next :: proc(r:^Random,below:int) -> int {
+    r.state=r.state*6364136223846793005+1442695040888963407
+    return int((r.state>>33)%u64(below))
 }
 
 @(test)
-bc1_blocks_decode_close_to_their_texels :: proc(t:^testing.T) {
-    // One color: both endpoints land on it, within what 5:6:5 bits hold.
-    flat:[16][4]u8
-    for &texel in flat {texel={200,100,50,255}}
-    testing.expectf(t,bc1_error(&flat)<=4,"a flat block is off by %v",bc1_error(&flat))
-    // Two colors: each texel gets its own endpoint.
-    pair:[16][4]u8
-    for &texel,i in pair {texel={255,0,0,255} if i%2==0 else {0,0,255,255}}
-    testing.expectf(t,bc1_error(&pair)<=4,"a two color block is off by %v",bc1_error(&pair))
-    // A ramp between two colors: four steps on the line cover sixteen texels.
-    ramp:[16][4]u8
-    for &texel,i in ramp {
-        k:=f32(i)/15
-        texel={u8(40+180*k),u8(200-120*k),u8(30+60*k),255}
-    }
-    testing.expectf(t,bc1_error(&ramp)<=36,"a ramp is off by %v",bc1_error(&ramp))
-    // The first endpoint is the larger one, which is what selects four colors.
-    block:=bc1_encode_block(&ramp)
-    c0,c1:=u16(block[0])|u16(block[1])<<8,u16(block[2])|u16(block[3])<<8
-    testing.expect(t,c0>c1,"a block with two different endpoints is in four color mode")
-    // Gray texels stay gray enough: the fit follows the diagonal of the color cube.
-    gray:[16][4]u8
-    for &texel,i in gray {v:=u8(i*16);texel={v,v,v,255}}
-    decoded,_:=asset.texture_bc1_block_decode(bc1_encode_block(&gray))
-    for texel in decoded {
-        testing.expect(t,abs(texel.r-texel.g)<0.03 && abs(texel.g-texel.b)<0.03,"a gray ramp picks up a tint")
-    }
-}
-
-@(test)
-bc4_blocks_keep_their_range :: proc(t:^testing.T) {
-    values:[16]u8
-    for &v,i in values {v=u8(20+i*14)}
-    decoded:=asset.texture_bc4_block_decode(bc4_encode_block(&values))
-    for v,i in values {
-        testing.expectf(t,abs(decoded[i]*255-f32(v))<=16,"value %d decodes to %v",v,decoded[i]*255)
-    }
-    testing.expect(t,abs(decoded[0]*255-20)<0.5 && abs(decoded[15]*255-230)<0.5,"the ends of the range are exact")
-    flat:[16]u8
-    for &v in flat {v=128}
-    for v in asset.texture_bc4_block_decode(bc4_encode_block(&flat)) {testing.expect(t,abs(v*255-128)<0.5)}
-}
-
-@(test)
-bc_compress_covers_any_size :: proc(t:^testing.T) {
+blocks_cover_any_size :: proc(t:^testing.T) {
     pixels:[5*3*4]u8
     for &b,i in pixels {b=u8(i*7)}
-    bc1,_:=bc_compress(pixels[:],5,3,.BC1)
-    bc3,_:=bc_compress(pixels[:],5,3,.BC3)
-    bc5,_:=bc_compress(pixels[:4],1,1,.BC5)
-    plain,_:=bc_compress(pixels[:],5,3,.RGBA8)
-    defer delete(bc1)
-    defer delete(bc3)
-    defer delete(bc5)
-    defer delete(plain)
-    testing.expect_value(t,len(bc1),2*1*8)
-    testing.expect_value(t,len(bc3),2*1*16)
-    testing.expect_value(t,len(bc5),16)
-    testing.expect_value(t,len(plain),5*3*4)
+    transfer:=transfer_make(false)
+    for format in ([]asset.Texture_Format{.BC1,.BC3,.BC5,.BC7}) {
+        blocks,error:=level_store(rgba8(pixels[:],5,3),format,&transfer,{lambda=RDO_LAMBDA_DEFAULT},context.allocator,{})
+        defer delete(blocks)
+        testing.expect(t,error==.None && len(blocks)==asset.texture_level_size(format,5,3))
+    }
     // One texel repeated over its block: both channels exact.
-    testing.expect(t,bc5[0]==pixels[0] && bc5[8]==pixels[1])
+    one,_:=level_store(rgba8(pixels[:4],1,1),.BC5,&transfer,{lambda=RDO_LAMBDA_DEFAULT},context.allocator,{})
+    defer delete(one)
+    decoded:[4]u8
+    testing.expect(t,asset.texture_level_rgba8(.BC5,one,1,1,decoded[:]) && decoded[0]==pixels[0] && decoded[1]==pixels[1])
 
     // A built texture has every level down to one texel, compressed or not.
     image:[16*8*4]u8
@@ -98,19 +53,6 @@ bc_compress_covers_any_size :: proc(t:^testing.T) {
     defer built_destroy(&plain_built)
     testing.expect(t,normals.format==.BC5 && plain_built.format==.RGBA8 && len(plain_built.mips[0])==16*8*4)
     testing.expect(t,settings_hash({srgb=true})!=settings_hash({srgb=true,encoding=.Uncompressed}),"the encoding is a setting of the import")
-}
-
-@(test)
-black_and_zero_blocks_decode_opaque :: proc(t:^testing.T) {
-    // Both endpoints equal is the three color mode, whose fourth index is
-    // transparent: an encoded block never uses it.
-    black:[16][4]u8
-    for &texel in black {texel={0,0,0,255}}
-    _,alpha:=asset.texture_bc1_block_decode(bc1_encode_block(&black))
-    for value in alpha {testing.expect(t,value==1)}
-    zero:[8]u8
-    _,alpha=asset.texture_bc1_block_decode(zero)
-    for value in alpha {testing.expect(t,value==1)}
 }
 
 @(private="file")
@@ -160,7 +102,24 @@ a_compressed_texture_survives_the_file_within_what_a_block_keeps :: proc(t:^test
         view,view_error:=asset.texture_view(&a,&types)
         testing.expect_value(t,view_error,asset.Error.None)
         testing.expect(t,view.info.format==entry.format && int(view.info.mip_count)==asset.texture_mip_count(SIZE,SIZE) && view.info.width==SIZE)
-        for level in 0..<int(view.info.mip_count) {testing.expect(t,string(asset.texture_mip(view,level))==string(built.mips[level]),"the file holds the built levels")}
+        for level in 0..<int(view.info.mip_count) {
+            side:=max(SIZE>>uint(level),1)
+            testing.expectf(t,same_level(entry.format,asset.texture_mip(view,level),built.mips[level],side,side),"%s: the file holds the built level %d",entry.name,level)
+        }
+        _,prepped:=asset.asset_table(&a,asset.TEXTURE_TABLE_BC7SPLIT)
+        testing.expectf(t,prepped==(entry.format==.BC7),"%s: only BC7 stores its blocks as BC7Split",entry.name)
+        // The levels from the third, as a far texture reads them: all of the tail for BC7, whose
+        // stream restores whole.
+        far:asset.Asset
+        if testing.expect_value(t,asset.asset_load(&far,path),asset.Error.None) {
+            defer asset.asset_close(&far)
+            tail,tail_error:=asset.texture_open(&far,&types)
+            testing.expect(t,tail_error==.None && asset.texture_decode(&far,&types,&tail,2)==.None && tail.first==(0 if entry.format==.BC7 else 2))
+            for level in 2..<int(view.info.mip_count) {
+                side:=max(SIZE>>uint(level),1)
+                testing.expectf(t,same_level(entry.format,asset.texture_mip(tail,level),built.mips[level],side,side),"%s: a read from level 2 holds level %d",entry.name,level)
+            }
+        }
 
         // Each level against the one of the plain chain, away from the steps
         // between quadrants, where a block holds two ramps.
@@ -188,16 +147,167 @@ a_compressed_texture_survives_the_file_within_what_a_block_keeps :: proc(t:^test
     }
 }
 
+// Error of a level of RGBA8 pixels in dB, over its channels.
+@(private="file")
+psnr :: proc(format:asset.Texture_Format,blocks,pixels:[]u8,size,channels:int) -> f64 {
+    decoded:=make([]u8,size*size*4,context.temp_allocator)
+    asset.texture_level_rgba8(format,blocks,size,size,decoded)
+    total:f64
+    for i in 0..<size*size {
+        for c in 0..<channels {
+            d:=f64(decoded[i*4+c])-f64(pixels[i*4+c])
+            total+=d*d
+        }
+    }
+    return 10*math.log10(255*255/max(total/f64(size*size*channels),1e-10))
+}
+
+@(test)
+the_rdo_lambda_trades_error_for_files_that_compress_smaller :: proc(t:^testing.T) {
+    SIZE :: 128
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    directory,_:=os.temp_directory(context.temp_allocator)
+    pixels:=smooth_image(SIZE,true);defer delete(pixels)
+    r:=Random{state=5}
+    for &p in pixels {p=u8(clamp(int(p)+next(&r,9)-4,0,255))}
+    file_bytes :: proc(t:^testing.T,types:^asset.Types,path:string,built:^Built) -> int {
+        testing.expect_value(t,asset.texture_save(path,types,built_desc(built,base.Asset_Id{9,1},nil)),asset.Error.None)
+        data,_:=os.read_entire_file(path,context.temp_allocator)
+        return len(data)
+    }
+    for options in ([]Build_Options{{srgb=true},{}}) {
+        exact,rdo,off:=options,options,options
+        exact.rdo_lambda,rdo.rdo_lambda,off.rdo_lambda=-1,40,RDO_LAMBDA_MAX+1
+        least,_:=build(rgba8(pixels,SIZE,SIZE),exact);defer built_destroy(&least)
+        traded,_:=build(rgba8(pixels,SIZE,SIZE),rdo);defer built_destroy(&traded)
+        path:=fmt.tprintf("%s/mirai-rdo-%d.tex",directory,os.get_pid())
+        defer os.remove(path)
+        least_bytes,traded_bytes:=file_bytes(t,&types,path,&least),file_bytes(t,&types,path,&traded)
+        testing.expectf(t,traded_bytes<least_bytes,"%v: RDO writes %d bytes and the least error %d",least.format,traded_bytes,least_bytes)
+        least_db,traded_db:=psnr(least.format,least.mips[0],pixels,SIZE,4),psnr(least.format,traded.mips[0],pixels,SIZE,4)
+        testing.expectf(t,least_db>=traded_db && traded_db>least_db-6,"%v: %.2f dB with RDO, %.2f without",least.format,traded_db,least_db)
+        testing.expect(t,settings_hash(exact)!=settings_hash(rdo) && settings_hash(options)==settings_hash({srgb=options.srgb,rdo_lambda=RDO_LAMBDA_DEFAULT}),"the lambda is a setting of the import")
+        _,refused:=build(rgba8(pixels,SIZE,SIZE),off)
+        testing.expect_value(t,refused,Error.Invalid)
+        // Fast: no RDO whatever the lambda, marked for the cook, and kept apart from Final.
+        fast:=rdo
+        fast.speed=.Fast
+        quick,_:=build(rgba8(pixels,SIZE,SIZE),fast);defer built_destroy(&quick)
+        testing.expect(t,.Fast in quick.flags && .Fast not_in traded.flags && .Fast not_in least.flags)
+        testing.expectf(t,file_bytes(t,&types,path,&quick)>traded_bytes,"%v: Fast is not traded for size",quick.format)
+        testing.expect(t,settings_hash(fast)!=settings_hash(rdo) && settings_hash(fast)!=settings_hash(exact),"Fast is built and cached apart")
+    }
+}
+
+@(test)
+blocks_in_parallel_are_the_same_bytes :: proc(t:^testing.T) {
+    SIZE :: 130 // not a multiple of four: the last blocks repeat the edge
+    pixels:=make([]u8,SIZE*SIZE*4*2,context.temp_allocator)
+    r:=Random{state=3}
+    for &p,i in pixels {p=u8((i*7+next(&r,32))%256)}
+    floats:=make([]u8,SIZE*SIZE*16,context.temp_allocator)
+    linear:=transfer_make(false)
+    for at in 0..<SIZE*SIZE {texel_write(floats,.RGBA32F,at,{f32(next(&r,1000))/50,f32(at%SIZE)/8,0.5,1},&linear)}
+    js:jobs.Job_System
+    testing.expect(t,jobs.system_init(&js,{threads=3}))
+    defer jobs.system_destroy(&js)
+    cases:=[?]struct{format:asset.Texture_Format,level:Source}{
+        {.BC7,{texels=pixels,width=SIZE,height=SIZE,layers=2}},
+        {.BC1,{texels=pixels,width=SIZE,height=SIZE,layers=2}},
+        {.BC6H,{texels=floats,width=SIZE,height=SIZE,format=.RGBA32F}},
+    }
+    for entry in cases {
+        serial,serial_error:=level_store(entry.level,entry.format,&linear,{lambda=RDO_LAMBDA_DEFAULT},context.temp_allocator,{})
+        parallel,parallel_error:=level_store(entry.level,entry.format,&linear,{lambda=RDO_LAMBDA_DEFAULT},context.temp_allocator,{&js,jobs.OWNER,nil})
+        testing.expect(t,serial_error==.None && parallel_error==.None && len(serial)==asset.texture_level_size(entry.format,SIZE,SIZE)*max(entry.level.layers,1))
+        testing.expectf(t,string(serial)==string(parallel),"%v: blocks in other threads give the same bytes",entry.format)
+    }
+}
+
+@(test)
+color_is_bc7_data_maps_bc1_or_bc3_and_hdr_bc6h :: proc(t:^testing.T) {
+    opaque:=[]u8{10,20,30,255,40,50,60,255}
+    cutout:=[]u8{10,20,30,255,40,50,60,0}
+    stored :: proc(texels:[]u8,format:Source_Format,options:Build_Options) -> asset.Texture_Format {
+        return stored_format({texels=texels,width=2,height=1,format=format},options)
+    }
+    testing.expect_value(t,stored(opaque,.RGBA8,{srgb=true}),asset.Texture_Format.BC7)
+    testing.expect_value(t,stored(cutout,.RGBA8,{srgb=true}),asset.Texture_Format.BC7)
+    testing.expect_value(t,stored(opaque,.RGBA8,{}),asset.Texture_Format.BC1)
+    testing.expect_value(t,stored(cutout,.RGBA8,{}),asset.Texture_Format.BC3)
+    testing.expect_value(t,stored(cutout,.RGBA8,{srgb=true,normal_map=true}),asset.Texture_Format.BC5)
+    testing.expect_value(t,stored(opaque,.RGBA8,{srgb=true,keep_precision=true}),asset.Texture_Format.BC7)
+    testing.expect_value(t,stored(opaque,.RGBA8,{encoding=.Uncompressed}),asset.Texture_Format.RGBA8)
+
+    floats :: proc(values:[2][4]f32) -> []u8 {
+        texels:=make([]u8,32,context.temp_allocator)
+        linear:=transfer_make(false)
+        for value,at in values {texel_write(texels,.RGBA32F,at,value,&linear)}
+        return texels
+    }
+    bright:=floats({{40,2,0.5,1},{0,0,0,1}})
+    testing.expect_value(t,stored(bright,.RGBA32F,{srgb=true}),asset.Texture_Format.BC6H)
+    testing.expect_value(t,stored(floats({{40,2,0.5,0.5},{0,0,0,1}}),.RGBA32F,{}),asset.Texture_Format.RGBA16F)
+    testing.expect_value(t,stored(floats({{40,-2,0.5,1},{0,0,0,1}}),.RGBA32F,{}),asset.Texture_Format.RGBA16F)
+    testing.expect_value(t,stored(bright,.RGBA32F,{keep_precision=true}),asset.Texture_Format.RGBA16F)
+    testing.expect_value(t,stored(bright,.RGBA32F,{normal_map=true}),asset.Texture_Format.BC5)
+    wide:=make([]u8,16,context.temp_allocator)
+    for &b in wide {b=0xff}
+    testing.expect_value(t,stored(wide,.RGBA16,{}),asset.Texture_Format.BC1)
+    testing.expect_value(t,stored(wide,.RGBA16,{keep_precision=true}),asset.Texture_Format.RGBA16)
+    testing.expect_value(t,stored(wide,.RGBA16,{encoding=.Uncompressed}),asset.Texture_Format.RGBA16)
+}
+
 @(test)
 an_odd_sized_level_decodes_every_texel_of_its_last_blocks :: proc(t:^testing.T) {
     pixels:[5*3*4]u8
     for i in 0..<5*3 {pixels[i*4],pixels[i*4+1],pixels[i*4+2],pixels[i*4+3]=90,140,200,255}
-    for format in ([]asset.Texture_Format{.BC1,.BC3,.BC5}) {
-        blocks,_:=bc_compress(pixels[:],5,3,format);defer delete(blocks)
+    transfer:=transfer_make(false)
+    for format in ([]asset.Texture_Format{.BC1,.BC3,.BC5,.BC7}) {
+        blocks,_:=level_store(rgba8(pixels[:],5,3),format,&transfer,{lambda=RDO_LAMBDA_DEFAULT},context.allocator,{});defer delete(blocks)
         decoded:[5*3*4]u8
         testing.expect(t,asset.texture_level_rgba8(format,blocks,5,3,decoded[:]))
         for i in 0..<5*3 {
             testing.expectf(t,abs(int(decoded[i*4])-90)<=4 && abs(int(decoded[i*4+1])-140)<=4 && decoded[i*4+3]==255,"%v texel %d is %v",format,i,decoded[i*4:i*4+4])
         }
     }
+}
+
+// A level as a file gives it back: the same bytes, and for BC7 the same
+// texels, as BC7Split restores a solid block as its canonical mode 5 block.
+@(private)
+same_level :: proc(format:asset.Texture_Format,a,b:[]u8,width,height:int) -> bool {
+    if format!=.BC7 {return string(a)==string(b)}
+    if len(a)!=len(b) {return false}
+    pa:=make([]u8,width*height*4,context.temp_allocator)
+    pb:=make([]u8,width*height*4,context.temp_allocator)
+    return asset.texture_level_rgba8(format,a,width,height,pa) && asset.texture_level_rgba8(format,b,width,height,pb) && string(pa)==string(pb)
+}
+
+@(test)
+a_bc7_texture_restores_its_tail_without_its_larger_levels :: proc(t:^testing.T) {
+    SIZE :: 2*asset.TEXTURE_TAIL
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    pixels:=smooth_image(SIZE,false);defer delete(pixels)
+    built,error:=build(rgba8(pixels,SIZE,SIZE),{srgb=true,speed=.Fast})
+    defer built_destroy(&built)
+    testing.expect(t,error==.None && built.format==.BC7)
+    desc:=built_desc(&built,{9,99},nil)
+    testing.expect(t,len(desc.bc7split)==2 && desc.bc7split[0].level==0 && desc.bc7split[1].level==1,"the level above the tail and the tail, apart")
+    doc:asset.Document
+    testing.expect_value(t,asset.texture_document(&doc,&types,desc),asset.Error.None)
+    bytes,bytes_error:=asset.document_bytes(&doc,context.temp_allocator)
+    asset.document_destroy(&doc)
+    testing.expect_value(t,bytes_error,asset.Error.None)
+    for from in 0..<len(built.mips) {
+        a:asset.Asset
+        testing.expect_value(t,asset.asset_open(&a,bytes),asset.Error.None)
+        view,view_error:=asset.texture_open(&a,&types)
+        testing.expect(t,view_error==.None && asset.texture_decode(&a,&types,&view,from)==.None)
+        testing.expectf(t,view.first==min(from,1),"a read from level %d restores from level %d",from,view.first)
+        testing.expect(t,view.first==0 || asset.texture_mip(view,0)==nil)
+        for level in view.first..<len(built.mips) {testing.expectf(t,string(asset.texture_mip(view,level))==string(built.mips[level]),"level %d read from %d",level,from)}
+        asset.asset_close(&a)
+    }
+    free_all(context.temp_allocator)
 }

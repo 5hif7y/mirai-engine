@@ -15,7 +15,7 @@ the_view_of_a_scene_is_kept_at_each_size_and_shown_where_it_already_is :: proc(t
     os.remove_all(folder)
     defer os.remove_all(folder)
     p:Thumbnails
-    defer {delete(p.pixels);delete(p.image);delete(p.file)}
+    defer {delete(p.pixels);delete(p.image);thumbnail_file_destroy(&p.file)}
     id:=base.Asset_Id{0x7363,1}
     // A view in columns of red and blue, one pixel each: every cell averages them.
     pixels:=make([]u8,THUMBNAIL_CAPTURE_SIDE*THUMBNAIL_CAPTURE_SIDE*4,context.temp_allocator)

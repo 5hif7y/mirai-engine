@@ -164,18 +164,22 @@ pages_round_trip_through_a_file_and_decode_one_by_one :: proc(t:^testing.T) {
     testing.expect(t,view.root_page==g.root_page && view.info.root_page==g.root_page && view.ray_errors==g.ray_errors && len(view.pages)==len(g.pages))
     block:=make([]u32,MESH_PAGE_WORDS,context.temp_allocator)
     want:=make([]u32,MESH_PAGE_WORDS,context.temp_allocator)
+    decoder:Decoder
+    testing.expect_value(t,decoder_init(&decoder),Error.None)
+    defer decoder_destroy(&decoder)
+    scratch:=make([]u8,MESH_PAGE_SCRATCH_BYTES,context.temp_allocator)
     for page,at in view.pages {
         written:=g.pages[at]
-        written.data_offset,written.data_bytes=page.data_offset,page.data_bytes
+        written.data_offset,written.data_bytes,written.coded_bytes=page.data_offset,page.data_bytes,page.coded_bytes
         testing.expect(t,page==written && page.data_bytes>0)
-        testing.expect(t,mesh_page_decode(view.flags,page,view.page_data,block) && mesh_page_gather(g,g.pages[at],want))
+        testing.expect(t,mesh_page_decode(view.flags,page,view.page_data,scratch,block,&decoder.lz) && mesh_page_gather(g,g.pages[at],want))
         layout:=mesh_page_layout(view.flags,page.vertex_count,page.triangle_words)
         testing.expect(t,same(block[:page.words],want[:page.words]))
         testing.expect(t,same(block[layout.vertices:layout.uv1s],mem.slice_data_cast([]u32,g.vertices[page.first_vertex:][:page.vertex_count])))
         testing.expect(t,same(block[layout.colors:layout.surfaces],g.colors[page.first_vertex:][:page.vertex_count]))
         testing.expect(t,same(block[layout.triangles:layout.words],g.triangles[page.first_triangle:][:page.triangle_words]))
     }
-    testing.expect(t,!mesh_page_decode(view.flags,view.pages[0],view.page_data[:view.pages[0].data_bytes-1],block),"a short block is refused")
+    testing.expect(t,!mesh_page_decode(view.flags,view.pages[0],view.page_data[:view.pages[0].data_bytes-1],scratch,block,&decoder.lz),"a short block is refused")
 }
 
 @(test)
@@ -217,7 +221,7 @@ pages_out_of_their_ranges_are_refused :: proc(t:^testing.T) {
     refuse(t,&types,bad)
 
     // In a file, a block out of page_data or shorter than its words.
-    for field in ([]string{"data_offset","data_bytes"}) {
+    for field in ([]string{"data_offset","data_bytes","coded_bytes"}) {
         doc:Document
         testing.expect_value(t,mesh_document(&doc,&types,good),Error.None)
         defer document_destroy(&doc)

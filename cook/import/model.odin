@@ -57,6 +57,10 @@ Import_Options :: struct {
     into:base.Asset_Id,
     rebuild:bool,         // writes every asset, also one whose file already is the one the import would write
     texture_cache:string, // folder of textures built before, kept by image and settings (textures.cache_read); "": none
+    // A texture is built Fast unless the texture cache keeps it as Final
+    // (textures.Encode_Speed): the imports of the editor, which a cook
+    // encodes again as Final. False: Final, what tools and the CLI build.
+    fast_textures:bool,
     mesh_cache:string,    // folder of meshes built before, kept by geometry and settings (mesh_cook); "": none
     earlier_cache:^Earlier_Cache, // the fronts of assets that earlier writes of the same import read; nil: each write reads them
     no_save:bool,         // the settings file of the source is left as it is

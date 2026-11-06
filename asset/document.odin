@@ -6,6 +6,7 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 import "mirai:std/base"
+import "mirai:std/jobs"
 import "mirai:std/serial"
 
 // An asset in memory, to build, read and edit: the tables of record.odin with
@@ -300,8 +301,8 @@ document_choice_rename :: proc(doc:^Document,old,name:string) -> int {
     return renamed
 }
 
-// Writes the document as a file into w, which has to be empty.
-document_write :: proc(doc:^Document,w:^serial.Writer) -> Error {
+// Writes the document as a file into w, which has to be empty, compressed as p says.
+document_write :: proc(doc:^Document,w:^serial.Writer,p:=Pack.Edit,worker:=jobs.Worker_Ref{}) -> Error {
     document_check(doc) or_return
     allocator:=doc.allocator
     dependencies:=make([dynamic]base.Asset_Id,allocator);defer delete(dependencies)
@@ -374,21 +375,21 @@ document_write :: proc(doc:^Document,w:^serial.Writer) -> Error {
     chunks[3].data=serial.writer_bytes(&directory)
     if names.overflow!=0 || schema.overflow!=0 || directory.overflow!=0 {return .Out_Of_Memory}
     scratch:=make([dynamic]u8,allocator);defer delete(scratch)
-    return blob_build(w,doc.kind,doc.kind_version,doc.id,doc.owner,doc.flags,chunks[:],&scratch)
+    return blob_build(w,doc.kind,doc.kind_version,doc.id,doc.owner,doc.flags,chunks[:],&scratch,p,worker)
 }
 
 // Writes the document to a file, whole or not at all.
-document_save :: proc(doc:^Document,path:string,sync:=false) -> Error {
-    data:=document_bytes(doc,doc.allocator) or_return
+document_save :: proc(doc:^Document,path:string,sync:=false,p:=Pack.Edit) -> Error {
+    data:=document_bytes(doc,doc.allocator,p) or_return
     defer mem.free_bytes(data,doc.allocator)
     return serial.file_write_atomic(path,data,sync)==.None?.None:.IO
 }
 
 // The file the document is, as bytes from allocator, aligned for its chunks.
-document_bytes :: proc(doc:^Document,allocator:=context.allocator) -> (data:[]u8,error:Error) {
+document_bytes :: proc(doc:^Document,allocator:=context.allocator,p:=Pack.Edit,worker:=jobs.Worker_Ref{}) -> (data:[]u8,error:Error) {
     w:serial.Writer
     serial.writer_init(&w,allocator=allocator)
-    if error=document_write(doc,&w);error!=.None {
+    if error=document_write(doc,&w,p,worker);error!=.None {
         serial.writer_destroy(&w)
         return
     }
@@ -412,7 +413,9 @@ document_from_asset :: proc(doc:^Document,a:^Asset,allocator:=context.allocator)
             column:=Doc_Column{name=strings.clone(from.name,allocator),type=from.type,size=from.size,flags=from.flags,ref=from.ref,alignment=1<<entry.alignment_log2,compression=entry.compression}
             error:=column_size(doc,&column,source.rows*from.size)
             append(&target.columns,column)
-            if error==.None {error=blob_read(&a.blob,entry,target.columns[at].data)}
+            decoder:^Decoder
+            if error==.None && entry.compression!=.None {decoder,error=asset_decoder(a)}
+            if error==.None {error=blob_read(&a.blob,entry,target.columns[at].data,decoder)}
             if error!=.None {
                 document_destroy(doc)
                 return error
@@ -420,6 +423,18 @@ document_from_asset :: proc(doc:^Document,a:^Asset,allocator:=context.allocator)
         }
     }
     return .None
+}
+
+// The file data is, written again as p packs it: the same content with its
+// chunks, and the pages of a mesh, compressed again. Cooking a shipped game
+// writes its assets with Ship; with a worker, the pieces of a large chunk are
+// compressed on the workers of its job system.
+document_repack :: proc(data:[]u8,p:Pack,allocator:=context.allocator,worker:=jobs.Worker_Ref{}) -> (repacked:[]u8,error:Error) {
+    doc:Document
+    document_read(&doc,data,allocator) or_return
+    defer document_destroy(&doc)
+    if doc.kind==KIND_MESH {mesh_pages_repack(&doc,p) or_return}
+    return document_bytes(&doc,allocator,p,worker)
 }
 
 document_read :: proc(doc:^Document,data:[]u8,allocator:=context.allocator,limit:=u64(DEFAULT_MEMORY_LIMIT)) -> Error {

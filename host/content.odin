@@ -333,9 +333,8 @@ content_animation_load :: proc(app:^App,id:base.Asset_Id,entry:^Content_Animatio
     content_animation_loops(&lib,count)
     for &marker,i in view.markers {markers[i]=base.name_hash(base.text_get(marker.name[:]))}
     for clip,i in view.clips {names[i]=clip.name;roots[i]=clip.root}
-    optimization:=anim.OPTIMIZE_DEFAULT;optimization.quantize=false
-    _,optimized:=anim.library_optimize(&lib,optimization)
-    if optimized!=.None {
+    open :: proc(data:rawptr,id:base.Asset_Id,file:^asset.Asset) -> bool {return assets_file((^Assets)(data),id,asset.KIND_SKELETON,file)==.None}
+    if _,compressed:=asset.animation_compress(view,&lib,&a.types,open,a);compressed!=.None {
         anim.library_destroy(&lib)
         delete(markers,c.allocator);delete(names,c.allocator);delete(roots,c.allocator)
         return false
@@ -359,14 +358,9 @@ content_sound_load :: proc(app:^App,id:base.Asset_Id,entry:^Content_Sound) -> bo
     }
     sound:audio.Sound
     failed:audio.Error
-    stream:=false
-    switch view.info.encoding {
-    case .PCM16:
-        sound,failed=audio.sound_create_pcm16(mixer,view.samples,int(view.info.channels),int(view.info.sample_rate))
-    case .File:
-        stream=.Stream in view.info.flags
-        if stream {sound,failed=audio.sound_stream(mixer,view.file)} else {sound,failed=audio.sound_load(mixer,view.file)}
-    }
+    data:=view.lossless if view.info.encoding==.Lossless else view.file
+    stream:=.Stream in view.info.flags
+    if stream {sound,failed=audio.sound_stream(mixer,data)} else {sound,failed=audio.sound_load(mixer,data)}
     if failed!=.None {
         asset.asset_close(&file)
         return false

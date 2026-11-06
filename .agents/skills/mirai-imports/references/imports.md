@@ -267,6 +267,10 @@ stores it by content in `.mirai/cache/textures`
   there, its levels are written with the id and the `Import_Info` of this import; if not, it is
   built and stored. The same image from another source, in another folder or with the settings of
   before is not compressed again. `rebuild` does not read the cache and rewrites it.
+- With `Import_Options.fast_textures` (the editor's imports) a texture takes the Final the cache
+  keeps for its key; without one it is built Fast under the key of Fast settings, and a texture
+  kept Fast is written again as soon as the cache holds its Final. `Import_Info.settings_hash`
+  says which of the two the file holds.
 - [Cooking](../../mirai-projects/references/build.md#asset-cooking) stores there the blocks of
   an RGBA8 texture by `textures.cache_key_blocks`.
 - `cache_read` checks hash and key: a damaged file or one of another `TEXTURE_VERSION` is a miss and
@@ -302,6 +306,9 @@ its fields are the options of `mirai import` (`IMPORT_USAGE`). What is not obvio
   down, as DirectX writes them, which is inverted when cooking. `alpha_coverage` is the cutoff of
   the `mask` material that samples it: each level keeps its [coverage](#textures-cooktextures).
   The images of a model take the cutoff of their materials.
+- `rdo_lambda` is how much error the [encoder](#textures-cooktextures) of textures in blocks
+  trades for files that compress smaller: zero is the default lambda and a negative value, which
+  `--rdo-lambda 0` writes, the least error.
 - `max_triangles` simplifies a mesh with more triangles down to them as a
   [level](#levels-of-detail), and that is its level 0.
 - `rig` gives a model a [template rig](#template-rigs-cookrig) (`Humanoid` or a Mesh2Motion
@@ -336,7 +343,8 @@ Each imported asset carries the `Cooked` flag and its `Import_Info` ([cache](#im
 - **Ids and owner.** Random the first time and the same afterwards; the [parts](#parts) name their
   prefab as `owner`. Dependencies come from the `Asset_Id`s that each asset names.
 - **Compression.** Texels go in BC blocks ([textures](#textures-cooktextures)); the bulk columns of
-  a mesh go in LZ4.
+  a mesh and the levels of a texture go in LZ
+  ([compression](../../mirai-assets/references/formats.md#compression)).
 - **Materials.** The `.mat` stores in `imported` what the source gives and in `material` what the
   material is ([two layers](../../mirai-assets/references/kinds.md#material)). Over the file of the
   previous import it rewrites `imported` and follows the source except in the fields that differ
@@ -501,15 +509,16 @@ libraries](../../mirai-physics/references/engine.md).
     BC1, and with alpha, BC3. A 16-bit source without `keep_precision` is compressed by use like an
     8-bit one.
   - It is stored linear except in 8-bit formats with `srgb` (`level_store`).
-- **Encoders** (`bc.odin`, `bc7.odin` and `bc6h.odin`, the only implementations): BC1 always uses
-  the four-color mode (no texel decodes transparent) and BC4 stores exact minimum and maximum. BC7
-  is a port of bc7e ([licenses](../../../../THIRD_PARTY_NOTICES.md#adapted-code)) that tries all
-  modes with the error in linear RGBA; an opaque block can decode alpha 254. BC6H writes mode 11:
-  principal axis and least squares in the 16-bit range in which the endpoints interpolate, and then
-  each endpoint channel moved in steps while the error drops, measured in the bits of the half
-  float; a block of another mode (which another tool would write) decodes black on the CPU. A large
-  BC7 or BC6H level spreads its block rows over a job system of the build's own. `asset` decodes
-  ([texture](../../mirai-assets/references/kinds.md#texture)).
+- **Encoder**: every block format goes through `cook/compressor/texture`
+  (`level_encode`, the only implementation), with the perceptual metric and the lambda of
+  `rdo_lambda`: the rate-distortion optimization picks blocks a little worse that repeat endpoints
+  and indices, so LZ (after BC7Split for BC7) compresses the file smaller. Each layer of a level
+  is one surface. Alpha keeps exact 0 and 255; a BC7 layer with every texel opaque is encoded
+  without alpha and decodes 255. BC1 may use the three-color mode, whose fourth color decodes
+  black with alpha 0: a BC1 map is read for its RGB. BC6H is encoded from half floats (light beyond
+  them clamped, a NaN 0) in any of its modes. On a worker of the job system the blocks of a level
+  go in parallel with scratch from the heap; a large level without one runs on a job system of the
+  build's own. `asset` decodes ([texture](../../mirai-assets/references/kinds.md#texture)).
 - **Devices without BC.** The file carries no alternative formats: `host` decodes the blocks when
   loading, to RGBA8 and BC6H to RGBA16F, when the device does not sample them or
   `texture_compression` is off; the renderer's limits discard large levels without re-encoding
@@ -746,12 +755,13 @@ this path. FBX 6 files are rejected with their version.
 WAV and Ogg Vorbis, mono or stereo) and writes `<name>.sound`, the root of its import
 ([identity](#identity-and-reimport)).
 
-- **Short: decoded.** Under `SOUND_STREAM_SECONDS` it is stored as `PCM16` at its frequency and
-  channels (a 16-bit WAV arrives bit for bit; anything else is rounded without dither): loading it
-  decodes nothing.
-- **Long: its file, streamed.** From that limit the file is stored as is with the `Stream` flag:
-  the mixer decodes it while it plays and it is never whole in memory. `Sound_Options` forces a
-  mode or changes the limit.
+- **Short: lossless, decoded on loading.** Under `SOUND_STREAM_SECONDS` its 16 bit samples, at
+  its frequency and channels, are stored `Lossless` (a 16-bit WAV arrives bit for bit; anything
+  else is rounded without dither) and decoded whole when it loads.
+- **Long: streamed.** From that limit it has the `Stream` flag: the mixer decodes it while it plays
+  and it is never whole in memory. A WAV whose samples are exactly 16 bit ones is stored
+  `Lossless`; an Ogg Vorbis, already lossy, and a WAV that 16 bits would round keep their file as
+  is. `Sound_Options` forces a mode or changes the limit.
 - **Intact Ogg.** `sound_build` keeps, from the first, the complete pages whose CRC matches: only
   those reach stb_vorbis and the streamed asset, because stb_vorbis does not check a page and, with
   a damaged one, reads outside its memory. With no intact one it is `Malformed`; a cut one keeps
@@ -761,8 +771,8 @@ WAV and Ogg Vorbis, mono or stereo) and writes `<name>.sound`, the root of its i
 
 ## Fonts
 
-`cook/import/font.odin`. `import_font` writes `<name>.font` with the bytes of the file as is (LZ4
-in the asset), the root of its import.
+`cook/import/font.odin`. `import_font` writes `<name>.font` with the bytes of the file as is
+(LZ in the asset), the root of its import.
 
 - It reads TrueType and OpenType with TrueType or CFF outlines, and before writing it opens it like
   the UI does (`ui.font_init`): what is imported loads.

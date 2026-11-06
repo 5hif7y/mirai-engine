@@ -18,7 +18,6 @@ import "core:hash"
 import "core:net"
 import "core:os"
 import "core:time"
-import "mirai:std/serial"
 
 TRACY_THREAD_ID :: u32(1) // the main thread and the GPU zones
 TRACY_MAX_SOURCES :: 256
@@ -296,7 +295,7 @@ tracy_client_handshake :: proc(client: ^Tracy_Client) -> bool {
 @(private="file")
 tracy_client_send_frame :: proc(client: ^Tracy_Client) -> bool {
 	if client.queue_len == 0 {return true}
-	lz4_len, ok := serial.lz4_compress(client.queue[:client.queue_len], client.compressed[4:])
+	lz4_len, ok := lz4_compress(client.queue[:client.queue_len], client.compressed[4:])
 	client.queue_len = 0
 	if !ok {return false}
 	value := u32(lz4_len)

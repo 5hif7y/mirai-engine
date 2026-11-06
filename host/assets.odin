@@ -462,8 +462,8 @@ assets_byte_limit :: proc(a:^Assets,path:string) -> u64 {
 // Opens the bytes of the file of an asset, which it takes: whole, matching its
 // hash, its id and its kind. Any thread.
 @(private="file")
-assets_file_take :: proc(file:^asset.Asset,data:[]u8,id:base.Asset_Id,kind:asset.Fourcc,allocator:mem.Allocator,limit:u64) -> asset.Error {
-    asset.asset_take(file,data,allocator,limit) or_return
+assets_file_take :: proc(file:^asset.Asset,data:[]u8,id:base.Asset_Id,kind:asset.Fourcc,allocator:mem.Allocator,limit:u64,decoder:^asset.Decoder=nil) -> asset.Error {
+    asset.asset_take(file,data,allocator,limit,decoder) or_return
     if !asset.blob_verify_hash(&file.blob) || file.blob.header.id!=id || file.blob.header.kind!=kind {
         asset.asset_close(file)
         return .Hash
@@ -503,12 +503,12 @@ assets_source :: proc(a:^Assets,id:base.Asset_Id,allocator:mem.Allocator) -> (so
 }
 
 // Opens the file of a source as assets_file does, taking its bytes. Any thread.
-assets_source_open :: proc(source:^Assets_Source,file:^asset.Asset) -> asset.Error {
+assets_source_open :: proc(source:^Assets_Source,file:^asset.Asset,decoder:^asset.Decoder=nil) -> asset.Error {
     data:=source.data
     source.data=nil
     limit:=source.limit!=0?source.limit:asset.DEFAULT_MEMORY_LIMIT
     if data==nil {data=asset.asset_file_read(source.path,source.allocator,limit) or_return}
-    return assets_file_take(file,data,source.id,source.kind,source.allocator,limit)
+    return assets_file_take(file,data,source.id,source.kind,source.allocator,limit,decoder)
 }
 
 assets_source_free :: proc(source:^Assets_Source) {
@@ -1035,10 +1035,13 @@ assets_texture_load :: proc(a:^Assets,id:base.Asset_Id,entry:^Assets_Texture,rep
     file:asset.Asset
     if problem,detail,ok=assets_open(a,id,.Texture,&file);!ok {return}
     defer asset.asset_close(&file)
-    view,view_error:=asset.texture_view(&file,&a.types)
+    view,view_error:=asset.texture_open(&file,&a.types)
     if view_error!=.None {return .Corrupt,view_error,false}
     levels:Assets_Levels
     defer assets_levels_free(&levels)
+    first:=0
+    if a.renderer!=nil {first,_=assets_texture_first(view,render.texture_limits(a.renderer),0)}
+    if view_error=asset.texture_decode(&file,&a.types,&view,first);view_error!=.None {return .Corrupt,view_error,false}
     if a.renderer!=nil {
         if problem,detail,ok=assets_texture_levels(view,render.texture_limits(a.renderer),0,&levels,a.allocator);!ok {return}
     }
@@ -1059,6 +1062,18 @@ assets_levels_free :: proc(levels:^Assets_Levels) {
     delete(levels.data.levels)
     delete(levels.decoded,levels.allocator)
     levels^={}
+}
+
+// The first level of a texture the renderer takes: `from`, or the first one
+// its side allows; for an array or a cube, the first one its side allows.
+// fits is false when not even the last one fits.
+@(private="file")
+assets_texture_first :: proc(view:asset.Texture_View,limits:render.Texture_Limits,from:int) -> (first:int,fits:bool) {
+    limit:=u32(limits.max_size)
+    for first+1<len(view.mips) && max(view.mips[first].width,view.mips[first].height)>limit {first+=1}
+    if max(view.mips[first].width,view.mips[first].height)>limit {return first,false}
+    if view.info.layers<=1 && .Cube not_in view.info.flags {first=max(first,min(from,len(view.mips)-1))}
+    return first,true
 }
 
 // The levels of a texture the renderer takes: from `from`, or the first one
@@ -1089,11 +1104,9 @@ assets_texture_levels :: proc(view:asset.Texture_View,limits:render.Texture_Limi
     case .BC6H:    data.format=.BC6H_Ufloat
     case .BC7:     data.format=srgb?.BC7_Srgb:.BC7_Unorm
     }
-    limit:=u32(limits.max_size)
-    first:=0
-    for first+1<len(view.mips) && max(view.mips[first].width,view.mips[first].height)>limit {first+=1}
-    if max(view.mips[first].width,view.mips[first].height)>limit {return .Unsupported,.None,false}
-    if !layered {first=max(first,min(from,len(view.mips)-1))}
+    first,fits:=assets_texture_first(view,limits,from)
+    if !fits {return .Unsupported,.None,false}
+    if first<view.first {return .Corrupt,.Invalid,false}
     data.width,data.height=int(view.mips[first].width),int(view.mips[first].height)
     data.layers,data.cube=layers,.Cube in info.flags
     data.level=first
@@ -1457,9 +1470,11 @@ Assets_Prepared :: struct {
 }
 
 // Reads the file of prepared.source and does what loading it does before the
-// renderer takes it. Any thread; types is of the thread and outlives nothing
-// of prepared.
-assets_prepare :: proc(prepared:^Assets_Prepared,limits:Assets_Limits,types:^asset.Types) {
+// renderer takes it. Any thread; types and decoder are of the thread and
+// outlive nothing of prepared.
+assets_prepare :: proc(prepared:^Assets_Prepared,limits:Assets_Limits,types:^asset.Types,decoder:^asset.Decoder=nil) {
+    // What reads the file after it, on another thread, decodes with a decoder of its own.
+    defer if !prepared.file.decoder_owned {prepared.file.decoder=nil}
     switch prepared.source.kind {
     case asset.KIND_MESH:     prepared.kind=.Mesh
     case asset.KIND_TEXTURE:  prepared.kind=.Texture
@@ -1468,7 +1483,7 @@ assets_prepare :: proc(prepared:^Assets_Prepared,limits:Assets_Limits,types:^ass
         prepared.problem,prepared.detail=.Wrong_Kind,.Invalid
         return
     }
-    if prepared.detail=assets_source_open(&prepared.source,&prepared.file);prepared.detail!=.None {
+    if prepared.detail=assets_source_open(&prepared.source,&prepared.file,decoder);prepared.detail!=.None {
         prepared.problem,_=assets_problem_of(prepared.detail)
         return
     }
@@ -1488,17 +1503,23 @@ assets_prepare :: proc(prepared:^Assets_Prepared,limits:Assets_Limits,types:^ass
         ahead,_:=render.mesh_ahead_make(g,max(len(prepared.mesh.slots),1),limits.software_rays,prepared.source.allocator,prepared.source.allocator)
         prepared.ahead=ahead
     case .Texture:
-        view,view_error:=asset.texture_view(&prepared.file,types)
+        view,view_error:=asset.texture_open(&prepared.file,types)
+        from,first:=0,0
+        if view_error==.None && limits.renderer {
+            from=prepared.level
+            if limits.tail {
+                for from+1<len(view.mips) && max(view.mips[from].width,view.mips[from].height)>render.TEXTURE_TAIL {from+=1}
+            }
+            // Only the levels it gives decode: the smallest lie at the start of the stream.
+            first,_=assets_texture_first(view,limits.texture,from)
+        }
+        if view_error==.None {view_error=asset.texture_decode(&prepared.file,types,&view,first)}
         if view_error!=.None {
             prepared.problem,prepared.detail=.Corrupt,view_error
             return
         }
         prepared.texture,prepared.ok,prepared.cost=view.info^,true,len(view.texels)
         if limits.renderer {
-            from:=prepared.level
-            if limits.tail {
-                for from+1<len(view.mips) && max(view.mips[from].width,view.mips[from].height)>render.TEXTURE_TAIL {from+=1}
-            }
             prepared.problem,prepared.detail,prepared.ok=assets_texture_levels(view,limits.texture,from,&prepared.levels,prepared.source.allocator)
             prepared.cost=0
             for level in prepared.levels.data.levels {prepared.cost+=len(level)}

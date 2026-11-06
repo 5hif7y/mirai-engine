@@ -355,6 +355,7 @@ clip_edit :: proc(s:^editor.Session,call:^api.Call) {
     name:=base.text_get(p.name[:])
     if name=="" {name=fmt.tprintf("%s edited",sampled.name[:min(len(sampled.name),56)])}
     clip:=clip_desc(sampled,frames,name,markers[:])
+    clip.skeleton=skeleton_file.file.blob.header.id
     // The new clip goes into a new file or among the clips of the asset.
     clips:[]aa.Animation_Clip_Desc
     target:=file

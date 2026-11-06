@@ -86,18 +86,18 @@ records_tables :: proc(doc:^Document,types:^Types,desc:Records_Desc,info:^Record
     document_put_row(doc,types,TABLE_RECORDS,info) or_return
     table:=document_table_add(doc,TABLE_ROWS) or_return
     document_resize(doc,table,len(desc.ids)) or_return
-    document_column_put(doc,types,table,"id",desc.ids,{},.LZ4) or_return
-    document_column_put(doc,types,table,"name",desc.names,{.Text},.LZ4) or_return
+    document_column_put(doc,types,table,"id",desc.ids,{},.LZ) or_return
+    document_column_put(doc,types,table,"name",desc.names,{.Text},.LZ) or_return
     link:serial.Schema_Import
     document_import_begin(doc,&link,desc.schema)
     defer serial.schema_import_destroy(&link)
     type:=document_import(doc,&link,desc.value_type)
     if type==serial.TYPE_NONE {return .Out_Of_Memory}
-    value:=document_column_add(doc,table,"value",type,{},.LZ4) or_return
+    value:=document_column_add(doc,table,"value",type,{},.LZ) or_return
     copy(doc.tables[table].columns[value].data,desc.images)
     doc.tables[table].key=ROWS_ID
-    document_put(doc,types,TABLE_RECORD_TEXTS,desc.texts,{},.LZ4) or_return
-    document_put(doc,types,TABLE_RECORD_TEXT,desc.text,{.Bulk},.LZ4) or_return
+    document_put(doc,types,TABLE_RECORD_TEXTS,desc.texts,{},.LZ) or_return
+    document_put(doc,types,TABLE_RECORD_TEXT,desc.text,{.Bulk},.LZ) or_return
     return .None
 }
 

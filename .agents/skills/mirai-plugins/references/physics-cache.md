@@ -22,7 +22,7 @@ geometry allocates. A rejected frame is not added.
   geometry (also the halves of a cut) and converts the world poses to the origin. With
   `Geometry_Unavailable` the piece is not prepared yet and the caller retries off the stable path.
 - `cache_save` writes atomically (`cache_document` builds the document without a file); the heavy
-  tables go in LZ4 and the materials generate the asset's dependencies. All ranges are validated
+  tables go in LZ and the materials generate the asset's dependencies. All ranges are validated
   on opening, without the `.fracture`, the handles or the world that produced the recording.
 - It also serves authored animated geometry: register the rigid meshes once and bake their
   transformations with `record_frame`. It is a bake of rigid pieces, not a cache of deformable

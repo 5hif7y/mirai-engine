@@ -10,7 +10,6 @@ import "mirai:host"
 import "mirai:std/base"
 import "mirai:std/jobs"
 import mm "mirai:std/math"
-import "mirai:std/serial"
 
 @(component,far)
 Terrain :: struct {
@@ -778,19 +777,20 @@ source_compare :: proc(next,s:^Source) -> (change:Change,ok:bool) {
         }
         change.changed=true
     }
-    scratch,error:=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),context.temp_allocator)
-    if error!=nil {return}
-    low,high,differ:=grid_take(&next.heights,&s.heights,scratch)
+    writer:Page_Writer
+    if !page_writer_init(&writer,context.temp_allocator) {return}
+    defer page_writer_destroy(&writer)
+    low,high,differ:=grid_take(&next.heights,&s.heights,&writer,true)
     if differ {widen(&change,low,high)}
     if len(next.holes.pages)!=len(s.holes.pages) {
         widen(&change,{},{last.x,0,last.z})
-    } else if low,high,differ=grid_take(&next.holes,&s.holes,scratch);differ {
+    } else if low,high,differ=grid_take(&next.holes,&s.holes,&writer,false);differ {
         widen(&change,low,high+{1,0,1})
     }
-    if low,high,differ=grid_take(&next.distances,&s.distances,scratch);differ {widen(&change,low,high)}
+    if low,high,differ=grid_take(&next.distances,&s.distances,&writer,false);differ {widen(&change,low,high)}
     if layers_reshape(next.info,s.info) {
         widen(&change,{},last)
-    } else if low,high,differ=grid_take(&next.weights,&s.weights,scratch);differ {
+    } else if low,high,differ=grid_take(&next.weights,&s.weights,&writer,false);differ {
         if next.kind==.Volume {widen(&change,low,high)} else {widen(&change,{low.x,0,low.z},{high.x,last.y,high.z})}
     }
     return change,true

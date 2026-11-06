@@ -125,6 +125,9 @@ automatic plugin `animation_physics` feeds the locomotion of each `Character`.
 - Runtime, editor and previews read the assets through the registry (`host.assets_file` by id,
   `asset.registry_read` by path), never the file by its path on disk, and notice a change by the
   registry revision; this way the preview and Play see what is unsaved.
+- The project's `.anim` keeps exact keys, which the editor edits; the editor and the game play
+  them compressed into samples, and a shipped game carries only those samples
+  ([storage](../mirai-std/references/anim-storage.md)).
 - Skinning runs on the GPU; morphs are deformed in the same pass.
 - What the runtime cannot do is a problem of the entity (`core.report` with an `animation.*` code
   and how to fix it), never a counter ([problems](references/animation.md#problems)). The functions

@@ -89,7 +89,7 @@ grid_page_own :: proc(g:^Grid($T),i:int,allocator:runtime.Allocator) -> bool {
     return true
 }
 
-// Where the values of a page are while they are not in memory: an LZ4 block
+// Where the values of a page are while they are not in memory: an LZ block
 // of the file of its source, or one of its own with what the page held when
 // it left with edits that file does not have.
 Page_Block :: struct {
@@ -112,14 +112,12 @@ Grid :: struct($T:typeid) {
     encoded:[]Page_Encoded, // the blocks grid_put_document made, kept by a writer that asks for them
 }
 
-// The LZ4 block of a page as it was last written, and the hash of the values
+// The LZ block of a page as it was last written, and the hash of the values
 // it holds: a page that still holds them is not compressed again.
 Page_Encoded :: struct {raw:u64,block:[]u8}
 
 @(private)
 Page_Record :: struct {fill:u32,size:u32,offset:u64,hash:u64}
-
-@(private) PAGE_BYTES_MAX :: PAGE_VALUES*4
 
 grid_side :: proc "contextless" (size:[3]int) -> [3]int {return size.y==1?{PAGE,1,PAGE}:{BLOCK,BLOCK,BLOCK}}
 
@@ -394,16 +392,7 @@ grid_diff :: proc(a,b:^Grid($T)) -> (low,high:[3]int,changed:bool) {
     return
 }
 
-// The values of a block into out, those of its page: false when the block is
-// not the one hashed or does not hold them.
-@(private)
-page_decode :: proc(block:[]u8,hash:u64,out:[]u8) -> bool {
-    if base.hash64(block)!=hash {return false}
-    size,ok:=serial.lz4_decompress(block,out)
-    return ok && size==len(out)
-}
-
-// The block of a page: its own, or the one in file.
+// The block of a page: its own, or the one in file read into out.
 @(private)
 page_block_read :: proc(block:Page_Block,file:string,out:[]u8) -> (bytes:[]u8,ok:bool) {
     if block.own!=nil {return block.own,true}
@@ -412,14 +401,16 @@ page_block_read :: proc(block:Page_Block,file:string,out:[]u8) -> (bytes:[]u8,ok
     return out[:block.size],true
 }
 
-// The pages of a grid as a table of records and a column of the LZ4 blocks
+// The pages of a grid as a table of records and a column of the LZ blocks
 // of the pages that are not uniform, stored as they are so that one page is
 // read alone. A page in its block in file is copied from there. valid checks
-// each value.
+// each value. quantize stores f32 values on the lattice of HEIGHT_STEP
+// (page_code): a page in a block of its own, which keeps them as they were,
+// is coded again.
 // With keep, the grid keeps each block it makes (encoded), and a page that
 // still holds the values of its kept block is not compressed again.
 @(private)
-grid_put_document :: proc(document:^asset.Document,types:^asset.Types,g:^Grid($T),pages_name,blocks_name:string,valid:proc "contextless" (value:T) -> bool,file:string,allocator:runtime.Allocator,keep:=false) -> asset.Error where size_of(T)<=4 {
+grid_put_document :: proc(document:^asset.Document,types:^asset.Types,g:^Grid($T),pages_name,blocks_name:string,valid:proc "contextless" (value:T) -> bool,file:string,allocator:runtime.Allocator,keep:=false,quantize:=false) -> asset.Error where size_of(T)<=4 {
     if keep && len(g.encoded)!=len(g.pages) {
         for encoded in g.encoded {delete(encoded.block,allocator)}
         delete(g.encoded,allocator)
@@ -431,9 +422,12 @@ grid_put_document :: proc(document:^asset.Document,types:^asset.Types,g:^Grid($T
     defer delete(records,allocator)
     blocks:=make([dynamic]u8,allocator)
     defer delete(blocks)
-    scratch,scratch_error:=make([]u8,serial.lz4_bound(PAGE_BYTES_MAX),allocator)
-    if scratch_error!=nil {return .Out_Of_Memory}
-    defer delete(scratch,allocator)
+    reader:Page_Reader
+    if !page_reader_init(&reader,allocator) {return .Out_Of_Memory}
+    defer page_reader_destroy(&reader,allocator)
+    writer:Page_Writer
+    if !page_writer_init(&writer,allocator) {return .Out_Of_Memory}
+    defer page_writer_destroy(&writer)
     decoded,decoded_error:=make([]T,PAGE_VALUES,allocator)
     if decoded_error!=nil {return .Out_Of_Memory}
     defer delete(decoded,allocator)
@@ -441,13 +435,26 @@ grid_put_document :: proc(document:^asset.Document,types:^asset.Types,g:^Grid($T
         if !valid(page.fill) {return .Invalid}
         values:=page.values
         block:[]u8
+        extent,count:=grid_page_extent(g,i)
         if grid_absent(g,i) {
-            _,count:=grid_page_extent(g,i)
-            read,read_ok:=page_block_read(g.blocks[i],file,scratch)
-            if !read_ok || !page_decode(read,g.blocks[i].hash,mem.slice_to_bytes(decoded[:count])) {return .IO}
-            values,block=decoded[:count],read
+            read,read_ok:=page_block_read(g.blocks[i],file,reader.block)
+            if !read_ok || !page_decode(read,g.blocks[i].hash,mem.slice_to_bytes(decoded[:count]),&reader.decoder,reader.coded) {return .IO}
+            values=decoded[:count]
+            if !quantize || g.blocks[i].own==nil {block=read}
         }
         fill:=page.fill
+        when T==f32 {
+            if quantize {
+                fill=height_quantize(fill)
+                if values!=nil {
+                    for value,k in values {
+                        if !valid(value) {return .Invalid}
+                        decoded[k]=height_quantize(value)
+                    }
+                    values=decoded[:count]
+                }
+            }
+        }
         if values!=nil {
             for value in values {if !valid(value) {return .Invalid}}
             fill=values[0]
@@ -461,20 +468,19 @@ grid_put_document :: proc(document:^asset.Document,types:^asset.Types,g:^Grid($T
             raw:=base.hash64(mem.slice_to_bytes(values))
             kept:=&g.encoded[i]
             if kept.block==nil || kept.raw!=raw {
-                size,ok:=serial.lz4_compress(mem.slice_to_bytes(values),scratch)
+                encoded,ok:=page_encode(&writer,values,extent.x,quantize)
                 if !ok {return .Out_Of_Memory}
                 delete(kept.block,allocator)
-                copied,error:=make([]u8,size,allocator)
+                copied,error:=make([]u8,len(encoded),allocator)
                 if error!=nil {kept^={};return .Out_Of_Memory}
-                copy(copied,scratch[:size])
+                copy(copied,encoded)
                 kept^={raw=raw,block=copied}
             }
             block=kept.block
         }
         if block==nil {
-            size,ok:=serial.lz4_compress(mem.slice_to_bytes(values),scratch)
-            if !ok {return .Out_Of_Memory}
-            block=scratch[:size]
+            ok:bool
+            if block,ok=page_encode(&writer,values,extent.x,quantize);!ok {return .Out_Of_Memory}
         }
         records[i].offset,records[i].size,records[i].hash=u64(len(blocks)),u32(len(block)),base.hash64(block)
         if append(&blocks,..block)!=len(block) {return .Out_Of_Memory}
@@ -506,17 +512,21 @@ grid_read_document :: proc(g:^Grid($T),file:^asset.Asset,types:^asset.Types,size
     if !grid_init(&next,size,T{},allocator) {return false}
     ok:=false
     defer if !ok {grid_destroy(&next,allocator)}
+    coded:[]u8
+    error:runtime.Allocator_Error
     if paged {
-        error:runtime.Allocator_Error
         if next.blocks,error=make([]Page_Block,len(records),allocator);error!=nil {return false}
+    } else {
+        if coded,error=make([]u8,PAGE_BYTES_MAX,allocator);error!=nil {return false}
     }
+    defer delete(coded,allocator)
     for record,i in records {
         bits:=record.fill
         fill:=(^T)(&bits)^
         if !valid(fill) {return false}
         next.pages[i].fill=fill
         if record.size==0 {continue}
-        if record.offset>stored || u64(record.size)>stored-record.offset || int(record.size)>serial.lz4_bound(PAGE_BYTES_MAX) {return false}
+        if record.offset>stored || u64(record.size)>stored-record.offset || int(record.size)>asset.pack_bound(PAGE_BYTES_MAX) {return false}
         if paged {
             next.blocks[i]={offset=entry.offset+record.offset,size=record.size,hash=record.hash}
             continue
@@ -525,7 +535,8 @@ grid_read_document :: proc(g:^Grid($T),file:^asset.Asset,types:^asset.Types,size
         page,made:=shared_make(T,count,allocator)
         if !made {return false}
         next.pages[i].values=page
-        if !page_decode(blocks[record.offset:][:record.size],record.hash,mem.slice_to_bytes(page)) {return false}
+        decoder,decoder_error:=asset.asset_decoder(file)
+        if decoder_error!=.None || !page_decode(blocks[record.offset:][:record.size],record.hash,mem.slice_to_bytes(page),&decoder.lz,coded) {return false}
         for value in page {if !valid(value) {return false}}
     }
     grid_destroy(g,allocator)

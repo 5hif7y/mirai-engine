@@ -13,7 +13,7 @@ import "vendor:stb/vorbis"
 @(private) STREAM_STEP_MAX :: ONE*8
 
 @(private)
-Decoder_Kind :: enum u8 {None,Wav,Vorbis}
+Decoder_Kind :: enum u8 {None,Wav,Vorbis,Lossless}
 @(private)
 Decoder :: struct {
     kind:Decoder_Kind,
@@ -22,7 +22,10 @@ Decoder :: struct {
     cursor:int,
     wav:Wav,
     vorbis:^vorbis.vorbis,
+    lossless:Lossless,
+    held:int,    // the lossless block decoded in memory; -1 when none
     memory:[]u8, // everything the Vorbis decoder allocates
+    planes:[]i32, // a decoded lossless block, channel after channel
 }
 @(private)
 Stream :: struct {
@@ -52,12 +55,22 @@ decoder_open :: proc(file:[]u8,allocator:runtime.Allocator) -> (d:Decoder,error:
         d.frames=int(vorbis.stream_length_in_samples(d.vorbis))
         return d,.None
     }
+    if len(file)>=4 && string(file[:4])==LOSSLESS_MAGIC {
+        d.lossless=lossless_parse(file) or_return
+        failed:runtime.Allocator_Error
+        if d.planes,failed=make([]i32,d.lossless.block_frames*d.lossless.channels,allocator);failed!=nil {return {},.Out_Of_Memory}
+        d.kind=.Lossless
+        d.channels=d.lossless.channels;d.sample_rate=d.lossless.sample_rate;d.frames=d.lossless.frames
+        d.held=-1
+        return d,.None
+    }
     return {},.Invalid_Data
 }
 @(private)
 decoder_close :: proc(d:^Decoder,allocator:runtime.Allocator) {
     if d.vorbis!=nil {vorbis.close(d.vorbis)}
     delete(d.memory,allocator)
+    delete(d.planes,allocator)
     d^={}
 }
 // Decodes up to len(out)/channels frames and returns how many; fewer means the end.
@@ -74,14 +87,41 @@ decoder_read :: proc(d:^Decoder,out:[]f32) -> int {
             if got<=0 {break}
             count+=got
         }
+    case .Lossless:
+        l:=&d.lossless
+        wanted:=min(len(out)/d.channels,l.frames-d.cursor)
+        for count<wanted {
+            at:=d.cursor+count
+            block:=at/l.block_frames
+            if block!=d.held {
+                // A damaged block plays as silence.
+                lossless_block(l,block,d.planes)
+                d.held=block
+            }
+            frames:=min(l.block_frames,l.frames-block*l.block_frames)
+            first:=at-block*l.block_frames
+            run:=min(wanted-count,frames-first)
+            lossless_convert(d.planes,l.block_frames,d.channels,first,run,out[count*d.channels:])
+            count+=run
+        }
     }
     d.cursor+=count
     return count
 }
+// The next frame decoder_read gives is frame; past the end, nothing is left.
 @(private)
-decoder_rewind :: proc(d:^Decoder) {
-    if d.kind==.Vorbis {vorbis.seek_start(d.vorbis)}
-    d.cursor=0
+decoder_seek :: proc(d:^Decoder,frame:int) {
+    frame:=max(frame,0)
+    switch d.kind {
+    case .None,.Lossless:
+    case .Wav:frame=min(frame,d.wav.frames)
+    case .Vorbis:
+        if frame==0 || vorbis.seek(d.vorbis,u32(min(frame,int(max(u32)))))==0 {
+            vorbis.seek_start(d.vorbis)
+            frame=0
+        }
+    }
+    d.cursor=frame
 }
 
 // A sound that is decoded while it plays, for music and long ambiences. The
@@ -106,10 +146,10 @@ stream_close :: proc(m:^Mixer,s:^Stream) {
 }
 
 // No voice plays the stream, so the audio thread does not look at it: it
-// starts over from the beginning with a full ring.
+// starts over from frame with a full ring.
 @(private)
-stream_begin :: proc(m:^Mixer,s:^Stream,loop:bool) {
-    decoder_rewind(&s.decoder)
+stream_begin :: proc(m:^Mixer,s:^Stream,loop:bool,frame:int) {
+    decoder_seek(&s.decoder,frame)
     s.loop=loop
     sync.atomic_store_explicit(&s.read,0,.Release)
     sync.atomic_store_explicit(&s.write,0,.Release)
@@ -136,7 +176,7 @@ stream_fill :: proc(m:^Mixer,s:^Stream) {
             sync.atomic_store_explicit(&s.ended,1,.Release)
             return
         }
-        decoder_rewind(&s.decoder)
+        decoder_seek(&s.decoder,0)
         rewound=true
     }
 }

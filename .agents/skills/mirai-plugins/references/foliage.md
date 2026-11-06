@@ -26,8 +26,14 @@ and stands it on a [ground](#ground) that another library writes. The automatic 
 
 [Assets](../../mirai-assets/references/formats.md) container, Fourcc `FOLI`, with the rows of
 `source.odin`: `foliage` (seed, revision, next type id, ids given to manual instances), `types`,
-`cells` of `CELL_SIZE` in x and z, and in LZ4 bulk `manual` and `overrides`, by ranges of each
+`cells` of `CELL_SIZE` in x and z, and in LZ bulk `manual` and `overrides`, by ranges of each
 cell.
+
+- `manual` and `overrides` are the byte planes of their records (byte j of every record, then
+  j+1), each 4-byte word coded by its `Code`: the id from the one before it, the position and the
+  point from the one before in its cell, the rotation with the low bytes of its components apart.
+  Every bit comes back as it was, in the same order; `source_bytes` and `source_read` are the only
+  writer and reader.
 
 - A type has a stable `id` that is never reused and names a `.mesh` (with the materials of its
   slots that it changes, or those of the mesh) or a prefab, without converting them.

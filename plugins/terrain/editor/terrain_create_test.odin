@@ -449,8 +449,8 @@ create_test_heightmap :: proc(t:^testing.T,kind:terrain.Source_Kind,depth:f32) {
     values:=[6]u16{0,1,255,256,32768,65535}
     if kind==.Heightfield {
         testing.expect_value(t,source.samples,[3]u32{3,1,2})
-        for value,i in values {testing.expect_value(t,terrain.source_value(&source,{i%3,0,i/3}),f32(value)/65535*20-3)}
-        testing.expect(t,terrain.source_value(&source,{1,0,0})>terrain.source_value(&source,{0,0,0}) && terrain.source_value(&source,{0,0,1})>terrain.source_value(&source,{2,0,0}))
+        // Its file keeps them to the step of its heights, finer than 8 bits.
+        for value,i in values {testing.expect_value(t,terrain.source_value(&source,{i%3,0,i/3}),terrain.height_quantize(f32(value)/65535*20-3))}
     } else {
         testing.expect_value(t,len(source.distances.pages),0)
         mesh:geom.Mesh_Buffer;geom.mesh_buffer_init(&mesh);defer geom.mesh_buffer_destroy(&mesh)

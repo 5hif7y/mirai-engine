@@ -105,10 +105,10 @@ cache_tables :: proc(doc:^asset.Document,types:^asset.Types,v:Cache_View) -> ass
     asset.document_put_row(doc,types,"cache",v.info) or_return
     asset.document_put(doc,types,"tracks",v.tracks) or_return
     asset.document_put(doc,types,"frames",v.frames) or_return
-    asset.document_put(doc,types,"samples",v.samples,{.Bulk},.LZ4) or_return
-    asset.document_put(doc,types,"vertices",v.vertices,{.Bulk},.LZ4) or_return
-    asset.document_put(doc,types,"indices",v.indices,{.Bulk},.LZ4) or_return
-    asset.document_put(doc,types,"materials",v.materials,{.Bulk},.LZ4) or_return
+    asset.document_put(doc,types,"samples",v.samples,{.Bulk},.LZ) or_return
+    asset.document_put(doc,types,"vertices",v.vertices,{.Bulk},.LZ) or_return
+    asset.document_put(doc,types,"indices",v.indices,{.Bulk},.LZ) or_return
+    asset.document_put(doc,types,"materials",v.materials,{.Bulk},.LZ) or_return
     return .None
 }
 

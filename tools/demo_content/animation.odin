@@ -275,7 +275,9 @@ mirai_animation :: proc(o:^Out,model:^importer.Imported_Model) -> (id:base.Asset
     for bone in ground_bones {if bone<0 {o.failed=true;return}}
     clips=make([]asset.Animation_Clip_Desc,len(model.animations),context.temp_allocator)
     copy(clips,model.animations)
+    skeleton:=imported_id(o,"source/models/mirai/mirai.glb",asset.KIND_SKELETON,model.skeletons[0].name)
     for &clip in clips {
+        clip.skeleton=skeleton
         mirai_hands(model,rig,&clip)
         if clip.name!="idle" && clip.name!="walk" && clip.name!="land" {continue}
         hip_track:=-1

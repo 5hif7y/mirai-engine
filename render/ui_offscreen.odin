@@ -457,7 +457,7 @@ posed_position :: proc(skin:^Skin_State,rest:Vec3,vertex:u32) -> Vec3 {
     if b.morph.count>0 && int(vertex)<len(b.morph.ranges) {
         span:=b.morph.ranges[vertex]
         for delta in b.morph.deltas[span.first:][:span.count] {
-            if int(delta.target)<len(skin.morph_weights) {position+=delta.position*skin.morph_weights[delta.target].x}
+            if int(delta.target)<len(skin.morph_weights) {position+=asset.morph_position(delta.position,b.morph.step)*skin.morph_weights[delta.target].x}
         }
     }
     if int(vertex)>=len(b.influences) {return position}

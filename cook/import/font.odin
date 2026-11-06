@@ -61,7 +61,7 @@ import_font :: proc(path,folder:string,options:Import_Options={},allocator:=cont
         target:=default_path(&w,&seen,name,".font")
         root:int
         if root,ok=earlier_root(&w,asset.KIND_FONT,source,info.source_size,info.source_hash);ok {
-            desc:=asset.Font_Desc{file=bytes,source=&info,compression=.LZ4}
+            desc:=asset.Font_Desc{file=bytes,source=&info,compression=.LZ}
             if root>=0 {desc.id,target=w.earlier[root].id,w.earlier[root].path} else {desc.id,target=writer_id(&w),fresh_path(&w,target)}
             existed:=os.exists(target)
             if save_error:=asset.font_save(target,&w.types,desc,context.temp_allocator);save_error!=.None {

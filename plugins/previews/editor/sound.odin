@@ -97,11 +97,7 @@ sound_sync :: proc(s:^editor.Session,app:^host.App,p:^Sound) {
         view,error:=asset.sound_view(&file,&a.types)
         if error!=.None {return}
         p.info=view.info^
-        channels:=int(view.info.channels)
-        if view.info.encoding==.PCM16 {
-            peaks_fill(&p.peaks,view.samples,channels,int(view.info.sample_rate),1.0/32768)
-            p.seconds=f32(len(view.samples)/max(channels,1))/f32(view.info.sample_rate)
-        } else if pcm,decoded:=mixer.decode(view.file,context.allocator);decoded==.None {
+        if pcm,decoded:=mixer.decode(view.lossless if view.info.encoding==.Lossless else view.file,context.allocator);decoded==.None {
             peaks_fill(&p.peaks,pcm.samples,pcm.channels,pcm.sample_rate,1)
             p.seconds=f32(len(pcm.samples)/max(pcm.channels,1))/f32(max(pcm.sample_rate,1))
             mixer.pcm_destroy(&pcm,context.allocator)
@@ -215,8 +211,7 @@ sound_document :: proc(s:^editor.Session,previews:^Previews,app:^host.App,d:^edi
 sound_facts :: proc(s:^editor.Session,p:^Sound) {
     ctx:=s.gui.ctx
     th:=&ctx.theme
-    stored:="Decoded when it loads"
-    if .Stream in p.info.flags {stored="Decoded while it plays"} else if p.info.encoding==.File {stored="Decoded whole when it loads"}
+    stored:="Decoded while it plays" if .Stream in p.info.flags else "Decoded whole when it loads"
     facts:=[4][2]string{
         {"Length",fmt.tprintf("%.2f s",p.seconds)},
         {"Channels",p.info.channels==2?"Stereo":"Mono"},

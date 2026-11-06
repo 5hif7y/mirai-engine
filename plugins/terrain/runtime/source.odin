@@ -12,7 +12,7 @@ import "mirai:std/serial"
 
 KIND :: asset.Fourcc(u32('T')|u32('E')<<8|u32('R')<<16|u32('R')<<24)
 EXTENSION :: ".terrain"
-VERSION :: 8
+VERSION :: 9
 HEIGHT_SAMPLES_MAX :: 16385
 MESH_SAMPLES_MAX :: 1025
 VOLUME_SAMPLES_MAX :: 129
@@ -251,7 +251,7 @@ source_bytes :: proc(s:^Source,id:base.Asset_Id,types:^asset.Types,allocator:=co
     info:=s.info
     asset.document_put_row(&document,types,"terrain",&info) or_return
     if s.kind==.Heightfield {
-        grid_put_document(&document,types,&s.heights,"height_pages","height_blocks",height_valid,s.file,s.allocator,keep) or_return
+        grid_put_document(&document,types,&s.heights,"height_pages","height_blocks",height_valid,s.file,s.allocator,keep,quantize=true) or_return
     } else {
         grid_put_document(&document,types,&s.distances,"distance_pages","distance_blocks",distance_finite,s.file,s.allocator) or_return
     }

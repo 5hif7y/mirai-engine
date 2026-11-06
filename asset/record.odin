@@ -90,11 +90,14 @@ Asset :: struct {
     allocator:runtime.Allocator,
     view:Scene_View,      // of a scene or prefab, read once with view_types
     view_types:^Types,
+    decoder:^Decoder,     // lent by whoever reads, else made by asset_decoder and owned
+    decoder_owned:bool,
 }
 
-// Opens an asset held in memory. data is borrowed.
-asset_open :: proc(a:^Asset,data:[]u8,allocator:=context.allocator,limit:=u64(DEFAULT_MEMORY_LIMIT)) -> Error {
-    a^={allocator=allocator}
+// Opens an asset held in memory. data is borrowed, and so is decoder, which
+// decodes its compressed chunks.
+asset_open :: proc(a:^Asset,data:[]u8,allocator:=context.allocator,limit:=u64(DEFAULT_MEMORY_LIMIT),decoder:^Decoder=nil) -> Error {
+    a^={allocator=allocator,decoder=decoder}
     a.owned=make([dynamic][]u8,allocator)
     a.hashes=make([dynamic]u64,allocator)
     error:=asset_parse(a,data,limit)
@@ -103,16 +106,16 @@ asset_open :: proc(a:^Asset,data:[]u8,allocator:=context.allocator,limit:=u64(DE
 }
 
 // Reads a file into memory aligned for its chunks and opens it.
-asset_load :: proc(a:^Asset,path:string,allocator:=context.allocator,limit:=u64(DEFAULT_MEMORY_LIMIT)) -> Error {
+asset_load :: proc(a:^Asset,path:string,allocator:=context.allocator,limit:=u64(DEFAULT_MEMORY_LIMIT),decoder:^Decoder=nil) -> Error {
     a^={}
     file:=asset_file_read(path,allocator,limit) or_return
-    return asset_take(a,file,allocator,limit)
+    return asset_take(a,file,allocator,limit,decoder)
 }
 
 // Opens an asset held in memory that it takes: asset_close frees data, and so
 // does a failure. data comes from allocator, aligned for its chunks.
-asset_take :: proc(a:^Asset,data:[]u8,allocator:=context.allocator,limit:=u64(DEFAULT_MEMORY_LIMIT)) -> Error {
-    error:=asset_open(a,data,allocator,limit)
+asset_take :: proc(a:^Asset,data:[]u8,allocator:=context.allocator,limit:=u64(DEFAULT_MEMORY_LIMIT),decoder:^Decoder=nil) -> Error {
+    error:=asset_open(a,data,allocator,limit,decoder)
     if error!=.None {
         mem.free_bytes(data,allocator)
         return error
@@ -159,7 +162,25 @@ asset_close :: proc(a:^Asset) {
     delete(a.owned);delete(a.hashes)
     if a.schema.allocator.procedure!=nil {serial.schema_destroy(&a.schema)}
     mem.free_bytes(a.file,a.allocator)
+    if a.decoder_owned {
+        decoder_destroy(a.decoder)
+        free(a.decoder,a.allocator)
+    }
     a^={}
+}
+
+// The decoder of the asset: the one it was lent, or its own, made the first
+// time it is needed.
+asset_decoder :: proc(a:^Asset) -> (decoder:^Decoder,error:Error) {
+    if a.decoder!=nil {return a.decoder,.None}
+    allocation:mem.Allocator_Error
+    if decoder,allocation=new(Decoder,a.allocator);allocation!=nil {return nil,.Out_Of_Memory}
+    if error=decoder_init(decoder,a.allocator);error!=.None {
+        free(decoder,a.allocator)
+        return nil,error
+    }
+    a.decoder,a.decoder_owned=decoder,true
+    return decoder,.None
 }
 
 @(private)
@@ -183,15 +204,17 @@ asset_chunk :: proc(a:^Asset,index:int,alignment:int) -> (data:[]u8,error:Error)
         if len(stored)==0 || uintptr(raw_data(stored))&uintptr(alignment-1)==0 {return stored,.None}
     }
     data=asset_alloc(a,int(entry.uncompressed_size),alignment) or_return
-    blob_read(&a.blob,entry,data) or_return
+    decoder:^Decoder
+    if entry.compression!=.None {decoder=asset_decoder(a) or_return}
+    blob_read(&a.blob,entry,data,decoder) or_return
     return data,.None
 }
 
 // Opens the front of an asset file: everything up to the chunks a caller
 // reads, which the bulk data follows. Reaching a chunk past it is Truncated.
 @(private)
-asset_open_front :: proc(a:^Asset,data:[]u8,allocator:=context.allocator) -> Error {
-    a^={allocator=allocator}
+asset_open_front :: proc(a:^Asset,data:[]u8,allocator:=context.allocator,decoder:^Decoder=nil) -> Error {
+    a^={allocator=allocator,decoder=decoder}
     a.owned=make([dynamic][]u8,allocator)
     a.hashes=make([dynamic]u64,allocator)
     error:=asset_parse(a,data,DEFAULT_MEMORY_LIMIT,front=true)
@@ -202,7 +225,7 @@ asset_open_front :: proc(a:^Asset,data:[]u8,allocator:=context.allocator) -> Err
 // Reads the front of an asset file, everything but its bulk columns: those
 // stay in the file, to be read by range at the offset of their chunk.
 // Reaching a bulk column is Truncated, and the content hash is not checked.
-asset_load_front :: proc(a:^Asset,path:string,allocator:=context.allocator) -> Error {
+asset_load_front :: proc(a:^Asset,path:string,allocator:=context.allocator,decoder:^Decoder=nil) -> Error {
     a^={}
     head:[REGISTRY_HEAD]u8
     bytes,size,read_error:=serial.file_read_head(path,head[:])
@@ -210,7 +233,7 @@ asset_load_front :: proc(a:^Asset,path:string,allocator:=context.allocator) -> E
     header:=header_read(bytes) or_return
     if header.total_size!=u64(size) {return .Truncated}
     front:=front_read(path,bytes,header,true,allocator) or_return
-    if error:=asset_open_front(a,front,allocator);error!=.None {mem.free_bytes(front,allocator);return error}
+    if error:=asset_open_front(a,front,allocator,decoder);error!=.None {mem.free_bytes(front,allocator);return error}
     a.file=front
     return .None
 }

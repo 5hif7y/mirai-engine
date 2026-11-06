@@ -174,19 +174,19 @@ bake_bytes :: proc(n:^Navigation,id:base.Asset_Id,types:^asset.Types,filter:=BAK
     asset.document_put(&document,types,"classes",classes[:]) or_return
     asset.document_put(&document,types,"tiles",tiles[:]) or_return
     asset.document_put(&document,types,"links",links[:]) or_return
-    asset.document_put(&document,types,"vertices",vertices[:],{.Bulk},.LZ4) or_return
-    asset.document_put(&document,types,"polys",polys[:],{.Bulk},.LZ4) or_return
-    asset.document_put(&document,types,"details",details[:],{.Bulk},.LZ4) or_return
-    asset.document_put(&document,types,"detail_vertices",detail_vertices[:],{.Bulk},.LZ4) or_return
-    asset.document_put(&document,types,"detail_triangles",triangles[:],{.Bulk},.LZ4) or_return
-    asset.document_put(&document,types,"bv",bv[:],{.Bulk},.LZ4) or_return
+    asset.document_put(&document,types,"vertices",vertices[:],{.Bulk},.LZ) or_return
+    asset.document_put(&document,types,"polys",polys[:],{.Bulk},.LZ) or_return
+    asset.document_put(&document,types,"details",details[:],{.Bulk},.LZ) or_return
+    asset.document_put(&document,types,"detail_vertices",detail_vertices[:],{.Bulk},.LZ) or_return
+    asset.document_put(&document,types,"detail_triangles",triangles[:],{.Bulk},.LZ) or_return
+    asset.document_put(&document,types,"bv",bv[:],{.Bulk},.LZ) or_return
     asset.document_put(&document,types,"zones",zones[:]) or_return
-    asset.document_put(&document,types,"nodes",nodes[:],{.Bulk},.LZ4) or_return
-    asset.document_put(&document,types,"voxels",voxels[:],{.Bulk},.LZ4) or_return
+    asset.document_put(&document,types,"nodes",nodes[:],{.Bulk},.LZ) or_return
+    asset.document_put(&document,types,"voxels",voxels[:],{.Bulk},.LZ) or_return
     asset.document_put(&document,types,"regions",regions[:]) or_return
     asset.document_put(&document,types,"portals",portals[:]) or_return
     asset.document_put(&document,types,"ways",ways[:]) or_return
-    asset.document_put(&document,types,"corners",corners[:],{.Bulk},.LZ4) or_return
+    asset.document_put(&document,types,"corners",corners[:],{.Bulk},.LZ) or_return
     return asset.document_bytes(&document,allocator)
 }
 

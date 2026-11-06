@@ -416,12 +416,12 @@ source_mesh_bytes :: proc(s:^Source,id:base.Asset_Id,types:^asset.Types,allocato
     info:=s.info
     asset.document_put_row(&document,types,"terrain",&info) or_return
     asset.document_put(&document,types,"chunks",records) or_return
-    asset.document_put(&document,types,"positions",mesh.positions[:],{.Bulk},.LZ4,asset.MESH_BULK_ALIGNMENT) or_return
-    asset.document_put(&document,types,"normals",mesh.normals[:],{.Bulk},.LZ4,asset.MESH_BULK_ALIGNMENT) or_return
-    asset.document_put(&document,types,"uvs",mesh.uvs[:],{.Bulk},.LZ4,asset.MESH_BULK_ALIGNMENT) or_return
-    asset.document_put(&document,types,"colors",mesh.colors[:],{.Bulk},.LZ4,asset.MESH_BULK_ALIGNMENT) or_return
-    asset.document_put(&document,types,"indices",mesh.indices[:],{.Bulk},.LZ4,asset.MESH_BULK_ALIGNMENT) or_return
-    asset.document_put(&document,types,"face_materials",mesh.materials[:],{.Bulk},.LZ4,asset.MESH_BULK_ALIGNMENT) or_return
+    asset.document_put(&document,types,"positions",mesh.positions[:],{.Bulk},.LZ,asset.MESH_BULK_ALIGNMENT) or_return
+    asset.document_put(&document,types,"normals",mesh.normals[:],{.Bulk},.LZ,asset.MESH_BULK_ALIGNMENT) or_return
+    asset.document_put(&document,types,"uvs",mesh.uvs[:],{.Bulk},.LZ,asset.MESH_BULK_ALIGNMENT) or_return
+    asset.document_put(&document,types,"colors",mesh.colors[:],{.Bulk},.LZ,asset.MESH_BULK_ALIGNMENT) or_return
+    asset.document_put(&document,types,"indices",mesh.indices[:],{.Bulk},.LZ,asset.MESH_BULK_ALIGNMENT) or_return
+    asset.document_put(&document,types,"face_materials",mesh.materials[:],{.Bulk},.LZ,asset.MESH_BULK_ALIGNMENT) or_return
     asset.document_put(&document,types,"slots",s.slots) or_return
     source_weights_put(&document,types,s) or_return
     asset.import_put(&document,types,import_info) or_return

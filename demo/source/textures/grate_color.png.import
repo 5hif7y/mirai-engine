@@ -1,11 +1,16 @@
 {
   "max_texture_size": 0,
   "textures": "Blocks",
+  "rdo_lambda": 0,
   "image": "Color",
   "alpha_coverage": 0.5,
   "lods": "Auto",
   "max_triangles": 0,
   "collision": "None",
+  "force_collision": false,
   "collision_hulls": 0,
-  "parts": "Auto"
+  "parts": "Auto",
+  "rig": "Source",
+  "rig_crotch": 0,
+  "rig_neck": 0
 }

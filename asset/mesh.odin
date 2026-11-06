@@ -4,6 +4,7 @@ import "core:mem"
 import "mirai:std/base"
 import "mirai:std/geom"
 import mm "mirai:std/math"
+import "mirai:std/compressor/lz"
 import "mirai:std/serial"
 
 // .mesh: geometry as the renderer draws and traces it, in clusters, with what
@@ -13,7 +14,7 @@ import "mirai:std/serial"
 //   clusters   bulk    Cluster: up to CLUSTER_TRIANGLES triangles of one slot and their vertices
 //   levels             Mesh_Level: the clusters of each level, finest first
 //   pages      bulk    Mesh_Page: runs of clusters of one level and their vertices and triangles
-//   page_data  bulk    the block of each page (mesh_page_layout), one LZ4 block a page
+//   page_data  bulk    the block of each page (mesh_page_layout), coded, then LZ
 //   vertices   bulk    skin (Skin_Vertex) of each vertex, on a skinned mesh
 //   slots              Material_Slot: the materials the model names
 //   joints             mapping to the skeleton and this mesh's inverse binds
@@ -25,8 +26,8 @@ import "mirai:std/serial"
 // draws the clusters whose own error is within its threshold and whose
 // parent's is not. The levels of a skinned mesh, or of foliage pruned by
 // islands, are whole meshes (Levels) whose clusters share one sphere, so the
-// same test picks one of them. Every bulk column is LZ4 but page_data, whose
-// pages are LZ4 one by one.
+// same test picks one of them. Every bulk column is LZ but page_data, whose
+// pages are coded and LZ one by one.
 //
 // A page holds whole groups of one level (the clusters that share a parent)
 // while its block fits in MESH_PAGE_WORDS; a group of a DAG never spans two.
@@ -46,7 +47,7 @@ import "mirai:std/serial"
 // Skin vertices are immutable bind-space geometry. The palette transforms them
 // by inverse(mesh_node_world) * joint_world * inverse_bind.
 
-MESH_VERSION :: 6
+MESH_VERSION :: 10
 MESH_MAX_SLOTS :: 32
 MESH_MAX_LEVELS :: 32
 MESH_RAY_LEVELS :: 4 // the level 0 rays trace near, and up to three coarser cuts of the DAG for far away
@@ -140,6 +141,7 @@ Mesh_Info :: struct {
     uv_step,uv1_step:f32,
     ray_errors:[MESH_RAY_LEVELS-1]f32 `mirai:"unit=m"`, // the errors of the cuts rays trace far away, coarser each; 0: no more
     root_page:u32, // pages from it on are the root, always resident
+    morph_step:f32 `mirai:"unit=m"`, // of the positions of morph_deltas, a power of two; 0 without targets
 }
 
 Mesh_Level :: struct {
@@ -157,8 +159,9 @@ Mesh_Page :: struct {
     first_triangle,triangle_words:u32,
     level:u32,       // row of levels
     words:u32,       // of its block decoded (mesh_page_layout)
-    data_offset:u32, // byte of page_data its LZ4 block starts at
-    data_bytes:u32,
+    data_offset:u32, // byte of page_data its block starts at
+    data_bytes:u32,  // of its block in LZ
+    coded_bytes:u32, // of its block coded: what data_bytes decode to; 0 for its words as they are
 }
 
 // Where each stream of the block of a page starts, in words: its vertices
@@ -209,7 +212,8 @@ Mesh_Geometry :: struct {
     pages:[]Mesh_Page,
     page_data:[]u8, // the blocks of the pages: of a file, or packed (mesh_pages_pack); empty for what mesh_build made
     morphs:[]Morph_Target,
-    morph_deltas:[]Morph_Delta,
+    morph_deltas:[]Morph_Cluster_Delta,
+    morph_step:f32,
     bounds_min,bounds_max:[3]f32,
     flags:Mesh_Flags,
     position_step,uv_step,uv1_step:f32,
@@ -330,26 +334,14 @@ mesh_page_gather :: proc(g:Mesh_Geometry,page:Mesh_Page,out:[]u32) -> bool {
     return true
 }
 
-// Decodes the block of a page from page_data, the blocks of every page of
-// its mesh (Mesh_Geometry.page_data), into out[:page.words]. False for a
-// page whose block is not inside page_data or does not decode to its words.
-mesh_page_decode :: proc(flags:Mesh_Flags,page:Mesh_Page,page_data:[]u8,out:[]u32) -> bool {
-    if !page_block_valid(flags,page,len(page_data)) || page.data_bytes==0 || len(out)<int(page.words) {return false}
-    target:=mem.slice_to_bytes(out[:page.words])
-    size,ok:=serial.lz4_decompress(page_data[page.data_offset:][:page.data_bytes],target)
-    return ok && size==len(target)
-}
-
 // Whether the block of a page has the words of its layout, within
-// MESH_PAGE_WORDS, inside page_data of size bytes and with as many words as
-// an LZ4 block of its bytes can reach. A page of a geometry that has no
-// page_data names no bytes.
-@(private="file")
+// MESH_PAGE_WORDS, inside page_data of size bytes. A page of a geometry that
+// has no page_data names no bytes.
+@(private)
 page_block_valid :: proc "contextless" (flags:Mesh_Flags,page:Mesh_Page,size:int) -> bool {
     if page.vertex_count>MESH_PAGE_WORDS || page.triangle_words>MESH_PAGE_WORDS || page.words>MESH_PAGE_WORDS {return false}
     if mesh_page_layout(flags,page.vertex_count,page.triangle_words).words!=page.words {return false}
-    if !range_inside(page.data_offset,page.data_bytes,size) {return false}
-    return size==0 || u64(page.words)*4<=u64(page.data_bytes)*255
+    return range_inside(page.data_offset,page.data_bytes,size)
 }
 
 // The streams of a decoded block into the arrays of g.
@@ -383,7 +375,7 @@ mesh_document :: proc(doc:^Document,types:^Types,desc:Mesh_Desc,allocator:=conte
     info:=Mesh_Info{
         vertex_count=u32(len(g.vertices)),cluster_count=u32(len(g.clusters)),bounds_min=g.bounds_min,bounds_max=g.bounds_max,
         flags=g.flags,skeleton=desc.skeleton,position_step=g.position_step,uv_step=g.uv_step,uv1_step=g.uv1_step,ray_errors=g.ray_errors,
-        root_page=g.root_page,
+        root_page=g.root_page,morph_step=g.morph_step,
     }
     for c in g.clusters {info.triangle_count+=cluster_triangle_count(c)}
     if len(desc.joints)>0 {info.flags+={.Skinned}}
@@ -401,7 +393,7 @@ mesh_document :: proc(doc:^Document,types:^Types,desc:Mesh_Desc,allocator:=conte
 @(private="file")
 mesh_tables :: proc(doc:^Document,types:^Types,info:^Mesh_Info,view:Mesh_View,desc:Mesh_Desc) -> Error {
     bulk :: proc(doc:^Document,types:^Types,name:string,values:[]$T) -> Error {
-        _,error:=document_put(doc,types,name,values,{.Bulk},.LZ4,MESH_BULK_ALIGNMENT)
+        _,error:=document_put(doc,types,name,values,{.Bulk},.LZ,MESH_BULK_ALIGNMENT)
         return error
     }
     document_put_row(doc,types,"mesh",info) or_return
@@ -424,38 +416,13 @@ mesh_tables :: proc(doc:^Document,types:^Types,info:^Mesh_Info,view:Mesh_View,de
     if len(view.skin)>0 {
         vertices:=document_table_add(doc,"vertices",{.Bulk}) or_return
         document_resize(doc,vertices,len(view.skin)) or_return
-        document_column_put(doc,types,vertices,"skin",view.skin,{},.LZ4,MESH_BULK_ALIGNMENT) or_return
+        document_column_put(doc,types,vertices,"skin",view.skin,{},.LZ,MESH_BULK_ALIGNMENT) or_return
     }
-    pages,data:=pages_compress(view.geometry,doc.allocator) or_return
+    pages,data:=pages_compress(view.geometry,.Edit,doc.allocator) or_return
     defer {delete(pages,doc.allocator);delete(data)}
     bulk(doc,types,"pages",pages) or_return
     _,error:=document_put(doc,types,"page_data",data[:],{.Bulk},.None,MESH_BULK_ALIGNMENT)
     return error
-}
-
-// The pages of g with the LZ4 block of each, one after the other in data.
-@(private="file")
-pages_compress :: proc(g:Mesh_Geometry,allocator:=context.allocator) -> (pages:[]Mesh_Page,data:[dynamic]u8,error:Error) {
-    allocation:mem.Allocator_Error
-    pages,allocation=make([]Mesh_Page,len(g.pages),allocator)
-    if allocation!=nil {return nil,nil,.Out_Of_Memory}
-    data=make([dynamic]u8,allocator)
-    block:=make([]u32,MESH_PAGE_WORDS,context.temp_allocator)
-    if block==nil {delete(pages,allocator);return nil,nil,.Out_Of_Memory}
-    copy(pages,g.pages)
-    for &page in pages {
-        mesh_page_gather(g,page,block)
-        source:=mem.slice_to_bytes(block[:page.words])
-        at:=len(data)
-        if at+serial.lz4_bound(len(source))>int(max(u32)) || resize(&data,at+serial.lz4_bound(len(source)))!=nil {
-            delete(pages,allocator);delete(data)
-            return nil,nil,.Out_Of_Memory
-        }
-        size,_:=serial.lz4_compress(source,data[at:])
-        resize(&data,at+size)
-        page.data_offset,page.data_bytes=u32(at),u32(size)
-    }
-    return
 }
 
 // The blocks of the pages of geometry mesh_build made, as a file holds them
@@ -463,11 +430,50 @@ pages_compress :: proc(g:Mesh_Geometry,allocator:=context.allocator) -> (pages:[
 // root is not every page as it does one of a file. In allocator, with
 // scratch from the temporary allocator; false without memory.
 mesh_pages_pack :: proc(g:^Mesh_Geometry,allocator:=context.allocator) -> bool {
-    pages,data,error:=pages_compress(g^,allocator)
+    pages,data,error:=pages_compress(g^,.Edit,allocator)
     if error!=.None {return false}
     delete(g.pages,allocator)
     g.pages,g.page_data=pages,data[:]
     return true
+}
+
+// The page_data of a mesh document with the block of each page compressed
+// again as p says, and its pages pointing into it.
+@(private)
+mesh_pages_repack :: proc(doc:^Document,p:Pack) -> Error {
+    pages_table,has_pages:=document_table(doc,"pages")
+    data_table,has_data:=document_table(doc,"page_data")
+    if !has_pages || !has_data {return .None}
+    if doc.kind_version!=MESH_VERSION {return .Version}
+    info_table,has_info:=document_table(doc,"mesh")
+    clusters_table,has_clusters:=document_table(doc,"clusters")
+    if !has_info || !has_clusters {return .Corrupt}
+    pages_column,data_column:=&doc.tables[pages_table].columns[0],&doc.tables[data_table].columns[0]
+    info_column,clusters_column:=&doc.tables[info_table].columns[0],&doc.tables[clusters_table].columns[0]
+    if pages_column.size!=size_of(Mesh_Page) || data_column.size!=1 || info_column.size!=size_of(Mesh_Info) || len(info_column.data)!=size_of(Mesh_Info) || clusters_column.size!=size_of(Cluster) {return .Corrupt}
+    pages:=mem.slice_data_cast([]Mesh_Page,pages_column.data)
+    g:=Mesh_Geometry{flags=mem.slice_data_cast([]Mesh_Info,info_column.data)[0].flags,clusters=mem.slice_data_cast([]Cluster,clusters_column.data)}
+    decoder:Decoder
+    decoder_init(&decoder,context.temp_allocator) or_return
+    defer decoder_destroy(&decoder)
+    encoder:lz.Encoder
+    lz.encoder_init(&encoder,context.temp_allocator)
+    defer lz.encoder_destroy(&encoder)
+    coder:=page_coder_make(context.temp_allocator)
+    defer page_coder_destroy(&coder)
+    coded:=make([]u8,MESH_PAGE_SCRATCH_BYTES,context.temp_allocator)
+    block:=make([]u32,MESH_PAGE_WORDS,context.temp_allocator)
+    data:=make([dynamic]u8,0,len(data_column.data),context.temp_allocator)
+    if coded==nil || block==nil || data==nil {return .Out_Of_Memory}
+    old:=data_column.data
+    for &page in pages {
+        if page.data_bytes==0 {continue}
+        if !mesh_page_decode(g.flags,page,old,coded,block,&decoder.lz) || u64(page.first_cluster)+u64(page.cluster_count)>u64(len(g.clusters)) {return .Corrupt}
+        page_pack(&coder,&encoder,g,&page,block,coded,p,&data) or_return
+    }
+    document_resize(doc,data_table,len(data)) or_return
+    copy(doc.tables[data_table].columns[0].data,data[:])
+    return .None
 }
 
 mesh_save :: proc(path:string,types:^Types,desc:Mesh_Desc,allocator:=context.allocator) -> Error {
@@ -491,7 +497,7 @@ mesh_view :: proc(a:^Asset,types:^Types) -> (view:Mesh_View,error:Error) {
     view.slots=table_rows(a,types,"slots",Material_Slot) or_return
     view.joints=table_rows(a,types,"joints",Rig_Joint) or_return
     view.morphs=table_rows(a,types,"morphs",Morph_Target) or_return
-    view.morph_deltas=table_rows(a,types,"morph_deltas",Morph_Delta) or_return
+    view.morph_deltas=table_rows(a,types,"morph_deltas",Morph_Cluster_Delta) or_return
     view.colliders=table_rows(a,types,"colliders",Collider) or_return
     view.collision_points=table_rows(a,types,"collision_points",[3]f32) or_return
     view.collision_indices=table_rows(a,types,"collision_indices",u32) or_return
@@ -499,7 +505,7 @@ mesh_view :: proc(a:^Asset,types:^Types) -> (view:Mesh_View,error:Error) {
     info:=view.info
     view.bounds_min,view.bounds_max,view.flags=info.bounds_min,info.bounds_max,info.flags
     view.position_step,view.uv_step,view.uv1_step,view.ray_errors=info.position_step,info.uv_step,info.uv1_step,info.ray_errors
-    view.root_page=info.root_page
+    view.root_page,view.morph_step=info.root_page,info.morph_step
     pages_decode(a,&view) or_return
     if !mesh_check(view) {return {},.Corrupt}
     return view,.None
@@ -533,8 +539,12 @@ pages_decode :: proc(a:^Asset,view:^Mesh_View) -> Error {
     block,allocation:=make([]u32,largest,a.allocator)
     if allocation!=nil {return .Out_Of_Memory}
     defer delete(block,a.allocator)
+    scratch:[]u8
+    if scratch,allocation=make([]u8,MESH_PAGE_SCRATCH_BYTES,a.allocator);allocation!=nil {return .Out_Of_Memory}
+    defer delete(scratch,a.allocator)
+    decoder:=asset_decoder(a) or_return
     for page in view.pages {
-        if !mesh_page_decode(view.flags,page,view.page_data,block) {return .Corrupt}
+        if !mesh_page_decode(view.flags,page,view.page_data,scratch,block,&decoder.lz) {return .Corrupt}
         page_scatter(&view.geometry,page,block)
     }
     return .None
@@ -546,7 +556,7 @@ range_inside :: proc "contextless" (first,count:u32,size:int) -> bool {
 }
 
 // Whether a step of a grid is a positive power of two.
-@(private="file")
+@(private)
 step_valid :: proc "contextless" (step:f32) -> bool {
     bits:=transmute(u32)step
     return step>0 && bits&0x7fffff==0 && bits>>23&0xff!=0xff

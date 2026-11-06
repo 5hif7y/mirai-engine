@@ -11,7 +11,7 @@ depends on `core:`, `std/base` and `std/math`.
   shared and immutable during playback. The temporal state (`Player`, `Fader`, `Tween`,
   `Inertial_State`, `Spring_Joint_State`) is plain and copyable; the solvers receive caller buffers.
   Playback does not allocate.
-- Creation and [resident optimization](anim-storage.md) are explicit transactions; what is rejected
+- Creation and [resident compression](anim-storage.md) are explicit transactions; what is rejected
   returns its cause (`Clip_Error`) or `false`, and poses count in `failed`.
 - The [body map, the metrics and the editing verbs](anim-body.md) work on sampled clips (`Frames`).
 
@@ -47,7 +47,7 @@ depends on `core:`, `std/base` and `std/math`.
 - Each track of a clip points to a `target` (`name_hash` of the node, bone or material), a property
   and a `slot` that distinguishes several `Float`/`Vector` of the same target. `clip_add` copies the
   data and rejects with `Clip_Error`. The duration is the time of the last key or marker.
-- `clip_evaluate` evaluates raw and quantized keys with a single algorithm
+- `clip_evaluate` evaluates keys and sampled tracks with the same contract
   ([storage](anim-storage.md)).
 
 ## Playback and events (`player.odin`)

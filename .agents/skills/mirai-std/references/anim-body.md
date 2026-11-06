@@ -38,10 +38,12 @@ API; the format that stores the map is the
   ground under the feet that rest, and `travel` is the velocity at which the game must move the
   body. As a swinging foot also passes under, and faster, the ground is the velocity that more low
   frames of ankles and toes share (a vote in cells of `GROUND_CELL`). When no foot rests on that
-  ground (a bouncy gait that barely touches the floor, or feet in the air) the vote is not to be
-  trusted: `travel` is the path the feet sweep relative to the pelvis along their main axis over
-  the duration, backwards while they are low (a foot that rests half of the cycle moves back as
-  far as the body advances).
+  ground for a contact (a run that touches the floor a frame or two between flights) the travel is
+  physical: the speed at which the joint of a foot that is down pushes back relative to the
+  pelvis, the median over the frames it is down weighted by how far down, along the mean
+  direction of those pushes. A flight phase does not slow it. Only a clip whose feet never come
+  down falls back to the path the feet sweep relative to the pelvis along their main axis over
+  the duration.
 - The support height is estimated from the frames of the clip, independent of the rest pose;
   penetration is measured against the rest. An absolute height or a clip in the air without contact
   metadata do not make it possible by themselves to know where the ground of the world is.

@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:log"
 import "core:math/linalg"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import "core:time"
 import "mirai:asset"
@@ -388,6 +389,11 @@ match_play_hands_back_when_the_body_leaves_its_mode_and_reports_the_end_of_its_c
         if match_test_events(&f,.Exited,"vault")==1 {exited+=1;testing.expect(t,finished==1,"the end of the clip is reported before it hands back")}
     }
     testing.expect(t,finished==1 && exited==1)
+    // match_stop ends it in its mode, before its end.
+    testing.expect(t,match_step(&f,.1,GROUND,match_test_play(&f,"vault",GROUND)))
+    testing.expect(t,match_stop(&f.requests,f.rig) && match_step(&f,.1,GROUND,core.take(&f.requests.match_plays)))
+    value,_=animation_match(&f.playback,f.rig)
+    testing.expectf(t,!value.forced && match_test_events(&f,.Exited,"vault")==1 && match_test_events(&f,.Finished,"vault")==0,"match_stop hands the rig back at once, not %v",value)
 }
 
 @(test)
@@ -453,12 +459,77 @@ match_assets_roundtrip_refuse_no_memory_or_looping_entries_and_report_a_database
     }
     changed:=profile;changed.info.memory=0
     testing.expect(t,!match_check(changed),"a .match keeps some memory")
+    // A blended source keeps its clips and samples; one that blends a clip with no sample, a
+    // weight out of 0..1, weights that add to zero or one for a clip it does not blend, a sample
+    // of a source that does not blend, or a blend that does not loop, is refused.
+    blended:=make([]Match_Source,len(profile.clips));defer delete(blended);copy(blended,profile.clips)
+    base.text_set(blended[1].blend[0][:],"idle")
+    samples:=[2]Match_Sample{{source=1,weights={1,0,0,0}},{source=1,weights={.5,.5,0,0},speed=.8}}
+    changed=profile;changed.clips,changed.samples=blended,samples[:]
+    if testing.expect(t,match_check(changed)) {
+        blend_doc:asset.Document
+        if testing.expect_value(t,match_document(&blend_doc,&types,MATCH_TEST_ID,changed),asset.Error.None) {
+            defer asset.document_destroy(&blend_doc)
+            writer:serial.Writer;serial.writer_init(&writer);defer serial.writer_destroy(&writer)
+            file:asset.Asset
+            if testing.expect(t,asset.document_write(&blend_doc,&writer)==.None && asset.asset_open(&file,serial.writer_bytes(&writer))==.None) {
+                defer asset.asset_close(&file)
+                view,read:=match_view(&file,&types)
+                testing.expect(t,read==.None && len(view.samples)==2 && view.samples[1]==samples[1] && view.clips[1].blend==blended[1].blend,"a blend and its samples read back")
+            }
+        }
+    }
+    Refused :: struct {sample:Match_Sample,loop:bool}
+    for refused,i in ([?]Refused{{{source=1,weights={1.5,0,0,0}},true},{{source=1},true},{{source=1,weights={0,0,1,0}},true},{{source=0,weights={1,0,0,0}},true},{{source=1,weights={1,0,0,0}},false}}) {
+        wrong:=samples;wrong[0]=refused.sample;blended[1].loop=refused.loop
+        changed.samples=wrong[:]
+        testing.expectf(t,!match_check(changed),"blend %d is refused",i)
+    }
+    blended[1].loop=true;changed.samples=nil
+    testing.expect(t,!match_check(changed),"a blend without samples is refused")
     clips:=make([]Match_Source,len(profile.clips));defer delete(clips);copy(clips,profile.clips)
     clips[3].loop=true;changed=profile;changed.clips=clips
     invalid:asset.Document
     testing.expect(t,!match_check(changed) && match_document(&invalid,&types,MATCH_TEST_ID,changed)==.Invalid,"an entry clip does not loop")
     testing.expect(t,match_step(&f,.1,GROUND))
     testing.expect(t,core.problem_find(&f.problems,f.rig,"animation.match_memory")!=nil,"a database past the memory of its .match is reported")
+}
+
+@(test)
+a_blended_sample_plays_its_clips_together_at_its_weights_in_phase :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    // walk blended with idle, half and half: it travels at half the 1.5 m/s of the walk.
+    content:=&f.graphs.matches[0]
+    base.text_set(content.profile.clips[1].blend[0][:],"idle")
+    samples:=make([]Match_Sample,1);samples[0]={source=1,weights={.25,.25,0,0}}
+    content.profile.samples=samples
+    if !testing.expect(t,match_check(content.profile)) {return}
+    dt:=f32(1.0/60)
+    for _ in 0..<30 {testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,.75},desired={0,0,.75}))}
+    group:=f.state.program.output.groups[0]
+    if !testing.expectf(t,group.count==2 && group.mode==.Weighted,"the blend plays two clips together, not %d",group.count) {return}
+    walk,idle:=group.leaves[0],group.leaves[1]
+    testing.expect(t,walk.clip==base.name_hash("walk") && idle.clip==base.name_hash("idle") && walk.weight==.5 && idle.weight==.5 && walk.speed==idle.speed,"at the shares of its weights and one rate")
+    a,b:=f.state.program.players[walk.player].player,f.state.program.players[idle.player].player
+    testing.expectf(t,abs(a.time-b.time)<1e-3,"in phase: %.4f s and %.4f s",a.time,b.time)
+    db:=&content.databases[0].database
+    testing.expectf(t,abs(db.ranges[1].speed-.75)<.1,"measured from the blended feet, it goes %.3f m/s",db.ranges[1].speed)
+    // The left foot is halfway between the stride of the walk and where idle keeps it.
+    time:=lib.player_time(&f.content.lib,a)
+    stride:=lib.clip_evaluate(&f.content.lib,lib.clip_tracks(&f.content.lib,lib.clip_find(&f.content.lib,base.name_hash("walk")))[0],time)
+    foot:=f.state.local[bone_resolve(f.state,bone_ref("foot_l"))].position
+    testing.expectf(t,linalg.length(foot-mm.Vec3{.1,(stride.y-.95)/2,stride.z/2})<.01,"the foot is at %v, halfway to the stride %v",foot,stride)
+
+    // A blend of clips that last different times says which and how to fix it.
+    g:Match_Fixture;defer match_fixture_free(&g)
+    if !testing.expect(t,match_fixture(t,&g)) {return}
+    base.text_set(g.graphs.matches[0].profile.clips[1].blend[0][:],"vault")
+    long:=make([]Match_Sample,1);long[0]={source=1,weights={.5,.5,0,0}}
+    g.graphs.matches[0].profile.samples=long
+    _=match_step(&g,dt,GROUND)
+    problem:=core.problem_find(&g.problems,g.rig,"animation.match_blend")
+    testing.expect(t,problem!=nil && strings.contains(core.problem_text(problem),"walk (1.000 s) with vault (2.000 s)"),"a blend of a clip of 1 s and one of 2 s is reported")
 }
 
 @(test)

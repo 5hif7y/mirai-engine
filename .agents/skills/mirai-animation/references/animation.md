@@ -105,6 +105,14 @@ locomotion blend space.
   modes it serves (bit `m` for mode `m`: the values of physics' `Locomotion_Mode`) and, if it starts
   a mode (jump, landing), the `entry` mark. An entry clip does not loop. `speed`, when positive, is
   the one the clip travels at instead of the one measured from its feet.
+- A source with `blend` is a blend (the motion matching form of a sampled blend space): its clip and
+  up to three more loop, last the same within a row and are in phase. Each `Match_Sample` of it
+  (weights per clip, as shares of their sum, and an optional `speed`) is a range of rows of its own,
+  measured from the pose the program blends of those clips at its weights; when the search picks
+  one, the program plays those clips together, synchronized in a `Weighted` group at its weights
+  and the rate of matching. Jumps between samples or clips are ordinary transitions. A blend that
+  names a clip the library lacks, or clips of different durations, is the problem
+  `animation.match_blend` with the clips and their durations.
 - The feature database (`std/anim/matching.odin`: feet, hips, the velocity of the body, where it
   was 1/3 s before and the trajectory at 1/3, 2/3 and 1 s in the frame of the character, normalized
   per type) is built at load, the first time a rig of that skeleton asks for it, per library and
@@ -164,8 +172,8 @@ with inertialization of `fade`:
 - It enters at the start, at the time of the clip that is playing (`Keep_Time`) or at the phase of
   its markers (`Match_Phase`).
 - It returns the rig to the matching at `phase` of its duration (1: at the end; a clip without a
-  loop retains its last pose until the matching chooses another) or when crossing its `marker`, and
-  also if the body leaves its mode.
+  loop retains its last pose until the matching chooses another) or when crossing its `marker`,
+  also if the body leaves its mode, and at once with `match_stop` (an idle the body walks out of).
 - One of lower `priority` than the one playing is rejected with the problem `animation.match_busy`;
   with `wait`, one that arrives during a fade starts when that fade ends, unless another replaces it
   before. It does not stay pending beyond that fade.
@@ -236,7 +244,7 @@ What used to be a state or a transition has its owner:
 | Jump or landing state | `entry` clip of the mode (falling, walking) |
 | State of a whole-body action (vault, death, emote) | `match_play`: exit, priority and events |
 | Layer of an action (wave, reload, upper-body hit) | Action (`action_fire`), sections, windows |
-| Locomotion blend space (velocity, direction) | `.match` clips; the rate covers in-between speeds |
+| Locomotion blend space (velocity, direction) | `.match` clips and blends sampled by weights |
 | Aim offset, breathing, lean | `.blend` under an `Additive` of an `.agraph` |
 | State trigger or event | `action_fire` or `match_play`, and their events |
 | Waiting for an animation to finish | Finished or Exited of `match_play`, or Completed |
@@ -254,6 +262,10 @@ What used to be a state or a transition has its owner:
 - Over `.anim`, an empty clip chooses the first. The defaults are `ANIMATION_DEFAULT`.
 - Layer 0 is the base; layers 1–3 are blended on top (Override/Additive, with their own reference
   and curves), also over programs. `over` limits a branch and `sync` follows the phase of the base.
+  An Additive layer adds what its clip changes from the pose at `reference` seconds of
+  `reference_clip` (another clip of the asset; none: its own clip), as an emote over a stand:
+  pose += weight * (emote - stand at 0). A target the reference clip does not move is measured from the
+  layer's own clip; a reference clip the asset lacks is the problem `animation.layer_reference`.
   With `mesh_space`, an Override layer blends the rotations of its branch in the space of the rig:
   the branch keeps the turn its clip gives it whatever the base turns above it (a torso emote over
   a walk whose pelvis turns).

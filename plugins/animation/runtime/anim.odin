@@ -66,7 +66,8 @@ Animation_Layer :: struct {
     loop:bool,
     sync:bool,  // its phase follows the clip of the component, by markers when both have them
     mode:Layer_Mode,
-    reference:f32,
+    reference:f32,       // Additive: seconds into the reference clip whose pose it adds its clip over
+    reference_clip:u64,  // Additive: base.name_hash of that clip of the asset; 0: its own clip
     curves:Curve_Blend,
     mesh_space:bool, // Override: the rotations of its branch blend in the space of the rig, so it keeps the turn its clip gives them whatever the base turns above it
 }
@@ -741,11 +742,19 @@ pose_layers :: proc(playback:^Playback,state:^Playing,library:^lib.Library,anima
         lib.pose_clear(pose)
         additive:=animation.layers[i].mode==.Additive
         if additive {
+            from:lib.Clip
+            if name:=animation.layers[i].reference_clip;name!=0 {
+                from=lib.clip_find(library,name)
+                if from==0 {
+                    core.report(problems,state.entity,"animation.layer_reference","layer %d of the Animation of this entity adds its clip over a reference clip its animation does not have, so it plays nothing; give animation_play in reference_clip the name of one of its clips, or none to subtract its own clip",i+1)
+                    continue
+                }
+            }
             player:=layer.fader.current;player.weight=lib.fader_current_weight(layer.fader)
-            lib.pose_blend_additive(pose,library,player,animation.layers[i].reference)
+            lib.pose_blend_additive(pose,library,player,animation.layers[i].reference,1,from)
             for outgoing in layer.fader.outgoing[:layer.fader.outgoing_count] {
                 player=outgoing.player;player.weight=lib.fade_out_weight(outgoing)
-                lib.pose_blend_additive(pose,library,player,animation.layers[i].reference)
+                lib.pose_blend_additive(pose,library,player,animation.layers[i].reference,1,from)
             }
         } else {lib.fader_blend(pose,library,layer.fader)}
         n:=len(state.bindings)
@@ -879,11 +888,14 @@ animation_seek :: proc(requests:^Animation_Requests,entity:core.Entity,time:f32)
 // ANIMATION_LAYERS play over it with their weight, over the branch of the
 // bone named by over (the whole pose when empty); with sync, the phase of the
 // layer follows the clip of the component; with mesh_space, an Override layer
-// blends its rotations in the space of the rig. fade below zero keeps the fade
-// of the component. False, with nothing changed, for a layer that does not
-// exist, a name that does not fit, or numbers that are not finite.
-animation_play :: proc(animation:^Animation,clip:string,fade:f32=-1,loop:Maybe(bool)=nil,layer:=0,over:="",sync:=false,weight:f32=1,speed:f32=1,mode:Layer_Mode=.Override,reference:f32=0,curves:Curve_Blend=.Override,mesh_space:=false) -> bool {
-    if animation==nil || layer<0 || layer>ANIMATION_LAYERS || !finite(fade) || !finite(weight) || !finite(speed) || !finite(reference) || reference<0 || mode>max(Layer_Mode) || curves>max(Curve_Blend) || len(clip)>=CLIP_CAPACITY {return false}
+// blends its rotations in the space of the rig. An Additive layer adds what its
+// clip changes from the pose of reference_clip at reference seconds (empty: of
+// its own clip), as an emote over a stand: pose += weight*(clip - stand at 0).
+// fade below zero keeps the fade of the component. False, with nothing changed,
+// for a layer that does not exist, a name that does not fit, or numbers that
+// are not finite.
+animation_play :: proc(animation:^Animation,clip:string,fade:f32=-1,loop:Maybe(bool)=nil,layer:=0,over:="",sync:=false,weight:f32=1,speed:f32=1,mode:Layer_Mode=.Override,reference:f32=0,curves:Curve_Blend=.Override,mesh_space:=false,reference_clip:="") -> bool {
+    if animation==nil || layer<0 || layer>ANIMATION_LAYERS || !finite(fade) || !finite(weight) || !finite(speed) || !finite(reference) || reference<0 || mode>max(Layer_Mode) || curves>max(Curve_Blend) || len(clip)>=CLIP_CAPACITY || len(reference_clip)>=CLIP_CAPACITY {return false}
     if layer==0 {
         base.text_set(animation.clip[:],clip)
         animation.playing,animation.speed=true,speed
@@ -894,7 +906,7 @@ animation_play :: proc(animation:^Animation,clip:string,fade:f32=-1,loop:Maybe(b
     if clip=="" {return false}
     animation.layers[layer-1]={
         clip=base.name_hash(clip),over=base.name_hash(over) if over!="" else 0,
-        weight=mm.saturate(weight),speed=speed,fade=max(fade if fade>=0 else animation.fade,0),loop=loop.? or_else true,sync=sync,mode=mode,reference=reference,curves=curves,mesh_space=mesh_space,
+        weight=mm.saturate(weight),speed=speed,fade=max(fade if fade>=0 else animation.fade,0),loop=loop.? or_else true,sync=sync,mode=mode,reference=reference,reference_clip=base.name_hash(reference_clip) if reference_clip!="" else 0,curves=curves,mesh_space=mesh_space,
     }
     return true
 }

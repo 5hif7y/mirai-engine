@@ -68,9 +68,11 @@ depends on `core:`, `std/base` and `std/math`.
   function returns `false` so that the caller reports it.
 - `Fader` does the cross-fades (rules in the comment of `fader_play`): a fade started during
   another does not change the pose at that instant.
-- **Additives.** `pose_blend_additive` adds what the clip changes with respect to its pose at a
-  reference time, over what the others blend: a value is added and a rotation is composed
-  afterwards.
+- **Additives.** `pose_blend_additive` adds what the clip changes with respect to the pose at a
+  reference time of a reference clip (by default its own; a target the reference clip lacks is
+  measured from its own), over what the others blend: a value is added and a rotation is composed
+  afterwards. `pose_bone` turns what a pose blends for a target into the local transform of its
+  bone, each channel from the rest by its weight.
 - **Root motion** (`root.odin`). `clip_root_motion` gives how much the root target moved and turned
   between two positions of the timeline, in clip space; a `Loop` adds a whole pass for each lap.
 

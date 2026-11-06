@@ -1,6 +1,7 @@
 package anim
 
 import "base:runtime"
+import "core:math/linalg"
 import "core:strings"
 import "core:testing"
 import "mirai:core"
@@ -181,8 +182,22 @@ layers_play_over_the_clip_inside_their_branch_by_weight_and_fade_out :: proc(t:^
     long:="a clip whose name is longer than the sixty four bytes that the component can hold"
     testing.expect(t,!animation_play(&animation,"wave",layer=ANIMATION_LAYERS+1) && !animation_play(&animation,"wave",layer=-1) && !animation_play(&animation,long))
     zero:f32
-    testing.expect(t,!animation_play(&animation,"wave",layer=1,weight=zero/zero) && !animation_play(&animation,"",layer=1) && !animation_weight(&animation,4,1) && !animation_stop(&animation,-1))
+    testing.expect(t,!animation_play(&animation,"wave",layer=1,weight=zero/zero) && !animation_play(&animation,"",layer=1) && !animation_weight(&animation,4,1) && !animation_stop(&animation,-1) && !animation_play(&animation,"wave",layer=1,reference_clip=long))
     testing.expect_value(t,animation,before)
+    // An additive layer over a reference clip adds what its clip changes from the pose of that
+    // clip at reference: wave over walk at 1 s lifts the leg 5 and takes it back the 1 walk has
+    // there; the arm, which walk does not move, changes from wave's own pose, by nothing.
+    animation.layers={}
+    layer_step(&playback,&state,&content,animation,&events,0)
+    leg,arm:=state.local[3].position,state.local[2].position
+    testing.expect(t,animation_play(&animation,"wave",fade=0,layer=1,mode=.Additive,reference=1,reference_clip="walk"))
+    layer_step(&playback,&state,&content,animation,&events,0)
+    testing.expectf(t,linalg.length(state.local[3].position-(leg+mm.Vec3{0,5,-1}))<1e-4 && state.local[2].position==arm,"leg %v from %v",state.local[3].position,leg)
+    problems:core.Problems
+    testing.expect(t,animation_play(&animation,"wave",fade=0,layer=1,mode=.Additive,reference_clip="missing"))
+    copy(state.local[:],state.rest[:])
+    pose_layers(&playback,&state,&content.lib,animation,&problems)
+    testing.expect(t,core.problem_find(&problems,state.entity,"animation.layer_reference")!=nil && state.local[3].position==0,"a reference clip the animation does not have is reported and the layer adds nothing")
 }
 
 @(test)

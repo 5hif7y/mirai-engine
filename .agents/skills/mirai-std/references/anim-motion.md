@@ -18,6 +18,12 @@ temporal state. The world integration and the authoring are in
 - An in-place clip travels at the velocity with which its feet push; one with a root, at that of its
   root. `Match_Clip.speed`, when positive, replaces that speed (an in-place clip keeps its
   direction). A loop continues in its following passes and one without a loop retains its ends.
+- A `Match_Clip` is one clip or a blended sample of up to `MATCH_BLEND`: the clips with a weight
+  (`match_clip_duration` refuses those that do not loop, last more than a row apart, or weights out
+  of 0..1) are sampled at the same share of their durations and mixed as the program mixes the
+  leaves of a group (`pose_blend`, then `pose_bone` from the rest), so its rows, speed and travel
+  are those of the blended pose. Its `Match_Range` keeps the clips and the weights as shares of 1,
+  which the player plays together.
 - `match_trajectory` predicts the trajectory with the acceleration and braking of the locomotion and
   the turn at its rate: the same numbers that move the body. A wall normal takes out of the
   velocity and of the desired one what goes into the wall, so a body pushing against it stands and

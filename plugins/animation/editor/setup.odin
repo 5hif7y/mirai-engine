@@ -26,6 +26,17 @@ SETUP_CLIPS :: anim.MATCH_CLIPS+SETUP_GESTURES
 // m/s: a body slower than this stands, with the clips that do not travel.
 SETUP_STATIONARY_SPEED :: 0.15
 Setup_Speed :: struct {clip:[64]u8 `mirai:"text"`,speed:f32 `mirai:"unit=m/s,label=Above 0"`}
+SETUP_BLENDS :: 8
+SETUP_BLEND_SAMPLES :: 25
+Setup_Blend_Sample :: struct {
+    weights:[anim.MATCH_BLEND]f32 `mirai:"min=0,max=1,label=Four: one per clip of the blend in its order, 0 past its clips; they play as shares of their sum, above 0"`,
+    speed:f32 `mirai:"optional,min=0,unit=m/s,label=The speed it travels at; omitted is measured from its blended feet"`,
+}
+// Locomotion clips that loop, last the same and are in phase, searched as one clip per sample.
+Setup_Blend :: struct {
+    clips:[anim.MATCH_BLEND][64]u8 `mirai:"text,label=2 to 4 looping locomotion clips of one mode and duration, in phase; they leave the .match as clips of their own"`,
+    samples:[SETUP_BLEND_SAMPLES]Setup_Blend_Sample `mirai:"optional,label=The points of the blend the search can pick, each played as those clips at its weights"`,
+}
 
 Setup_Params :: struct {
     id:base.Entity_Id `mirai:"optional,label=The rig: the entity with the skinned mesh, whose Animation and Pose_Modifiers get the assets. Or skeleton"`,
@@ -33,6 +44,10 @@ Setup_Params :: struct {
     library:base.Asset_Id `mirai:"optional,label=The .anim with its clips; empty takes what id plays"`,
     clips:[SETUP_CLIPS][64]u8 `mirai:"text,optional,label=The clips of the library to classify by name; omitted is all of them"`,
     speeds:[anim.MATCH_CLIPS]Setup_Speed `mirai:"optional,label=The m/s a locomotion clip travels at instead of the one measured from its feet"`,
+    blends:[SETUP_BLENDS]Setup_Blend `mirai:"optional,label=Blends of locomotion clips in the .match, sampled at the weights of each sample (as a blend space sampled for motion matching)"`,
+    min_rate:f32 `mirai:"optional,min=0,label=The least share of its own speed a locomotion clip plays at to follow the body; omitted is the default of a .match"`,
+    max_rate:f32 `mirai:"optional,min=0,label=The most share of its own speed a locomotion clip plays at, at least min_rate"`,
+    trajectory_direction:f32 `mirai:"optional,min=0,label=Weight of where the body faces along its trajectory; 0 for a body that never turns, as one that walks sideways"`,
     want:Setup_Wants `mirai:"optional,label=Locomotion (a .match of the clips told apart by name: idle and walk to sprint walk, a fall or air loop falls, jump and land enter falling and walking, swim and fly; the physics plugin moves it); Look (head); Foot_Ik (grounding); Hand_Ik (reach); Gestures (an .action that plays each clip that is not locomotion over the upper body or one arm). Omitted is all of them"`,
     folder:[1024]u8 `mirai:"text,optional,label=Folder of the assets; empty puts them by the clips"`,
     name:[64]u8 `mirai:"text,optional,label=Base name of the files; empty takes the skeleton's"`,
@@ -44,7 +59,9 @@ Setup_Capability_Result :: struct {want:Setup_Want,status:Setup_Status,detail:[4
 // A clip of the .match: the Locomotion_Mode it serves; entry: it starts that mode; told: its
 // speed came from speeds.
 Setup_Match_Clip_Result :: struct {clip:[64]u8 `mirai:"text"`,mode:[32]u8 `mirai:"text"`,entry,loop:bool,speed:f32 `mirai:"unit=m/s"`,told:bool `mirai:"optional"`}
-Setup_Clips_Result :: struct {locomotion:[anim.MATCH_CLIPS]Setup_Match_Clip_Result,gestures:[SETUP_GESTURES][64]u8 `mirai:"text"`}
+// A blend of the .match: its clips, the mode they serve and how many samples it has.
+Setup_Blend_Result :: struct {clips:[anim.MATCH_BLEND][64]u8 `mirai:"text"`,mode:[32]u8 `mirai:"text"`,samples:u32}
+Setup_Clips_Result :: struct {locomotion:[anim.MATCH_CLIPS]Setup_Match_Clip_Result,blends:[SETUP_BLENDS]Setup_Blend_Result `mirai:"optional"`,gestures:[SETUP_GESTURES][64]u8 `mirai:"text"`}
 Setup_Result :: struct {
     id:base.Entity_Id `mirai:"optional"`,skeleton:base.Asset_Id `mirai:"optional"`,dry_run:bool `mirai:"optional"`,body:[16]u8 `mirai:"text,label=stored or detected"`,
     assets:[4]Setup_Asset_Result,capabilities:[len(Setup_Want)]Setup_Capability_Result,clips:Setup_Clips_Result,
@@ -166,6 +183,56 @@ setup_clips :: proc(call:^api.Call,animation:asset.Animation_View,skeleton:asset
         if value.class==.None && value.speed<.3 && value.duration<=8 && !has(value.name,{"death","die","hit","crouch"}) {append(&clips.gestures,value.name)}
     }
     return clips,true
+}
+
+// How many blends the params give and, for each, how many clips and samples: the params fill
+// fixed arrays and do not say.
+@(private)
+setup_blend_counts :: proc(call:^api.Call) -> (blends:int,members,samples:[SETUP_BLENDS]int,ok:bool) {
+    r:serial.Text_Reader;serial.text_reader_init(&r,call.raw,call.allocator);defer serial.text_reader_destroy(&r)
+    elements :: proc(r:^serial.Text_Reader) -> (count:int,ok:bool) {
+        serial.text_expect(r,'[') or_return
+        if serial.text_accept(r,']') {return 0,true}
+        for {
+            serial.text_skip(r) or_return
+            count+=1
+            if !serial.text_accept(r,',') {return count,serial.text_expect(r,']')}
+        }
+    }
+    serial.text_expect(&r,'{') or_return
+    if serial.text_accept(&r,'}') {return 0,{},{},true}
+    for {
+        name:=serial.text_string(&r) or_return
+        serial.text_expect(&r,':') or_return
+        if name!="blends" {serial.text_skip(&r) or_return} else {
+            serial.text_expect(&r,'[') or_return
+            for !serial.text_accept(&r,']') {
+                if blends>=SETUP_BLENDS {return}
+                serial.text_expect(&r,'{') or_return
+                for !serial.text_accept(&r,'}') {
+                    key:=serial.text_string(&r) or_return
+                    serial.text_expect(&r,':') or_return
+                    switch key {
+                    case "clips": members[blends]=elements(&r) or_return
+                    case "samples": samples[blends]=elements(&r) or_return
+                    case: serial.text_skip(&r) or_return
+                    }
+                    if !serial.text_accept(&r,',') {serial.text_expect(&r,'}') or_return;break}
+                }
+                blends+=1
+                if !serial.text_accept(&r,',') {serial.text_expect(&r,']') or_return;break}
+            }
+        }
+        if !serial.text_accept(&r,',') {serial.text_expect(&r,'}') or_return;break}
+    }
+    return blends,members,samples,true
+}
+
+// Whether one of the blends of p mixes the clip named name.
+@(private)
+setup_blended :: proc(p:^Setup_Params,count:int,members:[SETUP_BLENDS]int,name:string) -> bool {
+    for &blend,b in p.blends[:count] {for &clip in blend.clips[:members[b]] {if base.text_get(clip[:])==name {return true}}}
+    return false
 }
 
 // Names of clips, the first few of a long list: "a, b, c and 12 more".
@@ -303,6 +370,8 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
     // of the motion profile stretches the stride of a walk to the speed of the body.
     motion:anim.Motion_Profile
     locomotion:=false
+    blend_count:int;blend_members,blend_samples:[SETUP_BLENDS]int
+    rates:=[2]f32{anim.MATCH_INFO_DEFAULT.min_rate,anim.MATCH_INFO_DEFAULT.max_rate}
     if .Locomotion in want {
         modes:=locomotion_modes(s.info)
         if len(modes)==0 {locomotion_modes_failure(call,"want");return}
@@ -324,6 +393,45 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
             for clip in clips.locomotion {found ||= clip.name==name}
             if !found {authoring_failure(call,fmt.tprintf("speeds[%d].clip",i),"Not_Locomotion","a locomotion clip",name,"Only the clips of the .match have a speed",fix="Leave it out of speeds, or rename the clip so that its words say how it moves (idle, walk, run, jump, fall, swim, fly)");return}
         }
+        counted:bool
+        blend_count,blend_members,blend_samples,counted=setup_blend_counts(call)
+        if !counted {authoring_failure(call,"blends","Capacity",fmt.tprintf("at most %d blends",SETUP_BLENDS),"more, or not an array","The blends could not be read",fix=fmt.tprintf("Pass at most %d blends, each an object with clips and samples",SETUP_BLENDS));return}
+        sampled:=0
+        for b in 0..<blend_count {
+            blend:=&p.blends[b];path:=fmt.tprintf("blends[%d]",b)
+            members:=blend_members[b]
+            if members<2 || members>anim.MATCH_BLEND {authoring_failure(call,fmt.tprintf("%s.clips",path),"Blend_Size",fmt.tprintf("2 to %d clips",anim.MATCH_BLEND),fmt.tprintf("%d",members),"A blend mixes from 2 to 4 clips",fix="Name 2 to 4 looping locomotion clips; a clip alone goes in the .match by itself");return}
+            first:Setup_Clip
+            for k in 0..<members {
+                name:=base.text_get(blend.clips[k][:]);at:=fmt.tprintf("%s.clips[%d]",path,k)
+                index:=-1
+                for clip,c in clips.locomotion {if clip.name==name {index=c}}
+                if index<0 {authoring_failure(call,at,"Not_Locomotion","a looping locomotion clip of the library",name,"A blend mixes locomotion clips",fix="Name a clip whose words say how it moves (idle, walk, run), and that clips names when it is given");return}
+                for &other in blend.clips[:k] {if base.text_get(other[:])==name {authoring_failure(call,at,"Duplicate","each clip once",name,"The blend names the clip twice",fix="Name each clip of a blend once");return}}
+                clip:=clips.locomotion[index]
+                if !clip.loop {authoring_failure(call,at,"Not_Loop","a looping clip",name,"The clips of a blend loop in phase",fix="Make it loop with animation.clip.edit Make_Loop, or leave it out of the blend");return}
+                if k==0 {first=clip;continue}
+                if clip.mode!=first.mode {authoring_failure(call,at,"Mixed_Modes",fmt.tprintf("a clip of the mode of %s",first.name),name,"The clips of a blend serve one locomotion mode",fix="Blend clips of one mode: idle, walk, jog and run walk; a fall or air loop falls");return}
+                if frame:=1/anim.MATCH_INFO_DEFAULT.rate;abs(clip.duration-first.duration)>frame {
+                    authoring_failure(call,at,"Unequal_Duration",fmt.tprintf("%.3f s, as %s, within %.3f s",first.duration,first.name,frame),fmt.tprintf("%.3f s",clip.duration),"The clips of a blend last the same and are in phase: the same share of each is the same moment of the step",fix="Blend clips of one duration, or retime one with animation.clip.edit");return
+                }
+            }
+            if blend_samples[b]==0 {authoring_failure(call,fmt.tprintf("%s.samples",path),"Required","at least one sample","none","A blend plays only at its samples",fix="Pass samples, each with four weights, one per clip and 0 past them: [1,0,0,0] plays the first alone, [0.5,0.5,0,0] half and half");return}
+            for sample,i in blend.samples[:blend_samples[b]] {
+                at:=fmt.tprintf("%s.samples[%d].weights",path,i)
+                sum:f32
+                for w,k in sample.weights {
+                    if k>=members && w!=0 {authoring_failure(call,fmt.tprintf("%s[%d]",at,k),"Extra_Weight",fmt.tprintf("%d weights, one per clip of the blend",members),fmt.tprintf("%v",w),"The sample weighs a clip the blend does not have",fix="Give a weight to each clip of the blend in its order, and 0 past them");return}
+                    sum+=w
+                }
+                if !(sum>0) {authoring_failure(call,at,"Zero_Weights","weights with a sum above 0","all 0","A sample with no weight plays nothing",fix="Give some clip of the blend a weight above 0");return}
+            }
+            sampled+=blend_samples[b]
+        }
+        if sampled>anim.MATCH_SAMPLES {authoring_failure(call,"blends","Capacity",fmt.tprintf("at most %d samples in all",anim.MATCH_SAMPLES),fmt.tprintf("%d",sampled),"The blends have more samples than a .match takes",fix="Sample the blends more coarsely");return}
+        if authoring_field_present(call,"min_rate") {rates[0]=p.min_rate}
+        if authoring_field_present(call,"max_rate") {rates[1]=p.max_rate}
+        if !(rates[0]>0) || !(rates[0]<=rates[1]) {authoring_failure(call,"min_rate","Invalid_Rate","0 < min_rate <= max_rate",fmt.tprintf("min_rate %v, max_rate %v",rates[0],rates[1]),"A clip plays between a positive least and a greater most share of its speed",fix="Pass min_rate above 0 and max_rate at least min_rate; 1 plays a clip at its own speed");return}
         still,moving:=false,false
         for value in clips.locomotion {if value.class==.Walking && value.loop {if value.speed<.15 {still=true} else {moving=true}}}
         detail:=setup_locomotion_detail(clips.locomotion[:],modes)
@@ -380,12 +488,24 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
         // every tick, or walking against a wall, would restart the same frames and freeze the legs.
         info.keep_loop_phase,info.stationary_speed=true,SETUP_STATIONARY_SPEED
         info.left_foot,info.right_foot,info.hips=bone(skeleton,body,.Foot_L),bone(skeleton,body,.Foot_R),bone(skeleton,body,.Pelvis)
-        sources:=make([]anim.Match_Source,len(clips.locomotion),call.allocator)
-        for clip,i in clips.locomotion {
+        info.min_rate,info.max_rate=rates[0],rates[1]
+        if authoring_field_present(call,"trajectory_direction") {info.trajectory_direction=p.trajectory_direction}
+        sources:=make([dynamic]anim.Match_Source,call.allocator)
+        samples:=make([dynamic]anim.Match_Sample,call.allocator)
+        for clip in clips.locomotion {
+            if setup_blended(p,blend_count,blend_members,clip.name) {continue}
             entry:=clip.class==.Landing || clip.class==.Jumping
-            sources[i]={modes=u32(1)<<clip.mode,loop=clip.loop,entry=entry,speed=clip.speed if clip.told else 0};base.text_set(sources[i].clip[:],clip.name)
+            source:=anim.Match_Source{modes=u32(1)<<clip.mode,loop=clip.loop,entry=entry,speed=clip.speed if clip.told else 0};base.text_set(source.clip[:],clip.name)
+            append(&sources,source)
         }
-        if anim.match_document(&match_file.doc,types,match_id,{info=info,clips=sources},call.allocator)!=.None {authoring_failure(call,"locomotion","Invalid_Match","clips of the library with names shorter than 64 bytes","refused","The motion matching library could not be built",api.SERVER_ERROR);return}
+        for &blend,b in p.blends[:blend_count] {
+            source:=anim.Match_Source{loop=true};base.text_set(source.clip[:],base.text_get(blend.clips[0][:]))
+            for k in 1..<blend_members[b] {base.text_set(source.blend[k-1][:],base.text_get(blend.clips[k][:]))}
+            for clip in clips.locomotion {if clip.name==base.text_get(blend.clips[0][:]) {source.modes=u32(1)<<clip.mode}}
+            for sample in blend.samples[:blend_samples[b]] {append(&samples,anim.Match_Sample{source=u32(len(sources)),weights=sample.weights,speed=sample.speed})}
+            append(&sources,source)
+        }
+        if anim.match_document(&match_file.doc,types,match_id,{info=info,clips=sources[:],samples=samples[:]},call.allocator)!=.None {authoring_failure(call,"locomotion","Invalid_Match","clips of the library with names shorter than 64 bytes","refused","The motion matching library could not be built",api.SERVER_ERROR);return}
         motion_file,motion_planned:=plan(s,call,&files,folder,name,"Motion",".motion",p.replace);if !motion_planned {return}
         motion_id=motion_file.id
         warp:=anim.POSE_WARP_PROFILE_DEFAULT
@@ -510,14 +630,29 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
     serial.text_write_raw(out,"]")
     api.write_key(out,"clips");serial.text_write_raw(out,`{"locomotion":[`)
     modes:=locomotion_modes(s.info)
-    for clip,i in clips.locomotion {
-        if i>0 {serial.text_write_raw(out,",")}
+    listed:=0
+    for clip in clips.locomotion {
+        if setup_blended(p,blend_count,blend_members,clip.name) {continue}
+        if listed>0 {serial.text_write_raw(out,",")};listed+=1
         mode,_:=locomotion_mode_name(modes,clip.mode)
         serial.text_write_raw(out,"{");api.write_text(out,"clip",clip.name,true);api.write_text(out,"mode",mode)
         api.write_bool(out,"entry",clip.class==.Landing || clip.class==.Jumping);api.write_bool(out,"loop",clip.loop)
         api.write_key(out,"speed");api.write_number(out,clip.speed)
         if clip.told {api.write_bool(out,"told",true)}
         serial.text_write_raw(out,"}")
+    }
+    serial.text_write_raw(out,`],"blends":[`)
+    for &blend,b in p.blends[:blend_count] {
+        if b>0 {serial.text_write_raw(out,",")}
+        serial.text_write_raw(out,`{"clips":[`)
+        mode:string
+        for k in 0..<blend_members[b] {
+            name:=base.text_get(blend.clips[k][:])
+            if k>0 {serial.text_write_raw(out,",")}
+            serial.text_write_string(out,name)
+            for clip in clips.locomotion {if clip.name==name {mode,_=locomotion_mode_name(modes,clip.mode)}}
+        }
+        serial.text_write_raw(out,"]");api.write_text(out,"mode",mode);api.write_uint(out,"samples",u64(blend_samples[b]));serial.text_write_raw(out,"}")
     }
     serial.text_write_raw(out,`],"gestures":[`)
     if .Gestures in want do for gesture,i in clips.gestures {if i>0 {serial.text_write_raw(out,",")};serial.write_u8(out,'"');serial.text_write_raw(out,gesture);serial.write_u8(out,'"')}

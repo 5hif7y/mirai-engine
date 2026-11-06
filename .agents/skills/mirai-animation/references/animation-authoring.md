@@ -87,6 +87,15 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
 - A clip travels at the speed measured from its feet
   ([metrics](../../mirai-std/references/anim-body.md#metrics-metricsodin)); `speeds` sets that of a
   locomotion clip by hand and the `.match` keeps it.
+- `blends` puts [blends](animation.md#locomotion-by-motion-matching) in the `.match`: 2 to 4 looping
+  locomotion clips of one mode and one duration (within a row), and samples, each with four
+  `weights` (one per clip in order, 0 past them, a positive sum) and an optional `speed`. Its clips
+  leave the `.match` as clips of their own, and the result lists each blend with its mode and
+  samples. A clip that is not locomotion, a size, sum or weight out of place, no samples or clips
+  of different durations fail with their path and a `fix`.
+- `min_rate`, `max_rate` and `trajectory_direction`, when given, replace those defaults of the
+  `.match`: the rates a clip plays at to follow the body, and the weight of where the trajectory
+  faces (0 for a body that never turns, as one that walks sideways).
 - Capabilities (`want`): locomotion (a `.match` with those clips and a warping `.motion`; the
   `Animation` stays `In_Place` and `animation_physics` moves it; its loops keep their phase and a
   body that does not move, also against a wall, plays the loops that do not travel), look-at and hands (off until
@@ -158,7 +167,8 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
 ## Motion matching, graphs and additive spaces
 
 - The `.match` is written by `animation.character.setup` ([character](#character));
-  `animation.asset.inspect` describes it with its clips, the names of its modes and its entry, and
+  `animation.asset.inspect` describes it with its clips, the names of its modes and its entry, the
+  clips and samples of each blend, and
   for each already loaded skeleton the rows, the bytes and the error of its database.
 - `animation.blend_space.set` (with `path` or `asset`) builds the geometry of an aim offset or
   additive from axes and samples; `sample` gives clips and weights at a position without advancing
@@ -180,9 +190,11 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
 
 ## Per-instance control and preview
 
-`animation.play` assigns the playback (asset, clip, layers 1 to 3) and adds `Animation` if missing;
-everything else that is asked of an instance is `animation.request`, with the fields of
-`animation.preview`:
+`animation.play` assigns the playback (asset, clip, layers 1 to 3) and adds `Animation` if missing.
+An Additive layer takes `reference_clip`, a clip of the asset whose pose at `reference` its clip
+is added over ([layers](animation.md#playback-outputs-and-order)); on another layer or mode it is
+`Not_Additive`, and a clip the asset lacks `Missing_Clip`. Everything else that is asked of an
+instance is `animation.request`, with the fields of `animation.preview`:
 
 - Controls: stop and seek, parameters, `plays` (`match_play` with clip, mode and the options of
   `Match_Play_Options`), actions, targets and controls of modifiers, targets of warping windows,

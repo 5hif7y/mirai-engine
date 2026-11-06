@@ -117,4 +117,13 @@ an_additive_clip_adds_what_it_changes_from_its_rest_on_top_of_the_others :: proc
     pose_blend_additive(&pose,&lib,player_make(nod))
     position,_,_=pose_position(&pose,HIP)
     testing.expect(t,near(position.x,2))
+    // Over a reference clip it adds what it changes from that clip's pose (an emote over a
+    // stand): nod at .5 over base_clip at 0 adds .5-2; the rotation base_clip lacks is measured
+    // from nod's own.
+    pose_clear(&pose)
+    pose_blend(&pose,&lib,player_make(base_clip))
+    pose_blend_additive(&pose,&lib,playing,0,1,base_clip)
+    position,_,_=pose_position(&pose,HIP)
+    rotation,_,_=pose_rotation(&pose,HIP)
+    testing.expect(t,near(position.x,.5) && abs(linalg.dot(quat_vec4(rotation),quat_vec4(math.quat_axis_angle({1,0,0},cmath.PI/4))))>0.9999)
 }

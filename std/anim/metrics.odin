@@ -33,7 +33,7 @@ Metric_Request :: struct {
 
 // How a clip moves. travel is the velocity of the body over the ground:
 // that of its root bone, or for a clip in place the one its feet push at
-// (when no foot stands, the one their sweep under the hips gives), which the
+// (when no foot stands, the one the foot that touches the floor pushes at), which the
 // game has to move the body by. Slide is the speed of a foot over
 // the ground while it stands, penetration how far a foot or toe goes below
 // its height at rest, and jerk the change of acceleration of the parts. The
@@ -142,13 +142,62 @@ frames_ground :: proc "contextless" (rig:Body_Rig,f:Frames,world:[]math.Transfor
         }
         ground.velocity,ground.travel=estimate,-estimate
     }
-    // No foot stands on that ground (a bouncy gait that barely touches the floor, or feet in the
-    // air): the travel comes from how far the feet sweep under the hips.
+    // No foot stands on that ground (a run whose feet touch the floor a frame or two between
+    // flights): the travel is how fast the foot that touches pushes back under the hips, or
+    // without one, how far the feet sweep under them.
     if frames_contacts(rig,f,world,ground,nil)==0 {
-        ground.travel=frames_sweep(rig,f,world,ground.up,along,across)
+        touched:bool
+        ground.travel,touched=frames_touch(rig,f,world,ground.up,ground.height,parts,floors)
+        if !touched {ground.travel=frames_sweep(rig,f,world,ground.up,along,across)}
         ground.velocity=-ground.travel
     }
     return ground,true
+}
+
+// The travel of an in-place clip from the feet that touch the floor: at each frame the joint of a
+// foot nearest its floor, while it is down, pushes back relative to the pelvis as fast as the body
+// travels. The speed is the median of those pushes along their mean direction, each weighted by
+// how far down its joint is, so a flight phase or a foot that only grazes the floor does not slow
+// it. False when no foot comes down.
+@(private)
+frames_touch :: proc "contextless" (rig:Body_Rig,f:Frames,world:[]math.Transform,up:math.Vec3,height:f32,parts:[4]Body_Part,floors:[4]f32) -> (travel:math.Vec3,ok:bool) {
+    count:=frames_count(f)
+    pelvis:=rig.body.bones[.Pelvis]
+    if pelvis<0 || count<3 {return}
+    frames:=count-1 if f.loop else count
+    push :: proc "contextless" (rig:Body_Rig,f:Frames,world:[]math.Transform,up:math.Vec3,height:f32,parts:[4]Body_Part,floors:[4]f32,pelvis:i32,frame:int) -> (velocity:math.Vec3,weight:f32) {
+        count:=frames_count(f)
+        lowest:=-1
+        for part,k in parts {
+            bone:=rig.body.bones[part]
+            if bone<0 {continue}
+            down:=frames_down(linalg.dot(world[frame*f.bones+int(bone)].position,up)-floors[k],height)
+            if down>weight {weight,lowest=down,int(bone)}
+        }
+        if lowest<0 {return}
+        v:=frames_velocity(world,f.bones,count,lowest,frame,f.rate)-frames_velocity(world,f.bones,count,int(pelvis),frame,f.rate)
+        return frames_horizontal(v,up),weight
+    }
+    sum:math.Vec3;total:f32
+    for frame in 0..<frames {v,w:=push(rig,f,world,up,height,parts,floors,pelvis,frame);sum+=v*w;total+=w}
+    direction,moving:=anim_unit(-sum)
+    if total<=0 || !moving {return}
+    low,high:=max(f32),-max(f32)
+    for frame in 0..<frames {
+        v,w:=push(rig,f,world,up,height,parts,floors,pelvis,frame)
+        if w>0 {speed:=-linalg.dot(v,direction);low,high=min(low,speed),max(high,speed)}
+    }
+    // The weighted median, by bisection over the speeds.
+    for _ in 0..<40 {
+        middle:=.5*(low+high)
+        below:f32
+        for frame in 0..<frames {
+            v,w:=push(rig,f,world,up,height,parts,floors,pelvis,frame)
+            if w>0 && -linalg.dot(v,direction)<=middle {below+=w}
+        }
+        if below>=.5*total {high=middle} else {low=middle}
+    }
+    return direction*max(high,0),true
 }
 
 // The travel of an in-place clip from the sweep of its feet relative to the pelvis: each foot

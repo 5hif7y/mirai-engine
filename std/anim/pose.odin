@@ -133,20 +133,38 @@ pose_entry_value :: proc "contextless" (entry:Pose_Entry) -> math.Vec4 {
     return blended+entry.added
 }
 
-// Adds what an additive clip changes at the player's time from its value at
-// `reference` (a time of the clip, its rest pose), with the weight of the
-// player times `scale`, on top of what the other clips blend. False when a
-// value did not fit.
-pose_blend_additive :: proc(pose:^Pose,lib:^Library,p:Player,reference:f32=0,scale:f32=1) -> (ok:bool) {
+// Adds what an additive clip changes at the player's time from the pose at
+// `reference` seconds of `from` (0: of the clip itself, its rest pose), with
+// the weight of the player times `scale`, on top of what the other clips
+// blend. A target `from` does not move is measured from the clip itself at
+// `reference`. False when a value did not fit.
+pose_blend_additive :: proc(pose:^Pose,lib:^Library,p:Player,reference:f32=0,scale:f32=1,from:Clip=0) -> (ok:bool) {
     if !clip_valid(lib,p.clip) {return true}
     time:=player_time(lib,p)
     weight:=p.weight*scale
+    others:[]Track
+    if from!=0 && clip_valid(lib,from) {others=clip_tracks(lib,from)}
     ok=true
-    for track in clip_tracks(lib,p.clip) {
-        now,rest:=clip_evaluate(lib,track,time),clip_evaluate(lib,track,reference)
+    for track,i in clip_tracks(lib,p.clip) {
+        source:=track
+        // The clips of a library usually list their targets in one order: the same index first.
+        if i<len(others) && others[i].target==track.target && others[i].property==track.property && others[i].slot==track.slot {source=others[i]} else {
+            for other in others {if other.target==track.target && other.property==track.property && other.slot==track.slot {source=other;break}}
+        }
+        now,rest:=clip_evaluate(lib,track,time),clip_evaluate(lib,source,reference)
         change:=quat_vec4(conj(vec4_quat(rest))*vec4_quat(now)) if track.property==.Rotation else now-rest
         ok=pose_add_additive(pose,track.target,track.property,track.slot,change,weight) && ok
     }
+    return
+}
+// The local transform of a bone from what a pose blends for its target: each channel the pose
+// holds goes from rest toward its blended value by the weight that blended it, at most 1; the
+// others keep rest. weights: of the position, rotation and scale.
+pose_bone :: proc "contextless" (pose:^Pose,target:u64,rest:math.Transform) -> (value:math.Transform,weights:math.Vec3,properties:bit_set[Property;u8]) {
+    value=rest
+    if v,w,ok:=pose_position(pose,target);ok {share:=math.saturate(w);value.position=v if share==1 else math.lerp(rest.position,v,share);properties+={.Position};weights.x=share}
+    if v,w,ok:=pose_rotation(pose,target);ok {share:=math.saturate(w);value.rotation=v if share==1 else math.quat_slerp(rest.rotation,v,share);properties+={.Rotation};weights.y=share}
+    if v,w,ok:=pose_scale(pose,target);ok {share:=math.saturate(w);value.scale=v if share==1 else math.lerp(rest.scale,v,share);properties+={.Scale};weights.z=share}
     return
 }
 pose_find :: proc "contextless" (pose:^Pose,target:u64,property:Property,slot:u8=0) -> (value:math.Vec4,weight:f32,ok:bool) {

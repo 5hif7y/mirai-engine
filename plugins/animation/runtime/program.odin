@@ -565,13 +565,7 @@ program_evaluate_nodes :: proc(playback:^Playback,state:^Playing,content:^host.C
             group:=output.groups[instruction.group];pose:=&playback.pose;lib.pose_clear(pose)
             for leaf in group.leaves[:group.count] {
             leaf:=leaf;player:=runtime.players[leaf.player].player;if reference>=0 {player.time=reference} else if reference==-2 {player.time=runtime.players[leaf.player].from};lib.pose_blend(pose,&content.lib,player,leaf.weight)}
-            for binding,b in state.bindings {
-                value:=binding.rest;properties[b]={};weights[b]={}
-                if v,w,ok:=lib.pose_position(pose,binding.target);ok {share:=mm.saturate(w);value.position=v if share==1 else mm.lerp(value.position,v,share);properties[b]+={.Position};weights[b].x=share}
-                if v,w,ok:=lib.pose_rotation(pose,binding.target);ok {share:=mm.saturate(w);value.rotation=v if share==1 else mm.quat_slerp(value.rotation,v,share);properties[b]+={.Rotation};weights[b].y=share}
-                if v,w,ok:=lib.pose_scale(pose,binding.target);ok {share:=mm.saturate(w);value.scale=v if share==1 else mm.lerp(value.scale,v,share);properties[b]+={.Scale};weights[b].z=share}
-                out[b]=value
-            }
+            for binding,b in state.bindings {out[b],weights[b],properties[b]=lib.pose_bone(pose,binding.target,binding.rest)}
             if group.mirror {
                 if !playing_mirror(state,out) {runtime.error=.Unsupported_Mirror;return false}
                 for pair,b in state.mirror_pairs {if int(pair)>b {properties[b],properties[pair]=properties[pair],properties[b];weights[b],weights[pair]=weights[pair],weights[b]}}

@@ -182,6 +182,46 @@ character_setup_classifies_the_clips_it_is_given_at_their_speeds_and_fails_past_
         asset.asset_close(&match)
     }
 
+    // A blend of Idle and Walk takes their place in the .match, with its samples, and the rates
+    // and the weight of the direction of the trajectory are written as given.
+    blends:=`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[1,0,0,0]},{"weights":[0.5,0.5,0,0],"speed":0.6},{"weights":[0,1,0,0]}]}]`
+    result=authoring_test_execute(a,"setup",fmt.tprintf(`{{%s,"want":["Locomotion"],"replace":true,%s,"min_rate":0.3,"max_rate":1.5,"trajectory_direction":0}}`,ids,blends))
+    if !testing.expectf(t,result.code==0,"%s %s",result.message,result.data) {return}
+    text=string(serial_bytes(a))
+    testing.expectf(t,strings.contains(text,`"locomotion":[],"blends":[{"clips":["Idle","Walk"],"mode":"WALKING","samples":3}]`),"blends in %s",text)
+    if testing.expect_value(t,authoring_test_load(a,"characters/figure.match",&match),asset.Error.None) {
+        profile,error:=anim.match_view(&match,&a.assets.types)
+        ok:=error==.None && len(profile.clips)==1 && len(profile.samples)==3
+        if testing.expectf(t,ok,"%v: %d clips, %d samples",error,len(profile.clips),len(profile.samples)) {
+            source:=profile.clips[0]
+            testing.expect(t,base.text_get(source.clip[:])=="Idle" && base.text_get(source.blend[0][:])=="Walk" && source.blend[1][0]==0 && source.loop && source.modes==1<<1)
+            testing.expect(t,profile.samples[1]==anim.Match_Sample{source=0,weights={.5,.5,0,0},speed=.6} && profile.samples[2].weights=={0,1,0,0})
+            testing.expect(t,profile.info.min_rate==.3 && profile.info.max_rate==1.5 && profile.info.trajectory_direction==0)
+        }
+        asset.asset_close(&match)
+    }
+    // What a blend or the rates cannot be says what failed and how to fix it.
+    Refused :: struct {params,path,code:string}
+    for refused in ([?]Refused{
+        {`"blends":[{"clips":["Idle","Wave"],"samples":[{"weights":[1,0,0,0]}]}]`,"blends[0].clips[1]","Not_Locomotion"},
+        {`"blends":[{"clips":["Idle"],"samples":[{"weights":[1,0,0,0]}]}]`,"blends[0].clips","Blend_Size"},
+        {`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[0,0,0,0]}]}]`,"blends[0].samples[0].weights","Zero_Weights"},
+        {`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[1,0,1,0]}]}]`,"blends[0].samples[0].weights[2]","Extra_Weight"},
+        {`"blends":[{"clips":["Idle","Walk"]}]`,"blends[0].samples","Required"},
+        {`"min_rate":2,"max_rate":1`,"min_rate","Invalid_Rate"},
+    }) {
+        result=authoring_test_execute(a,"setup",fmt.tprintf(`{{%s,"want":["Locomotion"],"replace":true,%s}}`,ids,refused.params))
+        testing.expectf(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,fmt.tprintf(`"path":"%s"`,refused.path)) && strings.contains(result.data,refused.code) && strings.contains(result.data,`"fix"`),"%s: %s",refused.code,result.data)
+    }
+    jog:=[2]lib.Keyframe{{time=0,value={0,1,0,0}},{time=.5,value={0,1.02,0,0}}}
+    still:=[2]lib.Keyframe{{time=0,value={0,1,0,0}},{time=1,value={0,1.01,0,0}}}
+    paced:=[2]asset.Animation_Clip_Desc{{name="Idle",tracks={{target="root/pelvis",property=.Position,keys=still[:]}}},{name="Jog",tracks={{target="root/pelvis",property=.Position,keys=jog[:]}}}}
+    pace:=base.Asset_Id{840,11}
+    testing.expect_value(t,asset.animation_save(fmt.tprintf("%s/pace.anim",a.root),&a.assets.types,{id=pace,clips=paced[:]}),asset.Error.None)
+    testing.expect(t,host.assets_scan(&a.assets))
+    result=authoring_test_execute(a,"setup",fmt.tprintf(`{{"id":"11","library":"%s","folder":"paced","want":["Locomotion"],"blends":[{{"clips":["Idle","Jog"],"samples":[{{"weights":[1,1,0,0]}}]}}]}}`,authoring_test_id_text(pace)))
+    testing.expectf(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,`"path":"blends[0].clips[1]"`) && strings.contains(result.data,"Unequal_Duration") && strings.contains(result.data,"retime"),"%s",result.data)
+
     // A library larger than a .match or an .action takes fails and says how many there are.
     frames:=[2]lib.Keyframe{{time=0,value={0,1,0,0}},{time=1,value={0,1.01,0,0}}}
     turn:=[2]lib.Keyframe{{time=0,value=lib.quat_vec4(1)},{time=1,value=lib.quat_vec4(mm.quat_axis_angle({0,0,1},.5))}}

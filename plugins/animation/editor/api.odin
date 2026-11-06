@@ -42,7 +42,8 @@ Play_Params :: struct {
     sync:bool `mirai:"optional"`,
     weight:f32 `mirai:"optional,min=0,max=1"`,
     mode:anim.Layer_Mode `mirai:"optional"`,
-    reference:f32 `mirai:"optional,min=0,unit=s"`,
+    reference:f32 `mirai:"optional,min=0,unit=s,label=Additive layer: the time of reference_clip whose pose its clip is added over"`,
+    reference_clip:[64]u8 `mirai:"text,optional,label=Additive layer: a clip of the .anim whose pose at reference it adds the difference of its clip to, as an emote over a stand; empty is its own clip"`,
     curves:anim.Curve_Blend `mirai:"optional"`,
     mesh_space:bool `mirai:"optional,label=Override layer: its rotations blend in the space of the rig, keeping the turn of its clip whatever the base turns above it"`,
 }
@@ -168,7 +169,10 @@ play :: proc(s:^editor.Session,call:^api.Call) {
     name:=base.text_get(p.clip[:])
     if source!=value.asset && p.layer==0 && name!="" {authoring_failure(call,"clip","Program_Source","a clip on a layer over a .match or .agraph","base clip supplied","A base clip requires an .anim asset",fix="Pass layer 1 to 3 to play it over, or ask the .match for it with animation.request plays");return}
     if name!="" && lib.clip_find(&content.lib,base.name_hash(name))==0 {authoring_failure(call,"clip","Missing_Clip","a clip name in the source",name,"The clip does not exist in this animation asset");return}
-    if !anim.animation_play(&value,name,p.fade,p.loop,int(p.layer),base.text_get(p.over[:]),p.sync,p.weight,p.speed,p.mode,p.reference,p.curves,p.mesh_space) {authoring_failure(call,"layer","Invalid_Value","a valid layer and supported playback policies",fmt.tprintf("%d",p.layer),"The animation layer or its policies are invalid");return}
+    reference:=base.text_get(p.reference_clip[:])
+    if reference!="" && (p.layer==0 || p.mode!=.Additive) {authoring_failure(call,"reference_clip","Not_Additive","an Additive layer from 1 to 3",fmt.tprintf("layer %d in %v mode",p.layer,p.mode),"Only an additive layer adds its clip over a reference clip",fix="Pass mode Additive and layer 1 to 3, or leave reference_clip out");return}
+    if reference!="" && lib.clip_find(&content.lib,base.name_hash(reference))==0 {authoring_failure(call,"reference_clip","Missing_Clip","a clip name in the source",reference,"The reference clip does not exist in this animation asset",fix="Name a clip of the .anim (animation.inspect lists them), or leave it out to subtract the clip's own pose");return}
+    if !anim.animation_play(&value,name,p.fade,p.loop,int(p.layer),base.text_get(p.over[:]),p.sync,p.weight,p.speed,p.mode,p.reference,p.curves,p.mesh_space,reference) {authoring_failure(call,"layer","Invalid_Value","a valid layer and supported playback policies",fmt.tprintf("%d",p.layer),"The animation layer or its policies are invalid");return}
     if !edit_begin(s,call,"Play animation") {return}
     core.add(table,e,value)
     if !edit_end(s,call,w,true) {return}

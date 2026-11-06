@@ -53,14 +53,22 @@ MATCH_TRAIL :: 64
 
 Match_Query :: [MATCH_LANES]simd.f32x4
 
-// A clip in the database. modes is the set of locomotion modes it serves, bit m for mode m; an
-// entry clip starts one of them (a jump, a landing): it is searched only from its start, when the
-// body enters the mode. speed, when positive, is the m/s the clip travels at instead of the one
-// measured: an in-place clip goes that fast along its measured direction, or forward.
-Match_Clip :: struct {clip:Clip,modes:u32,entry:bool,speed:f32}
-// The rows of a clip. speed is how fast the body goes over the ground in it, m/s: that of its
-// root, or for a clip in place the one its feet push at.
-Match_Range :: struct {clip:Clip,first,count:i32,modes:u32,loop,entry:bool,speed:f32,travel:math.Vec3}
+// Clips a blended sample of the database mixes.
+MATCH_BLEND :: 4
+
+// A clip in the database, or a sample of a blend: clips[0] alone (no weights, or only weights[0]),
+// or the clips with a weight above zero mixed in phase at their share of the sum of the weights,
+// as the program mixes the leaves of a group. The clips of a blend loop and last the same within a
+// row; each frame of the sample is the blended pose at that share of the duration of each clip.
+// modes is the set of locomotion modes it serves, bit m for mode m; an entry clip starts one of
+// them (a jump, a landing): it is searched only from its start, when the body enters the mode.
+// speed, when positive, is the m/s it travels at instead of the one measured: an in-place clip
+// goes that fast along its measured direction, or forward.
+Match_Clip :: struct {clips:[MATCH_BLEND]Clip,weights:[MATCH_BLEND]f32,modes:u32,entry:bool,speed:f32}
+// The rows of a clip or of a blended sample, with its clips and their weights as shares of 1.
+// speed is how fast the body goes over the ground in it, m/s: that of its root, or for a clip in
+// place the one its feet push at.
+Match_Range :: struct {clips:[MATCH_BLEND]Clip,weights:[MATCH_BLEND]f32,first,count:i32,modes:u32,loop,entry:bool,speed:f32,travel:math.Vec3}
 Match_Database :: struct {
     rate:f32,                      // rows per second of each clip
     features:[]simd.f32x4,         // MATCH_LANES per row, normalized
@@ -102,8 +110,8 @@ match_database_bytes :: proc "contextless" (rows,ranges:int) -> int {
 
 // Samples every clip at about rate rows per second and keeps its features, refusing with
 // Memory_Limit a database that would keep more than limit bytes (0: any). A clip that does not
-// move the skeleton, lasts a single pose or a rig without feet and hips gives Invalid; db is
-// empty after an error.
+// move the skeleton or lasts a single pose, a blend match_clip_duration refuses, or a rig without
+// feet and hips gives Invalid; db is empty after an error.
 match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips:[]Match_Clip,rate:f32,weights:=MATCH_WEIGHTS_DEFAULT,limit:=0,allocator:=context.allocator) -> (error:Match_Build_Error) {
     match_database_free(db)
     error=.Invalid
@@ -113,12 +121,19 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
     forward,unit:=anim_unit(math.Vec3{rig.forward.x,0,rig.forward.z});if !unit {return}
     for weight in weights {if !anim_finite(weight) || weight<0 {return}}
     MAX_FRAMES :: 1<<20
-    total,longest:=0,0
+    total,longest,blend_tracks:=0,0,0
     for c in clips {
-        if !clip_valid(lib,c.clip) || !anim_finite(c.speed) || c.speed<0 {return}
-        count,_:=frames_layout(clip_duration(lib,c.clip),rate,MAX_FRAMES)
+        if !anim_finite(c.speed) || c.speed<0 {return}
+        duration,blended,valid:=match_clip_duration(lib,c,rate)
+        if !valid {return}
+        count,_:=frames_layout(duration,rate,MAX_FRAMES)
         if count<2 {return}
         total+=count;longest=max(longest,count)
+        if blended {
+            tracks:=0
+            for clip,k in c.clips {if c.weights[k]>0 {tracks+=len(clip_tracks(lib,clip))}}
+            blend_tracks=max(blend_tracks,tracks)
+        }
     }
     if limit>0 && match_database_bytes(total,len(clips))>limit {return .Memory_Limit}
     context.allocator=allocator
@@ -130,16 +145,24 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
     rest,e4:=make([]math.Transform,n);defer delete(rest)
     ranges,e5:=make([]Match_Range,len(clips))
     defer if !ok {delete(ranges)}
-    if e0!=nil || e1!=nil || e2!=nil || e3!=nil || e4!=nil || e5!=nil {return .Out_Of_Memory}
+    pose:Pose;defer pose_destroy(&pose)
+    if e0!=nil || e1!=nil || e2!=nil || e3!=nil || e4!=nil || e5!=nil || blend_tracks>0 && !pose_init(&pose,blend_tracks) {return .Out_Of_Memory}
     copy(rest,rig.skeleton.rest)
     skeleton:=rig.skeleton;skeleton.rest=rest
     body_rig:=Body_Rig{parents=skeleton.parents,rest=rest,body=rig.body,root=-1}
     row:=0
     for c,i in clips {
-        if !skeleton_bind(lib,c.clip,skeleton,tracks) {return}
-        count,exact:=frames_layout(clip_duration(lib,c.clip),rate,MAX_FRAMES)
-        frames:=Frames{rate=exact,bones=n,loop=clip_data(lib,c.clip).loop==.Loop,local=local[:count*n]}
-        if !frames_sample_clip(lib,c.clip,tracks,rest,nil,frames) {return}
+        duration,blended,_:=match_clip_duration(lib,c,rate)
+        count,exact:=frames_layout(duration,rate,MAX_FRAMES)
+        first:=0
+        for w,k in c.weights {if w>0 {first=k;break}}
+        frames:=Frames{rate=exact,bones=n,loop=clip_data(lib,c.clips[first]).loop==.Loop,local=local[:count*n]}
+        weights:=[MATCH_BLEND]f32{0=1}
+        if blended {
+            if !match_sample_blend(lib,c,skeleton,&pose,frames) {return}
+            sum:f32;for w in c.weights {sum+=w}
+            for w,k in c.weights {weights[k]=w/sum}
+        } else if !skeleton_bind(lib,c.clips[0],skeleton,tracks) || !frames_sample_clip(lib,c.clips[0],tracks,rest,nil,frames) {return}
         ground,grounded:=frames_ground(body_rig,frames,world);if !grounded {return}
         rest_world:=world[count*n:][:n]
         root:=int(ground.root)
@@ -149,7 +172,7 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
             speed=c.speed
         }
         motion:=Match_Motion{frames=frames,world=world[:count*n],rest=rest_world,root=root,in_place=ground.in_place,travel=travel,forward=forward}
-        ranges[i]={clip=c.clip,first=i32(row),count=i32(count),modes=c.modes,loop=frames.loop,entry=c.entry,speed=speed,travel=travel}
+        ranges[i]={clips=c.clips if blended else {0=c.clips[0]},weights=weights,first=i32(row),count=i32(count),modes=c.modes,loop=frames.loop,entry=c.entry,speed=speed,travel=travel}
         for frame in 0..<count {
             values:=&raw[row+frame]
             at:=f32(frame)
@@ -479,6 +502,54 @@ match_trajectory :: proc "contextless" (velocity,desired:math.Vec3,acceleration,
         trajectory.positions[k],trajectory.directions[k]={local.x,local.z},{toward.x,toward.z}
     }
     return
+}
+
+// How long a clip or a blended sample lasts (that of its first clip with a weight) and whether it
+// blends. False for a clip that is not valid, a weight that is not finite in 0..1, or a blend
+// whose clips do not all loop or last more than a row of rate apart.
+match_clip_duration :: proc "contextless" (lib:^Library,c:Match_Clip,rate:f32) -> (duration:f32,blended,ok:bool) {
+    members,first:=0,-1
+    for w,k in c.weights {
+        if !anim_finite(w) || w<0 || w>1 {return}
+        if w>0 {members+=1;if first<0 {first=k}}
+    }
+    if first<=0 && members<=1 {
+        if !clip_valid(lib,c.clips[0]) {return}
+        return clip_duration(lib,c.clips[0]),false,true
+    }
+    if !anim_finite(rate) || rate<=0 || !clip_valid(lib,c.clips[first]) {return}
+    duration=clip_duration(lib,c.clips[first])
+    for clip,k in c.clips {
+        if c.weights[k]<=0 {continue}
+        if !clip_valid(lib,clip) || clip_data(lib,clip).loop!=.Loop || abs(clip_duration(lib,clip)-duration)>1/rate {return}
+    }
+    return duration,true,true
+}
+
+// Samples a blend into out: at each frame each clip with a weight at the same share of its
+// duration, mixed as the program mixes the leaves of a group (pose_blend, then pose_bone over the
+// rest of the skeleton).
+@(private)
+match_sample_blend :: proc(lib:^Library,c:Match_Clip,skeleton:Skeleton,pose:^Pose,out:Frames) -> bool {
+    count:=frames_count(out)
+    if count<2 || len(skeleton.names)!=out.bones || len(skeleton.rest)!=out.bones {return false}
+    sum:f32;for w in c.weights {sum+=w}
+    for frame in 0..<count {
+        share:=f32(frame)/f32(count-1)
+        pose_clear(pose)
+        for clip,k in c.clips {
+            if c.weights[k]<=0 {continue}
+            player:=player_make(clip);player.time=share*clip_duration(lib,clip)
+            if !pose_blend(pose,lib,player,c.weights[k]/sum) {return false}
+        }
+        local:=frames_pose(out,frame)
+        for name,bone in skeleton.names {
+            value,_,_:=pose_bone(pose,name,skeleton.rest[bone])
+            if !anim_transform_valid(value) {return false}
+            local[bone]=value
+        }
+    }
+    return true
 }
 
 @(private)

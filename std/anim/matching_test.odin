@@ -2,6 +2,7 @@ package mirai_anim
 
 import cmath "core:math"
 import "core:math/linalg"
+import "core:simd"
 import "core:testing"
 import "mirai:std/base"
 import math "mirai:std/math"
@@ -31,7 +32,7 @@ match_test_rig :: proc(library:^Library) -> (rig:Match_Rig,clips:[3]Match_Clip,o
     for desc,i in descs {
         clip,error:=clip_add(library,desc)
         if error!=.None {return}
-        clips[i]={clip=clip,modes=1<<1 if i<2 else 1<<0}
+        clips[i]={clips={0=clip},modes=1<<1 if i<2 else 1<<0}
     }
     return rig,clips,true
 }
@@ -99,6 +100,38 @@ match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_f
     }
     told[1].speed=-1
     testing.expect_value(t,match_database_build(&db,&library,rig,told[:],30,weights),Match_Build_Error.Invalid)
+
+    // A sample of idle and walk at a quarter each (half and half of their sum) is measured from
+    // their blended pose: its rows are those of a clip keyed halfway between the two, and it
+    // travels at half the speed of the walk.
+    names:=rig.skeleton.names
+    half_left:=[4]Keyframe{{time=0,value={.1,-.95,.1875,0}},{time=.5,value={.1,-.95,-.1875,0}},{time=.75,value={.1,-.875,0,0}},{time=1,value={.1,-.95,.1875,0}}}
+    half_right:=[4]Keyframe{{time=0,value={-.1,-.95,-.1875,0}},{time=.25,value={-.1,-.875,0,0}},{time=.5,value={-.1,-.95,.1875,0}},{time=1,value={-.1,-.95,-.1875,0}}}
+    still:=[2]Keyframe{{time=0,value={.1,-.95,0,0}},{time=.5,value={.1,-.95,0,0}}}
+    other:=[2]Keyframe{{time=0,value={-.1,-.95,0,0}},{time=.5,value={-.1,-.95,0,0}}}
+    halfway,e0:=clip_add(&library,{name=base.name_hash("halfway"),loop=.Loop,tracks={{target=names[2],property=.Position,keys=half_left[:]},{target=names[3],property=.Position,keys=half_right[:]}}})
+    short,e1:=clip_add(&library,{name=base.name_hash("short"),loop=.Loop,tracks={{target=names[2],property=.Position,keys=still[:]},{target=names[3],property=.Position,keys=other[:]}}})
+    if !testing.expect(t,e0==.None && e1==.None) {return}
+    blend:=Match_Clip{clips={0=clips[0].clips[0],1=clips[1].clips[0]},weights={0=.25,1=.25},modes=1<<1}
+    measured:=[5]Match_Clip{clips[0],clips[1],clips[2],blend,{clips={0=halfway},modes=1<<1}}
+    if testing.expect(t,match_database_build(&db,&library,rig,measured[:],30,weights)==.None) {
+        a,b:=db.ranges[3],db.ranges[4]
+        testing.expectf(t,a.count==b.count && abs(a.speed-.75)<.1 && abs(a.speed-b.speed)<1e-3 && a.weights=={.5,.5,0,0} && a.clips==blend.clips,"a blend of idle and walk goes half as fast as the walk: %v",a)
+        for k in 0..<int(a.count) {
+            difference:=match_features(&db,int(a.first)+k)-match_features(&db,int(b.first)+k)
+            largest:f32
+            for lane in difference {for v in simd.to_array(lane) {largest=max(largest,abs(v))}}
+            testing.expectf(t,largest<1e-3,"row %d of the blend is that of the blended pose, off by %v",k,largest)
+        }
+    }
+    // A blend whose clips last different times, one that does not loop, or a weight out of 0..1.
+    unequal:=blend;unequal.clips[1]=short
+    once:=blend;once.clips[1]=clips[1].clips[0];data:=&library.clips[clips[1].clips[0]-1];data.loop=.Once
+    for refused,i in ([3]Match_Clip{unequal,once,{clips=blend.clips,weights={0=1.5,1=.5},modes=1<<1}}) {
+        attempt:=[2]Match_Clip{clips[0],refused}
+        testing.expectf(t,match_database_build(&db,&library,rig,attempt[:],30,weights)==.Invalid,"blend %d is refused",i)
+        if i==1 {data.loop=.Loop}
+    }
 }
 
 @(test)
@@ -196,7 +229,7 @@ match_test_steps :: proc(t:^testing.T,library:^Library,db:^Match_Database) -> bo
     right:=[3]Keyframe{{time=0,value={-.1,-.95,-.375,0}},{time=.25,value={-.1,-.8,0,0}},{time=.5,value={-.1,-.95,.375,0}}}
     step,error:=clip_add(library,{name=base.name_hash("step"),tracks={{target=rig.skeleton.names[2],property=.Position,keys=left[:]},{target=rig.skeleton.names[3],property=.Position,keys=right[:]}}})
     if error!=.None {return false}
-    all:=[4]Match_Clip{clips[0],clips[1],clips[2],{clip=step,modes=1<<1}}
+    all:=[4]Match_Clip{clips[0],clips[1],clips[2],{clips={0=step},modes=1<<1}}
     return match_database_build(db,library,rig,all[:],30)==.None && testing.expect(t,!db.ranges[3].loop && db.ranges[3].speed>MATCH_STILL)
 }
 

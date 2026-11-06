@@ -724,3 +724,23 @@ the_root_of_the_pose_follows_a_body_that_stops_at_once_within_its_lag_and_out_of
         }
     }
 }
+
+// Landing much later than told, the jump passes its marker in the air and plays on: the jump that
+// travels fits a body that stands worse, whatever reselect leaves.
+@(test)
+a_jump_past_its_landing_marker_in_the_air_plays_on_unless_a_row_fits_better :: proc(t:^testing.T) {
+    dt:=f32(1.0/60)
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f,leap=true)) {return}
+    for _ in 0..<10 {testing.expect(t,match_step(&f,dt,GROUND))}
+    testing.expect(t,match_step(&f,dt,AIR,time_to_land=.8))
+    left,before:=f32(.8-dt),f32(-1)
+    for tick:=0;left>dt*.5;tick+=1 {
+        if tick==10 {left+=1}
+        testing.expect(t,match_step(&f,dt,AIR,time_to_land=left))
+        value,_:=animation_match(&f.playback,f.rig)
+        testing.expectf(t,value.clip==base.name_hash("jump") && value.time>=before,"tick %d: the jump goes on, not %v from %.3f",tick,value,before)
+        before=value.time
+        left-=dt
+    }
+}

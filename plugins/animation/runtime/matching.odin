@@ -582,6 +582,11 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
                     query,weights,_:=lib.match_query(db,toward,current)
                     _,miss:=lib.match_event_rate(db,row,toward)
                     playing_on=lib.match_cost(db,row,query,weights)+miss*lib.MATCH_EVENT_MISS
+                } else if lost && row>=0 {
+                    // Past its marker before the body lands, it plays on unless a row fits better:
+                    // what reselect leaves may be the jump that faces the other way.
+                    query,weights,_:=lib.match_query(db,request,current)
+                    playing_on=lib.match_cost(db,row,query,weights)
                 }
                 best,cost,_=lib.match_search(db,toward,row,whole,info.reselect,&m.recent,noted)
                 // Entering the air with no entry start that lands in time (off a ledge, a short
@@ -595,7 +600,7 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
             }
             m.searches+=1;m.cost=min(cost,playing_on)
             if forced {m.searched.search,m.searched.mode,m.searched.entry,m.searched.time_to_land=m.searches,mode,entering,time_to_land if landing else 0}
-            if best>=0 && (forced || playing_on==max(f32) || cost<playing_on-info.bias) {
+            if best>=0 && (forced && !(lost && playing_on<max(f32)) || playing_on==max(f32) || cost<playing_on-info.bias) {
                 m.landing,m.tail=landing,false
                 range:=lib.match_range_of(db,best)
                 if row>=0 {lib.match_recent_leave(&m.recent,row)}

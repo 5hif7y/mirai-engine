@@ -168,16 +168,20 @@ history_branch :: proc(h:^Run_History) {
 
 // Before a frame of a run that was paused: a World that an edit changed since
 // the frame it is at becomes that frame, as a keyframe, and the past after it
-// goes. Going back to it then finds the edit.
+// goes. Going back to it then finds the edit. Content that loaded again since
+// that frame is an edit too, while the run plays or not: the frames before it
+// read what it replaced.
 history_before :: proc(s:^Session,r:^Run) {
     h:=r.history
-    if h==nil || !h.held && r.owner==0 {return}
+    if h==nil {return}
+    f:=history_frame_of(h,h.at)
+    reloaded:=f!=nil && host.content_reloaded_after(s.app,f.record.content)
+    if !reloaded && !h.held && r.owner==0 {return}
     if r.owner==0 && !play_paused(s) {h.held=false}
     w:=run_ref(s,r)
     fingerprint:=history_fingerprint(w)
-    f:=history_frame_of(h,h.at)
     t:=core.world_storage_of(w,core.Time)
-    if fingerprint==h.fingerprint || f==nil || t==nil {return}
+    if !reloaded && fingerprint==h.fingerprint || f==nil || t==nil {return}
     history_branch(h)
     if h.count>0 && history_at(h,h.count-1).frame==h.at {h.count-=1}
     history_key(s,h,w,t,edited=true)

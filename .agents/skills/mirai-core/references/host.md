@@ -478,14 +478,20 @@ row.
   with the clips, tracks and markers of the `.anim`; else it compresses and writes it, removing the
   other entries of the asset. Authoring reads the source `.anim`, never the cache.
 - **A compression runs in a job** with two workers or more, at once otherwise: the main thread
-  reads the `.anim` and its skeletons, the job builds the library, and `content_animation` takes it
-  and writes the cache on the main thread once the job ended. Meanwhile a first load is pending:
+  reads the `.anim` and its skeletons, the job builds the library, and the main thread takes it and
+  writes the cache at the start of the frame after the job ended (`app_content_adopt` in
+  `app_frame_begin`). Meanwhile a first load is pending:
   `content_animation` gives nil, `content_animation_pending` says so and the animation runtime
   plays the entity as one without asset (a rig holds its rest pose) without a problem; a reload
   keeps the previous library.
-  `content_animation_wait` waits, for whoever needs the library now (an API call). Unloading,
-  reloading again or ending the application waits for the job; a compression that ended is still
-  written.
+  `content_animation_wait` waits and takes it, for whoever needs the library now (an API call,
+  between frames). Unloading, reloading again or ending the application waits for the job; a
+  compression that ended is still written.
+- **What a job loads changes only at the start of a frame**, never on a lookup: a frame sees the
+  same content from start to end. `Frame_Record.content` keeps `Content.generations` when the frame
+  began, and a frame played again (`app_game_frame` with `replay`) finds pending a first load a job
+  made after that. A reload is not undone in a replay: `content_reloaded_after` says that the
+  frames before it read what it replaced.
 
 ## Shaders at run time
 

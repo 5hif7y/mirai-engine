@@ -133,9 +133,10 @@ Agent runs:
 History and recording:
 
 - Each run without network keeps its past (`Run_History`, `editor/play_history.odin`): for each
-  frame, what it gave the world (`host.Frame_Record`: its dt, the clock accumulator and the input)
-  and a hash of the `Transform`s it left; and every so often a copy of the world, a keyframe, made
-  with `copy_changed` (storages with `copy_kept`, like physics, keep only what they use). The
+  frame, what it gave the world (`host.Frame_Record`: its dt, the clock accumulator, the input and
+  the content it found loaded) and a hash of the `Transform`s it left; and every so often a copy of
+  the world, a keyframe, made with `copy_changed` (storages with `copy_kept`, like physics, keep
+  only what they use). The
   frames cover `Play_History.seconds`; the keyframes fit in `megabytes`, counting what their copies
   occupy, spaced to cover those seconds.
 - Going to a tick (`play.seek`, or the strip of the past under the scene while the user's Play is
@@ -150,7 +151,8 @@ History and recording:
   Before the frame following a pause (or each step of a turn), if the table versions changed since
   the frame it is at (`history_before`), the edited world becomes the keyframe of that frame and
   the later past is discarded: returning there finds the edit. An edit while the game runs does not
-  enter.
+  enter. Content loaded again since that frame (`host.content_reloaded_after`) is such an edit,
+  also while the game runs.
 - The Play of the strip passes the past again at the clock's pace, with the game paused: each
   frame goes to the ticks the clock covered and stops at the newest, or returns to the oldest with
   Loop. Resuming (Pause on the bar, `play.pause`) returns to the newest frame it played and

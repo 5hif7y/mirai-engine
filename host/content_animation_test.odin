@@ -7,6 +7,8 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import "mirai:asset"
+import "mirai:core"
+import "mirai:platform"
 import anim "mirai:std/anim"
 import "mirai:std/base"
 import "mirai:std/jobs"
@@ -174,6 +176,7 @@ an_animation_compresses_in_a_job_and_keeps_what_it_had_until_it_ends :: proc(t:^
     if !testing.expect(t,entry.load!=nil) {return}
     testing.expect(t,content_animation(app,ANIMATION_ID)==content && !content_animation_pending(app,ANIMATION_ID),"the old library plays meanwhile")
     jobs.wait(&app.jobs,jobs.OWNER,&entry.load.counter)
+    app_content_adopt(app)
     reloaded:=content_animation(app,ANIMATION_ID)
     testing.expect(t,reloaded==content && reloaded.generation!=generation && app.content.stats.reloads==1)
     after:=animation_samples(reloaded)
@@ -182,4 +185,83 @@ an_animation_compresses_in_a_job_and_keeps_what_it_had_until_it_ends :: proc(t:^
     allocations:=f.tracking.total_allocation_count
     for _ in 0..<8 {testing.expect(t,content_animation(app,ANIMATION_ID)==reloaded)}
     testing.expect_value(t,f.tracking.total_allocation_count,allocations)
+}
+
+@(private="file")
+Content_Frame_World :: struct {
+    time:core.Time,
+    frame_time:core.Frame_Time,
+    ready:bool, // the fixed tick found the .anim
+}
+
+@(private="file")
+content_frame_fixed :: proc(world,shared,editor,app:rawptr) {
+    (cast(^Content_Frame_World)world).ready=content_animation(cast(^App)app,ANIMATION_ID)!=nil
+}
+
+// A load a job ended is taken only at the start of a frame, never by a lookup in the middle of
+// one. A frame played again finds pending what it found pending when it played, also after a
+// reload, which says that it replaced what those frames read.
+@(test)
+a_frame_played_again_finds_the_content_it_found_when_it_played :: proc(t:^testing.T) {
+    f:Animation_Fixture
+    if !animation_fixture(t,&f,"animation-frames",threads=2) {return}
+    defer animation_fixture_destroy(&f)
+    p,error:=platform.create({headless=true,fixed_dt=1.0/60,pacing=platform.Frame_Pacing{}})
+    if !testing.expect_value(t,error,platform.Error.None) {return}
+    defer platform.destroy(p)
+    storages:=[2]core.Storage_Info{
+        {name="Time",type=core.Time,info=type_info_of(core.Time),
+            offset=offset_of(Content_Frame_World,time)},
+        {name="Frame_Time",type=core.Frame_Time,info=type_info_of(core.Frame_Time),
+            offset=offset_of(Content_Frame_World,frame_time)},
+    }
+    info:=core.World_Info{storages=storages[:]}
+    info.loops[.Game][.Fixed]=content_frame_fixed
+    app:=&f.app
+    app.info,app.platform,app.tick_dt,app.max_ticks=&info,p,1.0/60,4
+    defer {delete(app.worlds);assets_marks_free(&app.asset_marks)}
+    tick:=f64(app.tick_dt)
+    w:=Content_Frame_World{frame_time=core.FRAME_TIME_DEFAULT}
+    found:=w
+    records:[3]Frame_Record
+
+    app_frame_begin(app)
+    app_game_frame(app,&w,dt=tick,record=&records[0])
+    pending:=content_animation_pending(app,ANIMATION_ID)
+    testing.expect(t,!w.ready && pending,"the first tick starts the load")
+    entry:=&app.content.animations[app.content.index[ANIMATION_ID].index]
+    if !testing.expect(t,entry.load!=nil) {return}
+    jobs.wait(&app.jobs,jobs.OWNER,&entry.load.counter)
+    pending=content_animation_pending(app,ANIMATION_ID)
+    testing.expect(t,content_animation(app,ANIMATION_ID)==nil && pending,"a lookup leaves the job")
+    app_game_frame(app,&w,dt=tick,record=&records[1])
+    testing.expect(t,!w.ready,"so does a frame that did not begin")
+    app_frame_begin(app)
+    app_game_frame(app,&w,dt=tick,record=&records[2])
+    testing.expect(t,w.ready,"the start of the next frame takes it")
+
+    w=found
+    for &record,i in records {
+        app_game_frame(app,&w,replay=&record)
+        testing.expect_value(t,w.ready,i==2)
+    }
+    pending=content_animation_pending(app,ANIMATION_ID)
+    testing.expect(t,content_animation(app,ANIMATION_ID)!=nil && !pending,"outside a replay it is")
+
+    testing.expect(t,!content_reloaded_after(app,records[2].content))
+    testing.expect(t,animation_fixture_write(t,&f,2) && assets_refresh(&f.assets,{"walk.anim"}))
+    content_refresh(app)
+    if !testing.expect(t,entry.load!=nil) {return}
+    jobs.wait(&app.jobs,jobs.OWNER,&entry.load.counter)
+    reloaded:=content_reloaded_after(app,records[2].content)
+    testing.expect(t,!reloaded,"a reload waits for the start of a frame too")
+    app_frame_begin(app)
+    reloaded=content_reloaded_after(app,records[2].content)
+    testing.expect(t,reloaded,"what the frames read was replaced")
+    w=found
+    for &record,i in records {
+        app_game_frame(app,&w,replay=&record)
+        testing.expect_value(t,w.ready,i==2)
+    }
 }

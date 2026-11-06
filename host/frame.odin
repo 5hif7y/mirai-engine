@@ -195,6 +195,7 @@ app_frame_begin :: proc(app:^App) -> bool {
     app_assets_mark(app)
     app_textures_stream(app)
     app_assets_releases_step(app)
+    app_content_adopt(app)
     app_ui_fonts_apply(app)
     // The faces the contexts asked for, between their frames: text at those sizes is drawn sharp.
     if app.ui_font.ready {_=ui.font_faces_add(&app.ui_font)}
@@ -215,7 +216,8 @@ app_frame_begin :: proc(app:^App) -> bool {
 // a dt of zero or more is how long the frame lasts instead of what the
 // platform measured, for a world recorded at a fixed rate. record keeps what
 // the frame gave the world; replay gives it what a recorded frame did, in
-// place of the platform and the clock, and the frame runs the same again.
+// place of the platform and the clock, with the content it had loaded, and
+// the frame runs the same again.
 // The editor leaves Render out of a world it also runs its own loop on.
 app_game_frame :: proc(app:^App,world:rawptr,phases:=ALL_PHASES,step:=false,dt:=f64(-1),record:^Frame_Record=nil,replay:^Frame_Record=nil) {
     started:=time.tick_now()
@@ -243,7 +245,12 @@ app_game_frame :: proc(app:^App,world:rawptr,phases:=ALL_PHASES,step:=false,dt:=
         f.accumulator-=f64(due-app.max_ticks)*f64(app.tick_dt)
         due=app.max_ticks
     }
-    if record!=nil {record.dt,record.accumulator=lasted,f.accumulator}
+    if record!=nil {
+        record.dt,record.accumulator=lasted,f.accumulator
+        record.content=app.content.generations if app.content!=nil else 0
+    }
+    if c:=app.content;c!=nil && replay!=nil {c.replay=replay.content}
+    defer if c:=app.content;c!=nil {c.replay=nil}
     tick_input:core.Input
     devices:=app.script_devices
     app.script_devices=false

@@ -16,9 +16,10 @@ import "mirai:std/serial"
 // document a shipped game carries, named by the asset and by a hash of what it is made from:
 // the .anim, the skeletons its clips are measured on, the format and the compressor. A load
 // takes it from there when it is whole and matches the .anim; else it compresses in a job of
-// the application (at once with fewer than two workers), and content_animation takes the
-// library on the main thread once the job ended, writing the cache then. Until then the job
-// owns what it builds: the entry keeps what it had, and one that never loaded is pending.
+// the application (at once with fewer than two workers), and the main thread takes the library
+// at the start of the frame after the job ended (app_content_adopt), writing the cache then.
+// Until then the job owns what it builds: the entry keeps what it had, and one that never loaded
+// is pending.
 
 // What a load of an .anim reads and builds: between content_animation_start and the end of its
 // job, only the job touches it.
@@ -43,24 +44,50 @@ Content_Skeleton :: struct {
     file:asset.Asset, // closed when it could not be read: the clips are measured on their tracks
 }
 
-// Whether the first load of an .anim compresses: content_animation gives nil until it ends.
+// Whether the first load of an .anim compresses: content_animation gives nil until it ends. In a
+// frame played again, also while the frame it recorded had not seen that load yet.
 content_animation_pending :: proc(app:^App,id:base.Asset_Id) -> bool {
     c:=app.content
     if c==nil {return false}
     ref,known:=c.index[id]
     if !known || ref.kind!=.Animation {return false}
     entry:=&c.animations[ref.index]
-    return entry.load!=nil && entry.generation==0
+    if entry.generation==0 {return entry.load!=nil}
+    return content_animation_replay_pending(c,entry)
 }
 
 // content_animation for whoever needs the library now, as an API call: it waits for the
-// compression of its first load.
+// compression of its first load and takes it, between frames.
 content_animation_wait :: proc(app:^App,id:base.Asset_Id) -> ^Content_Animation {
     content:=content_animation(app,id)
     if content!=nil || !content_animation_pending(app,id) {return content}
     entry:=&app.content.animations[app.content.index[id].index]
+    if entry.load==nil {return nil}
     jobs.wait(&app.jobs,jobs.OWNER,&entry.load.counter)
+    content_animation_finish(app,entry,job=true)
     return content_animation(app,id)
+}
+
+// Takes the loads whose jobs ended, at the start of the frame of the application: what a job
+// loads changes only there, so a frame sees the same content from its start to its end and the
+// generations a Frame_Record keeps say what it saw.
+@(private)
+app_content_adopt :: proc(app:^App) {
+    c:=app.content
+    if c==nil {return}
+    for &entry in c.animations {
+        if entry.load==nil || jobs.pending(&entry.load.counter) {continue}
+        content_animation_finish(app,&entry,job=true)
+    }
+}
+
+// A first load a job made after the frame that plays again had seen it.
+@(private)
+content_animation_replay_pending :: proc "contextless" (
+    c:^Content,entry:^Content_Animation,
+) -> bool {
+    seen,replaying:=c.replay.?
+    return replaying && entry.adopted>seen
 }
 
 // Starts loading the file of entry: false when it cannot be read. What is samples already (a
@@ -82,18 +109,20 @@ content_animation_start :: proc(app:^App,entry:^Content_Animation) -> bool {
         return true
     }
     content_animation_build(load,jobs.OWNER)
-    content_animation_finish(app,entry)
+    content_animation_finish(app,entry,job=false)
     return true
 }
 
 // Takes what the ended load of entry built: its library replaces what entry had, and its
 // compression goes to the cache. One that failed leaves what entry had, and fails a first load.
+// The first load a job made keeps its generation in adopted.
 @(private)
-content_animation_finish :: proc(app:^App,entry:^Content_Animation) {
+content_animation_finish :: proc(app:^App,entry:^Content_Animation,job:bool) {
     c,load:=app.content,entry.load
     entry.load=nil
     defer content_animation_load_free(c,load)
     first:=entry.generation==0
+    defer if first && job {entry.adopted=entry.generation}
     if !load.ok {
         if first {content_loaded(c,entry,false)}
         return

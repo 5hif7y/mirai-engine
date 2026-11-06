@@ -2,6 +2,7 @@ package editor
 
 import "core:testing"
 import "mirai:core"
+import "mirai:host"
 import "mirai:platform"
 
 // A tick that moves the entity of the test as its input says: a frame played
@@ -186,6 +187,36 @@ an_edit_where_a_run_went_back_is_kept_as_a_keyframe_and_drops_the_frames_after_i
     seek=history_seek(s,r,history_frame_for(r.history,7))
     testing.expect(t,seek.ok && seek.matches && seek.replayed==1)
     testing.expect_value(t,history_x(f,r),edited+0.25)
+}
+
+// Content loaded again while a game plays is an edit: the World of the frame before it becomes a
+// keyframe of an edit, as the frames before it read what the reload replaced.
+@(test)
+content_loaded_again_while_a_run_plays_is_kept_as_a_keyframe_of_an_edit :: proc(t:^testing.T) {
+    f:=new(Play_Test);defer free(f)
+    if !play_test_open(t,f) {return}
+    defer play_test_close(f)
+    s:=&f.s
+    f.info.loops[.Game][.Fixed]=history_test_tick
+    settings:=PLAY_HISTORY_DEFAULT
+    s.play_history=&settings
+    testing.expect(t,play_start(s))
+    r:=run_find(s,0)
+    history_step(f,r,false)
+    r.history.interval=100
+    history_step(f,r,false)
+    keys:=r.history.count
+    content:host.Content
+    f.app.content=&content
+    defer f.app.content=nil
+    // What a reload leaves: the newest generation is a reload.
+    content.generations,content.reloaded=1,1
+    history_step(f,r,false)
+    if !testing.expect_value(t,r.history.count,keys+1) {return}
+    key:=history_at(r.history,r.history.count-1)
+    testing.expect(t,key.edited && key.frame==2)
+    history_step(f,r,false)
+    testing.expect_value(t,r.history.count,keys+1)
 }
 
 @(test)

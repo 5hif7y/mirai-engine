@@ -7,13 +7,15 @@ import render "mirai:render"
 
 // What a frame of the game loop gave its world besides its state: how long
 // it lasted, the time its fixed ticks came from (Frame_Time.accumulator, once
-// the clock and a step moved it) and the input its first tick and the frame
-// saw. Played again over the World it found, it runs the same.
+// the clock and a step moved it), the input its first tick and the frame
+// saw and the content it found loaded. Played again over the World it found,
+// it runs the same.
 Frame_Record :: struct {
     dt:f64,
     accumulator:f64,
     input:core.Input,
     frame_input:core.Input,
+    content:u32, // Content.generations when it began: a first load a job made after is pending
 }
 
 // A recording of a world: frame after frame drawn alone through the camera of

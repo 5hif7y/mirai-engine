@@ -10,8 +10,10 @@ import "mirai:asset"
 import "mirai:core"
 import erender "mirai:engine/render"
 import "mirai:host"
+import "mirai:platform"
 import lib "mirai:std/anim"
 import "mirai:std/base"
+import "mirai:std/jobs"
 import mm "mirai:std/math"
 
 // What animation_advance reads and writes, with the tables a test fills.
@@ -267,6 +269,84 @@ preview_plays_the_clip_in_the_editor_and_returns_to_its_start_when_it_stops :: p
     rig_world_advance(&w,&app,{dt=0.25,playing=true})
     testing.expect(t,abs(time(&w,rig)-0.25)<0.0001)
     testing.expect_value(t,w.problems.count,0)
+}
+
+// A Rig_World the game loop of the host runs: its fixed tick advances the rig.
+@(private="file")
+Rig_Frame_World :: struct {
+    time:core.Time,
+    frame_time:core.Frame_Time,
+    rig:Rig_World,
+}
+
+@(private="file")
+rig_frame_fixed :: proc(world,shared,editor,app:rawptr) {
+    w:=cast(^Rig_Frame_World)world
+    rig_world_advance(&w.rig,cast(^host.App)app,w.time,w.frame_time)
+}
+
+// The clip of an .anim that compresses in a job does not play while it compresses: a frame that
+// found it pending is played again from a copy of the World the same, with the clip ready.
+@(test)
+frames_played_again_while_a_clip_compressed_progress_as_they_did :: proc(t:^testing.T) {
+    directory:=rig_directory("replay");defer rig_directory_remove(directory)
+    _,mesh_id,clips_id,saved:=rig_assets(t,directory)
+    if !saved {return}
+    assets:host.Assets
+    if !testing.expect(t,host.assets_init(&assets,{root=directory})) {return}
+    defer host.assets_destroy(&assets)
+    p,error:=platform.create({headless=true,fixed_dt=1.0/60,pacing=platform.Frame_Pacing{}})
+    if !testing.expect_value(t,error,platform.Error.None) {return}
+    defer platform.destroy(p)
+    storages:=[2]core.Storage_Info{
+        {name="Time",type=core.Time,info=type_info_of(core.Time),
+            offset=offset_of(Rig_Frame_World,time)},
+        {name="Frame_Time",type=core.Frame_Time,info=type_info_of(core.Frame_Time),
+            offset=offset_of(Rig_Frame_World,frame_time)},
+    }
+    info:=core.World_Info{storages=storages[:]}
+    info.loops[.Game][.Fixed]=rig_frame_fixed
+    app:=host.App{assets=&assets,allocator=context.allocator,info=&info,platform=p}
+    app.tick_dt,app.max_ticks=1.0/60,4
+    if !testing.expect(t,jobs.system_init(&app.jobs,{threads=2})) {return}
+    defer {host.app_content_destroy(&app);jobs.system_destroy(&app.jobs);delete(app.worlds)}
+    // The World the run starts from, and the copy it is played again from.
+    make_world :: proc(w:^Rig_Frame_World,mesh,clips:base.Asset_Id) -> core.Entity {
+        w.frame_time=core.FRAME_TIME_DEFAULT
+        core.entities_init(&w.rig.entities)
+        rig:=core.create(&w.rig.entities)
+        core.add(&w.rig.transforms,rig,core.TRANSFORM_IDENTITY)
+        core.add(&w.rig.meshes,rig,{mesh=mesh})
+        animation:=ANIMATION_DEFAULT;animation.asset=clips
+        animation_play(&animation,"lift",fade=0,loop=false)
+        core.add(&w.rig.animations,rig,animation)
+        rig_world_settle(&w.rig)
+        return rig
+    }
+    played,replayed:Rig_Frame_World
+    rig:=make_world(&played,mesh_id,clips_id);defer rig_world_destroy(&played.rig)
+    make_world(&replayed,mesh_id,clips_id);defer rig_world_destroy(&replayed.rig)
+    time :: proc(w:^Rig_Frame_World,rig:core.Entity) -> f32 {
+        clip_time,_,_,_:=animation_progress(&w.rig.playback,rig)
+        return clip_time
+    }
+
+    records:[4]host.Frame_Record
+    times:[len(records)]f32
+    for &record,i in records {
+        host.app_game_frame(&app,&played,dt=f64(app.tick_dt),record=&record)
+        times[i]=time(&played,rig)
+        // The compression ends and is taken between frames, as an API call takes it.
+        if i>0 {continue}
+        testing.expect(t,host.content_animation_pending(&app,clips_id))
+        testing.expect(t,host.content_animation_wait(&app,clips_id)!=nil)
+    }
+    testing.expect(t,times[0]==0 && times[len(times)-1]>0,"the clip plays once it is ready")
+    for &record,i in records {
+        host.app_game_frame(&app,&replayed,replay=&record)
+        testing.expect_value(t,time(&replayed,rig),times[i])
+    }
+    testing.expect_value(t,played.rig.problems.count+replayed.rig.problems.count,0)
 }
 
 @(test)

@@ -9,7 +9,6 @@ import "mirai:project"
 import render "mirai:render"
 import anim "mirai:std/anim"
 import "mirai:std/base"
-import "mirai:std/jobs"
 import mm "mirai:std/math"
 import "mirai:std/serial"
 import "mirai:ui"
@@ -55,6 +54,7 @@ Content_Animation :: struct {
     names:[][asset.ANIMATION_NAME_CAPACITY]u8, // of each clip
     morphs:[]Content_Morph, // its curves of morph weights, each once
     load:^Content_Animation_Load, // a load of its file under way (content_animation.odin)
+    adopted:u32, // generation of its first load when a job made it; 0 when it loaded at once
 }
 // A curve "<path>/@morph/<target>": the name_hash of the curve and of the target, which binds a
 // mesh that names no path to the curve of each of its targets.
@@ -158,6 +158,10 @@ Content :: struct {
     retired:[dynamic]asset.Asset, // files of streams that were replaced or unloaded
     free:[Content_Kind][dynamic]u32, // entries that unloaded content left
     generations:u32,                 // of the last load
+    reloaded:u32,                    // generation of the last reload
+    // While a recorded frame plays again, the generations it saw (Frame_Record.content): a first
+    // load a job made after it is pending.
+    replay:Maybe(u32),
     fonts_waiting:bool,              // a font waits to be added to App.ui_font, or to take its new bytes
     stats:Content_Stats,
 }
@@ -504,7 +508,14 @@ content_reloaded :: proc(c:^Content,stamp:^Content_Stamp) {
     stamp.failed=false
     c.generations+=1
     stamp.generation=c.generations
+    c.reloaded=c.generations
     c.stats.reloads+=1
+}
+
+// Whether content loaded again after a frame that saw generation (Frame_Record.content): what
+// that frame read is no longer what plays.
+content_reloaded_after :: proc "contextless" (app:^App,generation:u32) -> bool {
+    return app.content!=nil && app.content.reloaded>generation
 }
 
 // The interface of a .ui, loaded the first time, with its images already
@@ -533,15 +544,16 @@ content_ui :: proc(app:^App,id:base.Asset_Id) -> ^Content_Ui {
 
 // The clips of an .anim, loaded the first time. nil for the zero id, an asset that is not an
 // .anim or cannot be loaded, when no room is left, and while its first load compresses
-// (content_animation_pending), which is not a failure.
+// (content_animation_pending), which is not a failure. A load a job ended is taken at the start
+// of the next frame (app_content_adopt), never here.
 content_animation :: proc(app:^App,id:base.Asset_Id) -> ^Content_Animation {
     c:=app_content(app)
     if c==nil || id=={} {return nil}
     entry,fresh:=content_slot(c,&c.animations,id,.Animation)
     if entry==nil {return nil}
     if fresh && !content_animation_start(app,entry) {content_loaded(c,entry,false)}
-    if entry.load!=nil && !jobs.pending(&entry.load.counter) {content_animation_finish(app,entry)}
-    return nil if entry.failed || entry.generation==0 else entry
+    if entry.failed || entry.generation==0 || content_animation_replay_pending(c,entry) {return nil}
+    return entry
 }
 
 // The sound of a .sound in the mixer of the application. Zero when it cannot

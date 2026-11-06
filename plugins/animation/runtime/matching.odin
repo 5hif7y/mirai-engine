@@ -538,14 +538,10 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
             r:=db.ranges[current];tail:=int(cmath.ceil(lib.MATCH_HORIZON[lib.MATCH_TRAJECTORY-1]*db.rate))
             ending=state.ended || !m.landing && !m.tail && int(r.count)>tail+1 && row>=int(r.first+r.count)-tail
         }
-        // A clip that no longer reaches its landing marker within the slack at a landing rate
-        // searches again; one a little off goes on at the nearest rate until a search finds better.
-        lost:=false
-        if m.landing && current>=0 {
-            ahead:=lib.match_event_ahead(db,current,state.time)
-            rate:=clamp(ahead/time_to_land,info.landing_rates[0],info.landing_rates[1])
-            lost=ahead<0 || abs(ahead/rate-time_to_land)>lib.MATCH_EVENT_SLACK
-        }
+        // A clip past its landing marker in the air searches again. One that reaches it off the
+        // landing goes on at the nearest rate, paying the miss, until a search finds better: a
+        // forced search would take whatever is left, a jump that faces the other way.
+        lost:=m.landing && current>=0 && lib.match_event_ahead(db,current,state.time)<0
         // With stationary_speed, a body that stands plays the clips that stand and one that moves
         // those that travel, whether they loop or not; an entry clip plays whatever the body does.
         filter_stationary,moving:=false,false

@@ -382,10 +382,14 @@ edit_face_rest :: proc "contextless" (rig:Body_Rig,input,output:Frames,scratch:[
     }
     if turned<0 {return {}}
     joint:=chain[turned]
+    // The body faces where the joint that carries the pelvis does: a turn split between it and
+    // those above it (the clip's side and a turn toward a camera on top) is undone whole at the
+    // highest, and the pelvis keeps its own sway.
+    carrier:=chain[min(turned,1)]
     for frame in 0..<count {
         local:=frames_pose(output,frame)
         if !pose_world(rig.parents,local,world) {return {error=.Numeric}}
-        turn:=heading(world[joint],rest[joint],up)
+        turn:=heading(world[carrier],rest[carrier],up)
         if !edit_set_rotation(rig.parents,local,world,joint,conj(turn)*world[joint].rotation) || !anim_pose_valid(local) {return {error=.Numeric}}
     }
     return {}

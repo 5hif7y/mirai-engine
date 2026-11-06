@@ -300,6 +300,27 @@ face_rest_turns_the_root_back_to_its_rest_facing :: proc(t:^testing.T) {
         testing.expect(t,math.quat_angle(frames_pose(faced,frame)[root].rotation,rig.rest[root].rotation)<1e-4)
         for value,bone in frames_pose(walk,frame) {if i32(bone)!=root {testing.expect(t,body_test_close(value,frames_pose(faced,frame)[bone]))}}
     }
+    // Turned sideways above the root while the root turns back toward a camera on top, as a stop
+    // of a 2.5D game does: the root faces its rest every frame and the pelvis keeps its sway.
+    split:=Frames{rate=walk.rate,bones=walk.bones,curves=walk.curves,loop=walk.loop,local=make([]math.Transform,len(walk.local),context.temp_allocator),values=walk.values}
+    copy(split.local,walk.local)
+    top:=body_test_bone(test_rig,"Skeleton")
+    count:=frames_count(split)
+    for frame in 0..<count {
+        pose:=frames_pose(split,frame)
+        pose[top].rotation=sideways*pose[top].rotation
+        pose[root].rotation=math.quat_axis_angle({0,1,0},-cmath.PI/2*f32(frame)/f32(count-1))*rig.rest[root].rotation
+    }
+    stopped,split_result:=body_test_edit(rig,Face_Rest{},split)
+    if !testing.expect_value(t,split_result.error,Edit_Error.None) {return}
+    world:=make([]math.Transform,split.bones,context.temp_allocator)
+    rest_world:=make([]math.Transform,split.bones,context.temp_allocator)
+    pose_world(rig.parents,rig.rest,rest_world)
+    for frame in 0..<count {
+        pose_world(rig.parents,frames_pose(stopped,frame),world)
+        testing.expectf(t,math.quat_angle(world[root].rotation,rest_world[root].rotation)<1e-3,"frame %d: the root turns %v from its rest",frame,math.quat_angle(world[root].rotation,rest_world[root].rotation))
+        testing.expect(t,body_test_close(frames_pose(split,frame)[pelvis],frames_pose(stopped,frame)[pelvis]))
+    }
     // Nothing turned: the clip stays as it was. Without a pelvis there is no root joint to find.
     again,_:=body_test_edit(rig,Face_Rest{},faced)
     for frame in 0..<frames_count(faced) {

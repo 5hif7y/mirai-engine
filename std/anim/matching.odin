@@ -63,7 +63,8 @@ Match_Reject :: enum u8 {None,Cost,Mode,Entry,Stationary,Reselect,Event,Rate}
 // (cost is their sum) and why the search did not give it.
 Match_Candidate :: struct {row:i32,cost,rate:f32,costs:[Match_Feature]f32,reason:Match_Reject}
 // The clips a search weighed, one per range by its best row: those it could give, least cost first
-// (the first is the row the search gives), then those it left out, least cost first.
+// (the first is the row the search gives), then those of its modes it left out, then those of other
+// modes, each least cost first.
 Match_Candidates :: struct {items:[MATCH_CANDIDATES]Match_Candidate,count:i32}
 
 Match_Query :: [MATCH_LANES]simd.f32x4
@@ -557,14 +558,14 @@ match_candidates_reject :: proc "contextless" (db:^Match_Database,candidates:^Ma
 }
 
 // Places a candidate by its cost after those that cost the same, those the search could give
-// before those it leaves out; past the last it is dropped.
+// first, those of other modes last; past the last it is dropped.
 @(private)
 match_candidates_add :: proc "contextless" (candidates:^Match_Candidates,candidate:Match_Candidate) {
     count:=int(clamp(candidates.count,0,MATCH_CANDIDATES))
     at:=count
-    left_out :: proc "contextless" (c:Match_Candidate) -> bool {return c.reason>.Cost}
+    rank :: proc "contextless" (c:Match_Candidate) -> int {return 0 if c.reason<=.Cost else 2 if c.reason==.Mode else 1}
     for item,i in candidates.items[:count] {
-        if left_out(candidate)==left_out(item) && candidate.cost<item.cost || !left_out(candidate) && left_out(item) {at=i;break}
+        if rank(candidate)==rank(item) && candidate.cost<item.cost || rank(candidate)<rank(item) {at=i;break}
     }
     if at>=MATCH_CANDIDATES {return}
     end:=min(count+1,MATCH_CANDIDATES)

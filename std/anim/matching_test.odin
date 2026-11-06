@@ -307,10 +307,15 @@ a_body_that_stands_leaves_out_every_clip_that_moves_and_one_that_moves_every_cli
     testing.expect_value(t,best,row)
     reasons:=match_test_reasons(&db,noted)
     testing.expectf(t,int(noted.items[0].row)==best && reasons=={.Stationary,.Cost,.Mode,.None},"a moving body leaves out idle and the fall: %v",reasons)
+    rank :: proc(c:Match_Candidate) -> int {return 0 if c.reason<=.Cost else 2 if c.reason==.Mode else 1}
     for item,i in noted.items[1:noted.count] {
         before:=noted.items[i]
-        testing.expect(t,(before.reason>.Cost)==(item.reason>.Cost) && before.cost<=item.cost || before.reason<=.Cost && item.reason>.Cost,"those it could pick go first, each part least cost first")
+        testing.expect(t,rank(before)==rank(item) && before.cost<=item.cost || rank(before)<rank(item),"those it could pick first, those of other modes last, each part least cost first")
     }
+    // A pose of the fall costs least as the fall itself, which serves another mode: still last.
+    fall:=Match_Request{query=match_features(&db,int(db.ranges[2].first)),trajectory=match_row_trajectory(&db,int(db.ranges[2].first)),modes=1<<1,filter_stationary=true,moving=true}
+    match_search(&db,fall,candidates=&noted)
+    testing.expectf(t,noted.count>0 && noted.items[noted.count-1].reason==.Mode,"the clip of another mode goes last: %v",noted.items[:noted.count])
     // The step playing, searched whole, is left out by the reselect.
     request.filter_stationary=false
     best,_,_=match_search(&db,request,row,true,.1,nil,&noted)

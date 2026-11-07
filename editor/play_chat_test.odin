@@ -2,6 +2,7 @@ package editor
 
 import "core:testing"
 import "mirai:core"
+import input "mirai:engine/input"
 import "mirai:host"
 import "mirai:platform"
 import "mirai:ui"
@@ -78,4 +79,54 @@ play_chat_toggles_before_game_input_and_restores_capture :: proc(t:^testing.T) {
     testing.expect(t,!gui.layout.left_open)
     play_pause(&s,false)
     testing.expect(t,s.mode==.Play && platform.window_relative_mouse(p))
+}
+
+@(private="file")
+Play_Tab_World :: struct {time:core.Time,bindings:input.Input_Map}
+
+// A game that binds Tab gets it while it plays with the input: the chat opens
+// with Tab after Eject, and closes with it.
+@(test)
+a_game_that_binds_tab_gets_it_and_the_chat_waits_for_eject :: proc(t:^testing.T) {
+    p,error:=platform.create({headless=true,fixed_dt=1.0/60,pacing=platform.Frame_Pacing{}})
+    testing.expect_value(t,error,platform.Error.None)
+    if p==nil {return}
+    defer platform.destroy(p)
+    ctx:ui.Context
+    testing.expect(t,ui.context_init(&ctx,{}))
+    defer ui.context_destroy(&ctx)
+    storages:=[2]core.Storage_Info{
+        {type=core.Time,offset=offset_of(Play_Tab_World,time)},
+        {type=input.Input_Map,offset=offset_of(Play_Tab_World,bindings)},
+    }
+    info:=core.World_Info{storages=storages[:]}
+    app:=host.App{info=&info,platform=p,tick_dt=1.0/60}
+    world:Play_Tab_World
+    viewport:Viewport
+    gui:=Editor_Ui{ctx=&ctx}
+    ai:=new(Ai);defer free(ai)
+    s:=Session{mode=.Play,app=&app,info=&info,gui=&gui,ai=ai,viewport=&viewport}
+    s.runs[0]={world=&world}
+    press :: proc(s:^Session,p:^platform.Platform,key:core.Key) {
+        platform.input_inject(p,platform.Key_Event{key=key,down=true})
+        platform.frame_begin(p)
+        s.app.ui_input=host.ui_input_from_platform(platform.input_frame(p))
+        play_input_update(s)
+        platform.input_inject(p,platform.Key_Event{key=key,down=false})
+        platform.frame_begin(p)
+        play_input_update(s)
+    }
+    testing.expect(t,!play_tab_to_game(&s),"a game that does not bind Tab leaves it to the chat")
+    INVENTORY :: input.Action(3)
+    input.input_map_action(&world.bindings,INVENTORY,.Button)
+    input.input_map_bind(&world.bindings,INVENTORY,input.binding_key(.Tab))
+    testing.expect(t,play_tab_to_game(&s))
+    press(&s,p,.Tab)
+    testing.expect(t,!s.play_chat_open && !s.play_input_released)
+    press(&s,p,.F1)
+    testing.expect(t,s.play_input_released && !play_tab_to_game(&s))
+    press(&s,p,.Tab)
+    testing.expect(t,s.play_chat_open)
+    press(&s,p,.Tab)
+    testing.expect(t,!s.play_chat_open)
 }

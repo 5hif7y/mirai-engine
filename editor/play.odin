@@ -1,5 +1,7 @@
 package editor
 
+import "mirai:core"
+import input "mirai:engine/input"
 import "mirai:platform"
 import "mirai:ui"
 
@@ -39,6 +41,16 @@ play_chat_set :: proc(s:^Session,open:bool) {
     }
 }
 
+// Whether Tab goes to the game: while it binds Tab and plays with the input.
+// Otherwise Tab toggles the chat; after Eject (F1), which never goes to the
+// game, it does for a game that binds it too.
+play_tab_to_game :: proc(s:^Session) -> bool {
+    r:=run_find(s,0)
+    if r==nil || s.mode!=.Play || s.play_input_released || s.play_chat_open {return false}
+    m:=core.world_storage_of(run_ref(s,r),input.Input_Map)
+    return m!=nil && input.input_map_takes(m,input.code_key(.Tab))
+}
+
 // The click that recaptures the scene and the Tab that toggles chat never reach the game.
 @(private)
 play_input_update :: proc(s:^Session) {
@@ -50,7 +62,7 @@ play_input_update :: proc(s:^Session) {
         return
     }
     if s.mode==.Play || s.mode==.Paused {
-        if .Tab in frame.keys_pressed && app.ui_input.modifiers=={} && s.gui.modal==.None && s.gui.ctx!=nil && !s.gui.ctx.modal_open && s.gui.ctx.popup.count==0 {
+        if .Tab in frame.keys_pressed && !play_tab_to_game(s) && app.ui_input.modifiers=={} && s.gui.modal==.None && s.gui.ctx!=nil && !s.gui.ctx.modal_open && s.gui.ctx.popup.count==0 {
             play_chat_set(s,!s.play_chat_open)
             app.ui_input.keys_pressed-={.Tab}
             app.ui_input.keys_repeated-={.Tab}

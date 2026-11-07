@@ -553,7 +553,9 @@ one per local player that has screens or sees a `World_Widget`.
 - **Modes (`UI_Input`).** `Passive` (a HUD) takes no navigation, keys or actions. Of each player's
   screens, the one with the greatest order that is not `Passive` and is not being hidden takes the
   input. `Modal` also blocks the actions of the seats it covers with `input_block`, releases the
-  relative mouse and shows the cursor while it is on top. With `input_context`, the screen that
+  relative mouse and shows the cursor while it is on top. The block takes them from the game, not
+  from the screen: its buttons and `Action_Bar` still read the actions they name past it
+  (`seat_action_for`) and the game sees `Clicked`. With `input_context`, the screen that
   takes the input puts those seats in its [context](control.md#contexts) (modal if it is `Modal`,
   instead of the block): its buttons read the actions of that context and the game, what remains.
 - A screen that stops being on top remembers its focus and recovers it on returning. One whose

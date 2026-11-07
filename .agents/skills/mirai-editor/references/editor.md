@@ -99,8 +99,10 @@ Input and layout:
 - Play minimizes the left panel and hides Details and the bottom panel. Tab opens AI and focuses
   the message; with AI open the game continues with neutral input and the relative mouse is
   released.
+- A game that binds Tab (`input_map_takes`) gets it while it has the input, as a shipped game
+  would; its chat opens with Tab after F1.
 - With the Play running the shortcuts belong to the game except F5 and Shift+F5 (stop), F6
-  (pause), F1 and Tab, which never reach it; `Esc` asks for Stop. The viewport receives no edit
+  (pause), F1, which never reaches it, and Tab unless the game binds it; `Esc` asks for Stop. The viewport receives no edit
   gestures (`hovered` false). Stop restores the layout and the mouse from before the Play.
 - `Paused` keeps the world and uses the editor camera; `play.step` runs exactly the ticks it
   asks for, and its network continues between steps

@@ -26,6 +26,7 @@ Source :: struct {
     gamepad:int,       // of the player; -1: any
     bindings:^inp.Input_Map,
     actions:^inp.Actions, // of the frame, for the window
+    seat_state:^inp.Seats, // whose blocks the interface being built reads its actions past
     seats:core.Read(inp.Seat),
     cameras:core.Read(render.Camera),
     exposures:core.Read(render.Exposure),
@@ -66,7 +67,7 @@ source_bind :: proc(
     seat:=p>0?inp.local_seat(seats,p-1):core.NONE
     settings,preferences:=settings,preferences
     s.source={
-        gui=gui,app=app,surface=s,effects=effects,player=p,seat=seat,gamepad=gamepad,bindings=bindings.ptr,actions=&actions.ptr.actions,seats=seats,
+        gui=gui,app=app,surface=s,effects=effects,player=p,seat=seat,gamepad=gamepad,bindings=bindings.ptr,actions=&actions.ptr.actions,seat_state=seat_state.ptr,seats=seats,
         cameras=cameras,exposures=exposures,view_volumes=view_volumes,volumes=volumes,worlds=worlds,pixels=s.key.scale*max(app.density,0.01),
         pack=host.content_prompts(app,settings.prompts),
     }
@@ -203,14 +204,16 @@ prompt_input :: proc "contextless" (code:inp.Input_Code,keyboard:bool) -> (input
 }
 
 // Whether an action is held and was pressed: of the frame for the window, of
-// the tick of its seat for a local player.
+// the tick of its seat for a local player, past the block of the Modal screen
+// being built: what a Modal takes from the game its own buttons still get.
 @(private)
 source_action :: proc(user:rawptr,action:u64) -> (down,pressed:bool) {
     src:=(^Source)(user)
     found:=action_named(src.gui,src.app.info,action) or_return
     state:inp.Action_State
     if src.player>0 {
-        state=inp.seat_action(src.seats,src.seat,found)
+        owner:=src.building!=nil?src.building.entity:core.NONE
+        state=inp.seat_action_for(src.seat_state,src.seats,src.seat,found,owner)
     } else if src.actions!=nil {
         state=inp.action(src.actions,found)
     }

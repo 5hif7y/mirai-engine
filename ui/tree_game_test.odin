@@ -330,6 +330,19 @@ an_action_clicks_its_button_and_a_hold_waits_for_it :: proc(t:^testing.T) {
     test_frame(&ctx,&input,test_game_build,&s)
     _,used=test_game_events(&s,.Clicked,"use")
     testing.expect_value(t,used,1)
+    // A press read from a fixed tick lasts for every frame of that tick: it clicks once, also
+    // when it was let go within the tick.
+    test_frame(&ctx,&input,test_game_build,&s)
+    _,used=test_game_events(&s,.Clicked,"use")
+    testing.expect_value(t,used,0)
+    s.held,s.pressed=false,false
+    test_frame(&ctx,&input,test_game_build,&s)
+    s.pressed=true
+    for _ in 0..<2 {
+        test_frame(&ctx,&input,test_game_build,&s)
+        if _,c:=test_game_events(&s,.Clicked,"use");c>0 {used+=c}
+    }
+    testing.expect_value(t,used,1)
 }
 
 @(test)

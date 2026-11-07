@@ -12,12 +12,13 @@ import sim "plugins:physics/runtime/sim"
 // and what is over it lets it (Character_State.cramped meanwhile). A Slide turns a crouch at a run
 // into a slide along the ground, and a Mantle turns a jump facing a ledge into a climb onto it.
 
-@(component,replicated,description="The character can slide (mode sliding of its Character): crouching while it runs at start_speed or faster, or landing at land_speed with crouch held, it slides along the ground at its speed, which gravity changes on a slope and friction takes, steering toward its move a little. It stops after time unless the ground falls away along its course, under end_speed, or with a jump. It needs a Walk with a crouch_height, the height it slides at.")
+@(component,replicated,description="The character can slide (mode sliding of its Character): crouching while it runs at start_speed or faster, or landing at land_speed with crouch pressed within buffer before (or held), it slides along the ground at its speed, at least min_speed and at most max_speed, which gravity changes on a slope and friction takes, steering toward its move a little. It stops after time unless the ground falls away along its course, when something stops it, or with a jump. It needs a Walk with a crouch_height, the height it slides at.")
 Slide :: struct {
     start_speed:f32 `mirai:"min=0,unit=m/s"`, // across its up, from which crouch starts a slide
     land_speed:f32 `mirai:"min=0,unit=m/s"`,  // the same for crouch held when it lands
     max_speed:f32 `mirai:"min=0,unit=m/s"`,
-    end_speed:f32 `mirai:"min=0,unit=m/s"`,   // under which it stops sliding
+    min_speed:f32 `mirai:"min=0,unit=m/s"`,   // its speed along its course while it slides is never under it
+    buffer:f32 `mirai:"min=0,unit=s"`,        // a crouch pressed this long before landing slides on landing
     time:f32 `mirai:"min=0,unit=s"`,          // it slides at most this long, unless downhill
     friction:f32 `mirai:"min=0,unit=1/s"`,    // share of its speed lost every second
     downhill_angle:f32 `mirai:"angle,min=0"`, // ground that falls away along its course steeper than this keeps it sliding past time
@@ -26,7 +27,7 @@ Slide :: struct {
     cooldown:f32 `mirai:"min=0,unit=s"`,      // after a slide, before crouch starts another
 }
 
-SLIDE_DEFAULT :: Slide{start_speed=4.5,land_speed=1.5,max_speed=12,end_speed=4,time=1.25,friction=0,downhill_angle=10*mm.RAD_PER_DEG,steer_angle=20*mm.RAD_PER_DEG,steer_speed=15*mm.RAD_PER_DEG,cooldown=0.5}
+SLIDE_DEFAULT :: Slide{start_speed=4.5,land_speed=1.5,max_speed=12,min_speed=4,buffer=1.5,time=1.25,friction=0,downhill_angle=10*mm.RAD_PER_DEG,steer_angle=20*mm.RAD_PER_DEG,steer_speed=15*mm.RAD_PER_DEG,cooldown=0.5}
 
 @(component,replicated,description="The character can mantle (mode mantling of its Character): with jump, looking at a wall within reach whose top is between min_height and max_height over its feet, with room to stand there and on the way, it climbs onto it in time. Standing, a top lower than ground_height is jumped onto instead; in the air, jump held climbs once delay has passed since it left the ground. Its Character keeps the height of the ledge (mantle_height) for the animation of the climb. It needs a Walk.")
 Mantle :: struct {
@@ -41,6 +42,8 @@ Mantle :: struct {
 
 MANTLE_DEFAULT :: Mantle{reach=1,min_height=0.5,max_height=2.5,ground_height=1.2,facing=45*mm.RAD_PER_DEG,time=0.6,delay=0.25}
 
+@(private) SLIDE_BLOCKED :: f32(0.5)     // share of the speed of the slide under which the body is held back
+@(private) SLIDE_BLOCK_AFTER :: f32(0.1) // s into a slide before that is checked: it starts from the speed the body had
 @(private) LEDGE_PROBE :: f32(0.5)     // share of its radius of the sphere that looks for the wall
 @(private) LEDGE_WALL :: f32(0.7)      // least part of the normal of a wall across its up: within 45° of upright
 @(private) LEDGE_INSET :: f32(0.05)    // m past the face, and over the top, the capsule is put
@@ -69,10 +72,12 @@ slide_velocity :: proc(loco:^Character,slide:Slide,n,up,current,wish,gravity:[3]
     course:=mm.quat_rotate(mm.quat_axis_angle(up,loco.slide_turn),loco.slide_course)
     along:=course-n*linalg.dot(course,n)
     if l:=linalg.length(along);l>1e-6 {along/=l} else {along=course}
-    speed:=linalg.length(current)
-    speed=clamp(speed+(linalg.dot(gravity,along)-slide.friction*speed)*dt,0,slide.max_speed)
+    moving:=linalg.length(current)
+    speed:=clamp(moving+(linalg.dot(gravity,along)-slide.friction*moving)*dt,slide.min_speed,max(slide.max_speed,slide.min_speed))
     downhill:=-linalg.dot(along,up)>cmath.sin(slide.downhill_angle)
-    ended=speed<slide.end_speed || loco.slide_time>=slide.time && !downhill
+    // Something in the way: the body goes at under half the speed the slide drives it at.
+    blocked:=loco.slide_time>SLIDE_BLOCK_AFTER && moving<SLIDE_BLOCKED*speed
+    ended=blocked || loco.slide_time>=slide.time && !downhill
     return along*speed,ended
 }
 

@@ -204,3 +204,47 @@ jump_facing_a_ledge_mantles_onto_it_where_it_fits :: proc(t:^testing.T) {
         testing.expect_value(t,f.loco.mode,MODE_WALKING)
     }
 }
+
+// With crouch_toggle a press crouches and the next stands; a press at a sprint slides, at least at
+// min_speed, and the slide ends standing when it moves. A press in the air within buffer of the
+// landing slides on landing even from a run under start_speed, raised to min_speed.
+@(test)
+crouch_toggles_and_a_press_in_the_air_slides_on_landing :: proc(t:^testing.T) {
+    f:Moves_Test
+    testing.expect(t,moves_init(&f,{0,0,0}))
+    defer sim.world_destroy(&f.w)
+    f.walk.crouch_toggle=true
+    f.slide=SLIDE_DEFAULT
+    moves_tick(&f,{},20)
+    moves_tick(&f,{},1,CROUCH)
+    moves_tick(&f,{},20)
+    testing.expect_value(t,f.loco.mode,MODE_CROUCHING)
+    moves_tick(&f,{},1,CROUCH)
+    moves_tick(&f,{},20)
+    testing.expect_value(t,f.loco.mode,MODE_WALKING)
+    // A run at 3: crouch does not slide on the ground.
+    f.walk.max_speed=3
+    moves_tick(&f,{0,0,-1},40)
+    moves_tick(&f,{0,0,-1},1,CROUCH)
+    moves_tick(&f,{0,0,-1},2)
+    testing.expect_value(t,f.loco.mode,MODE_CROUCHING)
+    moves_tick(&f,{0,0,-1},1,CROUCH)
+    moves_tick(&f,{0,0,-1},40)
+    testing.expect_value(t,f.loco.mode,MODE_WALKING)
+    // Jump, press crouch in the air: it slides on landing at min_speed and stands up after it.
+    moves_tick(&f,{0,0,-1},1,JUMP)
+    moves_tick(&f,{0,0,-1},10)
+    moves_tick(&f,{0,0,-1},1,CROUCH)
+    landed:=false
+    for _ in 0..<90 {
+        moves_tick(&f,{0,0,-1})
+        if f.loco.mode==MODE_SLIDING {landed=true;break}
+    }
+    testing.expect(t,landed,"the press in the air slides on landing")
+    moves_tick(&f,{0,0,-1},10)
+    testing.expect_value(t,f.loco.mode,MODE_SLIDING)
+    testing.expectf(t,flat_speed(&f)>=SLIDE_DEFAULT.min_speed-0.05,"slides at least at min_speed: %v",flat_speed(&f))
+    moves_tick(&f,{0,0,-1},80)
+    testing.expect_value(t,f.loco.mode,MODE_WALKING)
+    testing.expect(t,!f.loco.crouch_on,"moving at the end of the slide stands up")
+}

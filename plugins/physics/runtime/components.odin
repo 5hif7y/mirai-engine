@@ -157,6 +157,8 @@ Character :: struct {
     crouched:bool `mirai:"transient,readonly,hidden"`,    // it asks for the crouch_height of its Walk: crouching or sliding
     crouch_held:bool `mirai:"transient,readonly,hidden"`, // the crouch button was down in the last tick
     crouch_lock:bool `mirai:"transient,readonly,hidden"`, // a slide ended with it standing up: crouch held does nothing until it is let go
+    crouch_on:bool `mirai:"transient,readonly,hidden"`,   // it asks to crouch: crouch held, or toggled on with crouch_toggle
+    crouch_buffer:f32 `mirai:"transient,readonly,hidden,unit=s"`, // left of a crouch pressed in the air, which slides on landing
     air_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,       // since it last stood
     slide_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,     // it has slid
     slide_cooldown:f32 `mirai:"transient,readonly,hidden,unit=s"`, // left before crouch starts another slide

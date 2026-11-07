@@ -76,6 +76,7 @@ Walk :: struct {
     coyote_time:f32 `mirai:"min=0,unit=s"`, // after walking off a ledge, in which a jump still starts
     crouch_speed:f32 `mirai:"min=0,unit=m/s"`,  // top speed while crouched
     crouch_height:f32 `mirai:"min=0,unit=m"`,   // of its capsule crouched or sliding, from the feet to the top of the head; 0: it does not crouch
+    crouch_toggle:bool,                         // crouch turns crouching on and off; otherwise it crouches while crouch is held
 }
 
 WALK_DEFAULT :: Walk{max_speed=5,acceleration=30,braking=40,air_control=0.3,jump_height=1.2,coyote_time=0.1,crouch_speed=2.5,crouch_height=1.2}
@@ -345,7 +346,14 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
         crouch_down:=crouches && move_input.buttons&input.action_bit(crouch)!=0
         crouch_pressed:=crouch_down && !loco.crouch_held
         loco.crouch_held=crouch_down
-        if !crouch_down {loco.crouch_lock=false}
+        if walk.crouch_toggle {
+            if crouch_pressed {loco.crouch_on=!loco.crouch_on}
+        } else {
+            if !crouch_down {loco.crouch_lock=false}
+            loco.crouch_on=crouch_down && !loco.crouch_lock
+        }
+        // A crouch pressed in the air waits for the landing, where it slides.
+        if slides && !ground.standing && crouch_pressed {loco.crouch_buffer=slide.buffer} else {loco.crouch_buffer=max(loco.crouch_buffer-dt,0)}
         loco.slide_cooldown=max(loco.slide_cooldown-dt,0)
         was:=loco.mode
         if ground.standing {
@@ -363,17 +371,21 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
         current:=relative-n*linalg.dot(relative,n)
         // A slide starts from a crouch at a run or a landing with crouch held, goes on along the
         // ground and ends standing, or crouched when crouch is held without a move.
-        slide_end :: proc "contextless" (loco:^Character,slide:Slide,crouch_down,moving:bool) {
+        slide_end :: proc "contextless" (loco:^Character,walk:Walk,slide:Slide,crouch_down,moving:bool) {
             loco.mode,loco.slide_cooldown=MODE_WALKING,slide.cooldown
-            if crouch_down && moving {loco.crouch_lock=true}
+            if !moving {return}
+            if walk.crouch_toggle {loco.crouch_on=false} else if crouch_down {loco.crouch_lock,loco.crouch_on=true,false}
         }
         if was==MODE_SLIDING && !(slides && crouches && ground.standing) {
-            slide_end(loco,slide,crouch_down,wish!={})
+            slide_end(loco,walk,slide,crouch_down,wish!={})
             if !ground.standing {loco.mode=MODE_FALLING}
         }
         if slides && crouches && ground.standing && loco.mode!=MODE_SLIDING && loco.slide_cooldown<=0 && !loco.crouch_lock {
             speed:=linalg.length(current)
-            if crouch_pressed && speed>=slide.start_speed || was==MODE_FALLING && crouch_down && speed>=slide.land_speed {
+            landing:=was==MODE_FALLING && (loco.crouch_buffer>0 || !walk.crouch_toggle && crouch_down)
+            if crouch_pressed && loco.crouch_on && speed>=slide.start_speed || landing && speed>=slide.land_speed {
+                loco.crouch_buffer=0
+                if walk.crouch_toggle {loco.crouch_on=true}
                 slide_start(loco,current,up)
                 loco.mode=MODE_SLIDING
             }
@@ -381,10 +393,10 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
         if loco.mode==MODE_SLIDING {
             velocity,ended:=slide_velocity(loco,slide,n,up,current,wish,gravity,dt)
             move.ground={velocity,traction}
-            if ended {slide_end(loco,slide,crouch_down,wish!={})}
+            if ended {slide_end(loco,walk,slide,crouch_down,wish!={})}
         }
         if loco.mode!=MODE_SLIDING {
-            crouching:=ground.standing && (crouch_down && !loco.crouch_lock || ground.cramped)
+            crouching:=ground.standing && (loco.crouch_on || ground.cramped)
             loco.mode=ground.standing?(crouching?MODE_CROUCHING:MODE_WALKING):MODE_FALLING
             if move.ground.force==0 {
                 speed:=walk_speed(walk,move_input,move_input.buttons&input.action_bit(sprint)!=0,loco.mode==MODE_CROUCHING)
@@ -397,7 +409,7 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
                 move.ground={mm.approach_point(current,desired,rate*dt),traction}
             }
         }
-        loco.crouched=loco.mode==MODE_SLIDING || ground.standing && crouch_down && !loco.crouch_lock
+        loco.crouched=loco.mode==MODE_SLIDING || ground.standing && loco.crouch_on
 
         move.air={velocity=across(v,up)}
         if wish!={} && walk.air_control>0 {
@@ -415,7 +427,7 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
             move.launch=up*(cmath.sqrt(2*linalg.length(gravity)*walk.jump_height)-base)
             if ground.standing {move.air={velocity=across(v,up)}}
             if loco.mode==MODE_SLIDING {loco.slide_cooldown=slide.cooldown}
-            loco.mode,loco.jumped,loco.coyote,loco.crouched=MODE_FALLING,true,0,false
+            loco.mode,loco.jumped,loco.coyote,loco.crouched,loco.crouch_on=MODE_FALLING,true,0,false,false
         }
     }
     layers_apply(loco,&move,traction,pace)

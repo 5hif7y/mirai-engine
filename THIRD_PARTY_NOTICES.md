@@ -63,7 +63,8 @@ are kept here and, where the license asks for it, in the header of the file.
   The skinning solvers of `cook/rig/weights.odin`, altered. Editor.
 - **ACL 2.1, Animation Compression Library** (MIT; © 2017 Nicholas Frechette),
   <https://github.com/nfrechette/acl>. The table of bit rates, the constant and default tracks,
-  the rigid shells, the segments with their ranges and the search of bit rates of
+  the rigid shells, the segments with their ranges, the blocks of animated tracks and the search
+  of bit rates of
   `std/anim/compress.odin` and the stream that `std/anim/sampled.odin` reads, altered. Game.
 - **Motion-Matching** (MIT; © Daniel Holden), <https://github.com/orangeduck/Motion-Matching>.
   The features, their normalization by kind and the search bounded by runs of rows of

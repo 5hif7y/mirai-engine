@@ -209,7 +209,9 @@ which file of a folder has which id, of what type and what it depends on. A scan
 start of each file, skips names that start with a dot and files being written, and keeps what it
 saw in a cache: a file whose size and date did not change is not opened again, not even in another
 run. The editor has the cache in the project's `.mirai/cache/registry`; the player, cooking and
-`mirai asset` do not use it.
+`mirai asset` do not use it. What a scan saw depends on how the build reads a header: a cache (or
+packed index) of another `REGISTRY_CACHE_VERSION` or container `VERSION` is not read, and the
+scan opens every file and writes it again.
 
 - `registry_refresh` updates only the paths it is given, without walking the folder: the editor
   uses it with what it writes (save, import) and the watcher with what it sees change

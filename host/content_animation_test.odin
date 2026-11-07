@@ -153,6 +153,26 @@ a_compressed_animation_is_kept_in_the_cache_by_what_it_is_made_from :: proc(t:^t
     testing.expect(t,content_animation(app,ANIMATION_ID)!=nil && app.content.stats.compressed==1,"a damaged one is compressed")
     app_content_destroy(app)
     testing.expect(t,content_animation(app,ANIMATION_ID)!=nil && app.content.stats.compressed==0,"and written whole")
+
+    // Neither is one another build left under the same name whose clips are not those of the
+    // .anim: it reads whole, and the load compresses the .anim and writes the cache again.
+    files=animation_cache_files(&f)
+    if !testing.expect_value(t,len(files),1) {return}
+    path=fmt.tprintf("%s/%s",f.cache,files[0])
+    stale:asset.Document
+    if !testing.expect_value(t,asset.document_load(&stale,path),asset.Error.None) {return}
+    table,found:=asset.document_table(&stale,"clips")
+    if testing.expect(t,found && stale.tables[table].columns[0].size==size_of(asset.Animation_Clip)) {
+        clips:=mem.slice_data_cast([]asset.Animation_Clip,stale.tables[table].columns[0].data)
+        base.text_set(clips[0].name[:],"sprint")
+        testing.expect_value(t,asset.document_save(&stale,path),asset.Error.None)
+    }
+    asset.document_destroy(&stale)
+    app_content_destroy(app)
+    content=content_animation(app,ANIMATION_ID)
+    testing.expect(t,content!=nil && app.content.stats.compressed==1 && base.text_get(content.names[0][:])=="walk","a compression of other clips is compressed again")
+    app_content_destroy(app)
+    testing.expect(t,content_animation(app,ANIMATION_ID)!=nil && app.content.stats.compressed==0,"and the cache holds the .anim again")
 }
 
 // With job threads the first load compresses in a job: the .anim is pending until it ends, and a

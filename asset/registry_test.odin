@@ -226,6 +226,48 @@ registry_from_its_cache_refreshes_a_new_a_changed_and_a_removed_file_without_a_s
     free_all(context.temp_allocator)
 }
 
+// A cache that another build wrote, of another layout or container version, says what that build
+// saw in the files: here a file it could not read, which this build reads. It is not trusted:
+// the scan opens every file, finds the asset and writes the cache again.
+@(test)
+a_registry_cache_of_another_build_is_read_again_from_the_files :: proc(t:^testing.T) {
+    types:Types;types_init(&types);defer types_destroy(&types)
+    root:=test_path("registry-other-build")
+    os.remove_all(root)
+    defer os.remove_all(root)
+    os.make_directory_all(root)
+    write_material(t,&types,fmt.tprintf("%s/wall.mat",root),{10,10},{})
+    info,error:=os.stat(fmt.tprintf("%s/wall.mat",root),context.temp_allocator)
+    if !testing.expect(t,error==nil) {return}
+    cache:=fmt.tprintf("%s/.mirai/cache/registry",root)
+    os.make_directory_all(fmt.tprintf("%s/.mirai/cache",root))
+    // The layout of the cache before the container version was part of it, then the current one
+    // written by a build of another container version.
+    for layout in ([2][2]u32{{3,0},{REGISTRY_CACHE_VERSION,VERSION+1}}) {
+        w:serial.Writer;serial.writer_init(&w,allocator=context.temp_allocator)
+        serial.write_u32(&w,REGISTRY_CACHE_MAGIC)
+        serial.write_u32(&w,layout[0])
+        if layout[1]!=0 {serial.write_u32(&w,layout[1])}
+        serial.write_varint(&w,1)
+        serial.write_string(&w,"wall.mat")
+        serial.write_svarint(&w,info.size)
+        serial.write_svarint(&w,time.time_to_unix_nano(info.modification_time))
+        serial.write_u8(&w,u8(Registry_State.Broken))
+        if !testing.expect_value(t,serial.file_write_atomic(cache,serial.writer_bytes(&w)),serial.File_Error.None) {return}
+        r:Registry;registry_init(&r,root,cache)
+        testing.expect_value(t,registry_scan(&r),Error.None)
+        testing.expect_value(t,r.stats,Registry_Stats{files=1,assets=1,opened=1,reused=0})
+        wall,found:=registry_find(&r,{10,10})
+        testing.expect(t,found && wall.state==.Asset && wall.path=="wall.mat")
+        registry_destroy(&r)
+        again:Registry;registry_init(&again,root,cache)
+        testing.expect_value(t,registry_scan(&again),Error.None)
+        testing.expect_value(t,again.stats,Registry_Stats{files=1,assets=1,opened=0,reused=1})
+        registry_destroy(&again)
+    }
+    free_all(context.temp_allocator)
+}
+
 @(test)
 registry_loads_a_packed_index_without_looking_at_the_folder :: proc(t:^testing.T) {
     types:Types;types_init(&types);defer types_destroy(&types)

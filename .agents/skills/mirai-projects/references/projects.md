@@ -168,6 +168,10 @@ the `Project` owns everything it points to.
   [textures](../../mirai-imports/references/imports.md#texture-cache), the
   [compressed animations](../../mirai-core/references/host.md#content) and the
   [previews](../../mirai-editor/references/panels.md#previews) are made again.
+- **A cache never makes a valid asset fail.** An entry is keyed on everything it depends on (the
+  formats and versions of what wrote it), and every read checks it against the asset: one that
+  does not read or does not match, as one an older build left in a copied project, is made again
+  from the asset and written over.
 - `shader_generation(root)` is where a build publishes the shader generation;
   `shader_generation_find(root)` gives the one a run loads (that one, or `<root>/shaders` of a
   shipped game).

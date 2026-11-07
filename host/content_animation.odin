@@ -14,8 +14,9 @@ import "mirai:std/serial"
 // The .anim of a project keeps its keys; the runtime plays them compressed into streams
 // (asset.animation_compress). A compression is kept in App.animation_cache as the cooked
 // document a shipped game carries, named by the asset and by a hash of what it is made from:
-// the .anim, the skeletons its clips are measured on, the format and the compressor. A load
-// takes it from there when it is whole and matches the .anim; else it compresses in a job of
+// the .anim, the skeletons its clips are measured on, the container and .anim formats and the
+// compressor. A load takes it from there when it is whole and holds the clips of the .anim
+// (content_animation_cache_matches); else, as without a cache, it compresses in a job of
 // the application (at once with fewer than two workers), and the main thread takes the library
 // at the start of the frame after the job ended (app_content_adopt), writing the cache then.
 // Until then the job owns what it builds: the entry keeps what it had, and one that never loaded
@@ -216,7 +217,7 @@ content_animation_read :: proc(
     if allocation!=nil {return false}
     count:=0
     config:=anim.COMPRESS_DEFAULT
-    versions:=u64(anim.COMPRESS_VERSION)<<16|u64(asset.ANIMATION_VERSION)
+    versions:=u64(asset.VERSION)<<32|u64(anim.COMPRESS_VERSION)<<16|u64(asset.ANIMATION_VERSION)
     key:=base.hash_combine(load.file.blob.header.content_hash,versions)
     shell:=u64(transmute(u32)config.precision)|u64(transmute(u32)config.shell)<<32
     key=base.hash_combine(key,shell)
@@ -249,14 +250,35 @@ content_animation_read :: proc(
     error=.Corrupt
     whole:=asset.blob_verify_hash(&cached.blob) && header.id==entry.id
     if whole && header.kind==asset.KIND_ANIMATION {view,error=asset.animation_view(&cached,&a.types)}
-    source:=load.view
-    if error!=.None || len(view.clips)!=len(source.clips) || len(view.tracks)!=len(source.tracks) ||
-        len(view.markers)!=len(source.markers) {
+    if error!=.None || !content_animation_cache_matches(load.view,view) {
         asset.asset_close(&cached)
         return true
     }
     asset.asset_close(&load.file)
     load.file,load.view,load.compress=cached,view,false
+    return true
+}
+
+// Whether a compression of the cache holds the clips of source: the same clips, tracks and
+// markers by name, place, root and skeleton, whatever the encoding of its tracks. One that
+// another build wrote otherwise is compressed again and replaced, never played.
+@(private="file")
+content_animation_cache_matches :: proc(source,cached:asset.Animation_View) -> bool {
+    if len(cached.clips)!=len(source.clips) || len(cached.tracks)!=len(source.tracks) || len(cached.markers)!=len(source.markers) {return false}
+    for clip,i in source.clips {
+        other:=cached.clips[i]
+        same:=other.name==clip.name && other.root==clip.root && other.skeleton==clip.skeleton
+        same&&=other.first_track==clip.first_track && other.track_count==clip.track_count
+        same&&=other.first_marker==clip.first_marker && other.marker_count==clip.marker_count
+        if !same {return false}
+    }
+    for track,i in source.tracks {
+        other:=cached.tracks[i]
+        if other.target!=track.target || other.property!=track.property || other.slot!=track.slot {return false}
+    }
+    for marker,i in source.markers {
+        if cached.markers[i]!=marker {return false}
+    }
     return true
 }
 

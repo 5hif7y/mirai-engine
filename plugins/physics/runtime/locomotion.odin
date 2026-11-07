@@ -61,6 +61,8 @@ Layered_Move :: struct {
 @(component,replicated,description="The character can walk, jump and fall (modes walking and falling of its Character).")
 Walk :: struct {
     max_speed:f32 `mirai:"min=0,unit=m/s"`,
+    sprint_speed:f32 `mirai:"min=0,unit=m/s"`,     // while the sprint action is held; at most max_speed: it does not sprint
+    backward_slowdown:f32 `mirai:"min=0,max=1"`,   // share of the speed lost moving straight back from where it looks
     acceleration:f32 `mirai:"min=0,unit=m/s2"`,
     braking:f32 `mirai:"min=0,unit=m/s2"`,
     air_control:f32 `mirai:"min=0,max=1"`,  // share of the acceleration and of the traction left in the air
@@ -192,7 +194,7 @@ locomotion_step :: proc(
             layers_apply(c,&next.value,c.traction_force,pace)
             move_paced(&next.value,c,pace,motion.linear,ground,frame)
         } else {
-            next.value=locomotion_move_paced(c,walk,fly,swim,ground,frame,given,input.action_of(walk_actions,.Jump),motion.linear,gravity_of_entity(physics,e)*c.gravity_scale,time.dt,pace)
+            next.value=locomotion_move_paced(c,walk,fly,swim,ground,frame,given,input.action_of(walk_actions,.Jump),input.action_of(walk_actions,.Sprint),motion.linear,gravity_of_entity(physics,e)*c.gravity_scale,time.dt,pace)
         }
         if row:=core.row_of(moves,e);row<0 {
             core.add(moves,e,next)
@@ -210,6 +212,22 @@ move_wish :: proc "contextless" (move_input:input.Move_Input,frame:mm.Quat) -> [
     return mm.quat_rotate(frame,wish)
 }
 
+// Within this angle of where it looks a move may sprint: cos 60°.
+SPRINT_FORWARD :: f32(0.5)
+
+// The top speed of walking for this input: sprint_speed while sprinting
+// forward (within 60° of the look) when it is faster, less backward_slowdown by
+// how straight back from the look the move points (-Z of the move is forward).
+walk_speed :: proc "contextless" (walk:Walk,move_input:input.Move_Input,sprinting:bool) -> f32 {
+    speed:=walk.max_speed
+    l:=linalg.length(move_input.move.xz)
+    if sprinting && walk.sprint_speed>speed && l>0 && -move_input.move.z/l>=SPRINT_FORWARD {speed=walk.sprint_speed}
+    if l>0 && walk.backward_slowdown>0 {
+        speed*=1-clamp(walk.backward_slowdown,0,1)*max(move_input.move.z/l,0)
+    }
+    return speed
+}
+
 // The Character_Move of one tick of a mode of the locomotion: from the input
 // (jump is the action of Walk_Action.Jump among its buttons), the ground and
 // the fluid the last step left, the frame of its vertical, the velocity of
@@ -217,7 +235,7 @@ move_wish :: proc "contextless" (move_input:input.Move_Input,frame:mm.Quat) -> [
 // time of the world (dt is that of its own time). walking and swim are nil
 // for a character that cannot walk or swim: one that only swims stays in the
 // mode out of the water.
-locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump:input.Action,velocity,gravity:[3]f32,dt:f32,pace:f32=1) -> (move:sim.Character_Move) {
+locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint:input.Action,velocity,gravity:[3]f32,dt:f32,pace:f32=1) -> (move:sim.Character_Move) {
     up:=mm.quat_rotate(frame,{0,1,0})
     across :: proc "contextless" (v,up:[3]f32) -> [3]f32 {return v-up*linalg.dot(v,up)}
     look:=frame*mm.quat_axis_angle({0,1,0},move_input.look_yaw)*mm.quat_axis_angle({1,0,0},move_input.look_pitch)
@@ -286,10 +304,11 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
 
         n:=ground.ground_normal
         if linalg.dot(n,up)<=0 {n=up}
+        speed:=walk_speed(walk,move_input,move_input.buttons&input.action_bit(sprint)!=0)
         desired:[3]f32
         if wish!={} {
             along:=wish-up*(linalg.dot(wish,n)/linalg.dot(n,up))
-            desired=along*(walk.max_speed*linalg.length(wish)/linalg.length(along))
+            desired=along*(speed*linalg.length(wish)/linalg.length(along))
         }
         relative:=v-ground.ground_velocity
         current:=relative-n*linalg.dot(relative,n)
@@ -298,7 +317,7 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
 
         move.air={velocity=across(v,up)}
         if wish!={} && walk.air_control>0 {
-            move.air={mm.approach_point(move.air.velocity,wish*walk.max_speed,walk.air_control*walk.acceleration*dt),walk.air_control*traction}
+            move.air={mm.approach_point(move.air.velocity,wish*speed,walk.air_control*walk.acceleration*dt),walk.air_control*traction}
             // Ground too steep to walk is not climbed from the air either.
             if ground.ground_normal!={} && !ground.walkable && ground.ground_distance<=loco.step_height {
                 flat:=across(ground.ground_normal,up)
@@ -382,11 +401,11 @@ move_paced :: proc "contextless" (move:^sim.Character_Move,loco:^Character,pace:
 // The Character_Move of one tick of the world for a character whose time runs
 // pace times it (core.pace_of): locomotion_move in its own time, from the
 // ground, the velocity and the dt of the world.
-locomotion_move_paced :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump:input.Action,velocity,gravity:[3]f32,dt,pace:f32) -> (move:sim.Character_Move) {
+locomotion_move_paced :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint:input.Action,velocity,gravity:[3]f32,dt,pace:f32) -> (move:sim.Character_Move) {
     own:=ground
     own.ground_velocity/=pace
     own.fluid_velocity/=pace
-    move=locomotion_move(loco,walking,fly,swim,own,frame,move_input,jump,velocity/(loco.pace>0?loco.pace:1),gravity,dt*pace,pace)
+    move=locomotion_move(loco,walking,fly,swim,own,frame,move_input,jump,sprint,velocity/(loco.pace>0?loco.pace:1),gravity,dt*pace,pace)
     move_paced(&move,loco,pace,velocity,ground,frame)
     return
 }

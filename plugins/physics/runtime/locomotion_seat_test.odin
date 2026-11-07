@@ -98,7 +98,7 @@ seat_test_seat :: proc(f:^Seat_Test) -> core.Entity {
 // The input map of a world whose code declares the walk actions, without input.mirai.
 @(private="file")
 seat_test_map :: proc(m:^input.Input_Map,problems:^core.Problems) {
-    names:=[]core.Name_Info{{type=input.Action,value=0,name="look"},{type=input.Action,value=i64(TEST_MOVE),name="move"},{type=input.Action,value=i64(TEST_JUMP),name="jump"}}
+    names:=[]core.Name_Info{{type=input.Action,value=0,name="look"},{type=input.Action,value=i64(TEST_MOVE),name="move"},{type=input.Action,value=i64(TEST_JUMP),name="jump"},{type=input.Action,value=i64(TEST_SPRINT),name="sprint"}}
     storages:=[]core.Storage_Info{
         {name="Walk_Actions",type=Walk_Actions,info=type_info_of(Walk_Actions),default=proc(dst:rawptr) {(cast(^Walk_Actions)dst)^=walk_actions_default()}},
         {name="Look_Actions",type=input.Look_Actions,info=type_info_of(input.Look_Actions),default=proc(dst:rawptr) {(cast(^input.Look_Actions)dst)^=input.look_actions_default()}},

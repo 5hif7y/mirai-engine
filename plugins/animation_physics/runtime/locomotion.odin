@@ -17,7 +17,7 @@ import phys "plugins:physics/runtime"
 // the speed of the root of its pose. A game writes no code for locomotion; the clips and their
 // modes are in the .match.
 @(step="fixed",before="animation_sample")
-animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Read(phys.Character_State),animations:core.Read(anim.Animation),motions:core.Read(core.Motion),inputs:core.Read(inp.Move_Input),walks:core.Read(phys.Walk),flights:core.Read(phys.Fly),swims:core.Read(phys.Swim),worlds:core.Read(core.World_Transform),playback:core.Ref(anim.Playback),physics:core.Ref(phys.Physics_State),requests:^anim.Animation_Requests,warps:^anim.Motion_Requests,problems:^core.Problems) {
+animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Read(phys.Character_State),animations:core.Read(anim.Animation),motions:core.Read(core.Motion),inputs:core.Read(inp.Move_Input),walk_actions:inp.Input_Of(phys.Walk_Action),walks:core.Read(phys.Walk),flights:core.Read(phys.Fly),swims:core.Read(phys.Swim),worlds:core.Read(core.World_Transform),playback:core.Ref(anim.Playback),physics:core.Ref(phys.Physics_State),requests:^anim.Animation_Requests,warps:^anim.Motion_Requests,problems:^core.Problems) {
     for row in 0..<core.count(characters) {
         entity:=core.entity_at(characters,row)
         animation,animated:=core.get(animations,entity)
@@ -40,7 +40,10 @@ animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Rea
         case phys.MODE_FLYING:
             if fly,ok:=core.get(flights,entity);ok {goal.desired,goal.acceleration,goal.braking=wish*fly.speed,fly.acceleration,fly.acceleration}
         case:
-            if walk,ok:=core.get(walks,entity);ok {goal.desired,goal.acceleration,goal.braking=walk_goal(walk,character.mode==phys.MODE_FALLING,wish,going.linear)}
+            if walk,ok:=core.get(walks,entity);ok {
+                sprinting:=input.buttons&inp.action_bit(inp.action_of(walk_actions,.Sprint))!=0
+                goal.desired,goal.acceleration,goal.braking=walk_goal(walk,character.mode==phys.MODE_FALLING,wish,going.linear,phys.walk_speed(walk,input,sprinting))
+            }
         }
         if !anim.match_goal(requests,goal) {
             core.report(problems,entity,"animation.match_goal","the locomotion of this Character was not told to its motion matching: a value of its body is not finite, its mode is past 31, or more than %d characters animate in one tick; fix its Character, or animate fewer of them",anim.MATCH_GOAL_CAPACITY)
@@ -53,10 +56,11 @@ animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Rea
 
 // What a Walk does with the velocity of the body, as the Character does: on the ground it goes to
 // the wish at its acceleration and brakes without one; in the air only a wish steers it, at
-// air_control of its acceleration, and without one it keeps its course.
-walk_goal :: proc "contextless" (walk:phys.Walk,falling:bool,wish,velocity:mm.Vec3) -> (desired:mm.Vec3,acceleration,braking:f32) {
-    if !falling {return wish*walk.max_speed,walk.acceleration,walk.braking}
+// air_control of its acceleration, and without one it keeps its course. speed is the top speed
+// the Character walks this input at (phys.walk_speed: sprint, moving back).
+walk_goal :: proc "contextless" (walk:phys.Walk,falling:bool,wish,velocity:mm.Vec3,speed:f32) -> (desired:mm.Vec3,acceleration,braking:f32) {
+    if !falling {return wish*speed,walk.acceleration,walk.braking}
     air:=walk.air_control*walk.acceleration
     if wish=={} || walk.air_control<=0 {return {velocity.x,0,velocity.z},air,air}
-    return wish*walk.max_speed,air,air
+    return wish*speed,air,air
 }

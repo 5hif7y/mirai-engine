@@ -347,3 +347,22 @@ the_eyes_sit_along_the_vertical_of_a_character_on_a_planet :: proc(t:^testing.T)
     testing.expectf(t,close_vec(up,linalg.normalize([3]f32{1,1,0})),"halfway between the ups of its ticks: %v",up)
     testing.expect(t,vertical_between(side,placed,1)==side && close_vec(mm.quat_rotate(vertical_between(side,placed,0),{0,1,0}),{0,1,0}))
 }
+
+// The offset grows with the pitch toward look_up_offset looking up (negative pitch of the orbit)
+// and look_down_offset looking down, and a pitch that is not a number adds nothing.
+@(test)
+look_offset_follows_the_pitch :: proc(t:^testing.T) {
+    follow:=Camera_Follow{look_up_offset={0,0.25,-0.1},look_down_offset={0.1,-0.2,0}}
+    Case :: struct {pitch:f32,offset:[3]f32}
+    cases:=[]Case{
+        {0,{}},
+        {-0.5*math.PI,{0,0.25,-0.1}},
+        {-math.PI,{0,0.25,-0.1}},
+        {0.25*math.PI,{0.05,-0.1,0}},
+        {math.nan_f32(),{}},
+    }
+    for c in cases {
+        got:=look_offset(follow,c.pitch)
+        testing.expectf(t,linalg.length(got-c.offset)<1e-5,"pitch %v gives %v",c.pitch,got)
+    }
+}

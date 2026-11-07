@@ -39,8 +39,11 @@ Camera_Follow :: struct {
     offset:[3]f32 `mirai:"unit=m"`, // from the target to the pivot, in the axes of the vertical of the target: world axes without one
     distance:f32 `mirai:"min=0,unit=m"`, // Orbit: from the pivot to the camera
     half_life:f32 `mirai:"min=0,unit=s"`, // time the pivot takes to close half of its distance to the target; 0: rigid
+    up_half_life:f32 `mirai:"min=0,unit=s"`, // the same along the up of the target; 0: half_life
     probe_radius:f32 `mirai:"min=0,unit=m"`, // Orbit: of the sphere kept clear from the pivot to the camera; 0: nothing pulls it in
     shoulder:[2]f32 `mirai:"unit=m"`, // Orbit: right and up of the camera, from the pivot to where its arm starts
+    look_up_offset:[3]f32 `mirai:"unit=m"`,   // Orbit: right, up and back of the camera added to where its arm starts when it looks straight up, in proportion to the pitch
+    look_down_offset:[3]f32 `mirai:"unit=m"`, // Orbit: the same looking straight down
     dead_zone:[3]f32 `mirai:"min=0,unit=m,section=Framing"`, // half the box, along the right, up and back of the camera, the target moves in before the pivot follows
     look_ahead:f32 `mirai:"min=0,unit=s"`, // the pivot leads the target by how far it goes across the ground in this time
     look_ahead_max:f32 `mirai:"min=0,unit=m"`, // 0: no limit
@@ -441,6 +444,15 @@ dead_zone_follow :: proc "contextless" (center,goal,zone:[3]f32,rotation:mm.Quat
     return moved
 }
 
+// What the pitch adds to where the arm of an Orbit starts, in the axes of the
+// camera: look_up_offset looking straight up (the camera below the pivot,
+// negative pitch), look_down_offset straight down, nothing level.
+look_offset :: proc "contextless" (follow:Camera_Follow,pitch:f32) -> [3]f32 {
+    share:f32=pitch/(0.5*math.PI)
+    if !(abs(share)<=1) {share=share>0?1:(share<0?-1:0)}
+    return share<0?follow.look_up_offset*(-share):follow.look_down_offset*share
+}
+
 @(private)
 arm_tune :: proc "contextless" (arm:^Spring_Arm,follow:Camera_Follow) {
     arm.probe_radius,arm.margin=follow.probe_radius,follow.arm_margin
@@ -488,7 +500,7 @@ follow_one :: proc(
     facing:=row.rotation
     if own,found:=core.get(worlds,e);found {facing=own.rotation}
     s.zone=dead_zone_follow(s.zone,goal,follow.dead_zone,facing)
-    pivot:=follow_update(&s.pivot,s.zone,follow.half_life,dt)
+    pivot:=follow_update_split(&s.pivot,s.zone,follow.half_life,follow.up_half_life,up,dt)
     world_position:[3]f32
     world_rotation:mm.Quat
     look,aiming:=core.get(moves,target)
@@ -512,7 +524,7 @@ follow_one :: proc(
         world_rotation=vertical*orbit_rotation(orbit)
         probe:=Arm_Probe{query,target}
         collide:=follow.probe_radius>0?arm_query:nil
-        origin:=pivot
+        origin:=pivot+mm.quat_rotate(world_rotation,look_offset(follow^,follow.looking.y))
         if side:=mm.quat_rotate(world_rotation,[3]f32{follow.shoulder.x,follow.shoulder.y,0});follow.shoulder!={} {
             // What stands beside the target brings the shoulder in, as the arm.
             arm_tune(&s.side,follow^)

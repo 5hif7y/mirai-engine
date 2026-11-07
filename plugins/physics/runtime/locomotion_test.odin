@@ -46,13 +46,14 @@ loco_test_box :: proc(f:^Loco_Test,half,position:[3]f32,rotation:=mm.QUAT_IDENTI
 @(private) TEST_WALK_BASE :: input.Action(len(input.Look_Action))
 @(private) TEST_MOVE :: TEST_WALK_BASE+input.Action(Walk_Action.Move)
 @(private) TEST_JUMP :: TEST_WALK_BASE+input.Action(Walk_Action.Jump)
+@(private) TEST_SPRINT :: TEST_WALK_BASE+input.Action(Walk_Action.Sprint)
 
 @(private="file")
 loco_test_tick :: proc(f:^Loco_Test,move:[3]f32,ticks:=1,buttons:=input.Action_Mask(0),yaw:f32=0,pitch:f32=0) {
     for _ in 0..<ticks {
         found:=character_state_of(sim.character_state(&f.w,f.ch))
         given:=input.Move_Input{move=move,look_yaw=yaw,look_pitch=pitch,buttons=buttons}
-        m:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,found,1,given,TEST_JUMP,sim.character_velocity(&f.w,f.ch),f.w.gravity,1.0/60)
+        m:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,found,1,given,TEST_JUMP,TEST_SPRINT,sim.character_velocity(&f.w,f.ch),f.w.gravity,1.0/60)
         sim.character_set_move(&f.w,f.ch,m)
         sim.world_step(&f.w,1.0/60)
     }
@@ -81,6 +82,44 @@ walking_reaches_the_speed_of_the_locomotion_and_brakes :: proc(t:^testing.T) {
     testing.expectf(t,near(v.x,-5,0.02) && abs(v.z)<0.02,"turned velocity %v",v)
     loco_test_tick(&f,{},20)
     testing.expect(t,abs(sim.character_velocity(&f.w,f.ch).x)<0.01)
+}
+
+// Holding sprint walks forward at sprint_speed, not sideways or back; moving back loses
+// backward_slowdown of the speed; a sprint slower than max_speed, a zero slowdown or a sideways
+// move change nothing.
+@(test)
+walking_sprints_and_slows_backward :: proc(t:^testing.T) {
+    Case :: struct {sprint_speed,slowdown:f32,move:[3]f32,sprinting:bool,speed:f32}
+    cases:=[]Case{
+        {sprint_speed=8,move={0,0,-1},sprinting=true,speed=8},
+        {sprint_speed=8,move={0,0,-1},speed=5},
+        {sprint_speed=3,move={0,0,-1},sprinting=true,speed=5},
+        {sprint_speed=8,move={1,0,-1},sprinting=true,speed=8},
+        {sprint_speed=8,move={1,0,0},sprinting=true,speed=5},
+        {sprint_speed=8,slowdown=0.2,move={0,0,1},sprinting=true,speed=4},
+        {slowdown=0.2,move={0,0,1},speed=4},
+        {slowdown=0.2,move={1,0,0},speed=5},
+        {slowdown=0.2,move={0,0,0.5},speed=4},
+        {slowdown=2,move={0,0,1},speed=0},
+        {slowdown=cmath.nan_f32(),move={0,0,1},speed=5},
+    }
+    for c in cases {
+        walk:=WALK_DEFAULT
+        walk.sprint_speed,walk.backward_slowdown=c.sprint_speed,c.slowdown
+        got:=walk_speed(walk,{move=c.move},c.sprinting)
+        testing.expectf(t,near(got,c.speed,1e-5),"%v gives %v",c,got)
+    }
+    f:Loco_Test
+    testing.expect(t,loco_test_init(&f,{0,0,0}))
+    defer sim.world_destroy(&f.w)
+    f.walk.sprint_speed=8
+    loco_test_tick(&f,{},30)
+    loco_test_tick(&f,{0,0,-1},90,buttons=input.action_bit(TEST_SPRINT))
+    v:=sim.character_velocity(&f.w,f.ch)
+    testing.expectf(t,near(v.z,-8,0.05),"sprint velocity %v",v)
+    loco_test_tick(&f,{0,0,-1},60)
+    v=sim.character_velocity(&f.w,f.ch)
+    testing.expectf(t,near(v.z,-5,0.05),"after letting sprint go %v",v)
 }
 
 // The look faces -Z like a camera; the body faces it with +Z, the front of a glTF model.
@@ -368,7 +407,7 @@ without_gravity_a_swimmer_on_the_surface_does_not_climb :: proc(t:^testing.T) {
     found:sim.Character_State
     found.fluid,found.head_depth,found.depth={.In_Fluid},-0.25,1.55
     given:=input.Move_Input{buttons=input.action_bit(TEST_JUMP)}
-    move:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,character_state_of(found),1,given,TEST_JUMP,{},{},1.0/60)
+    move:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,character_state_of(found),1,given,TEST_JUMP,TEST_SPRINT,{},{},1.0/60)
     testing.expect_value(t,f.loco.mode,MODE_SWIMMING)
     testing.expect_value(t,f.loco.move_count,0)
     testing.expect(t,.Float in move.flags)

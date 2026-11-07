@@ -186,7 +186,10 @@ Per tick:
   before the component layers; a tick with zero dt leaves it pending.
 - A weapon's set is an `.anim` with the clips of the `.match` under the same names in
   `Animation.library`: changing it keeps the body, the lag and the mode, searches the new clips in
-  that tick and enters the one it picks through the same inertial transition (`blend`).
+  that tick and enters the one it picks through the same inertial transition (`blend`). The data
+  of the entity or its weapon names the set (a component field, `kind=.anim`), so it loads with
+  the scene and Play and is cooked; a set still compressing when it is swapped in takes over once
+  loaded, and meanwhile the entity plays on the library it had, with its actions.
 - `animation_match` says which clip plays, its rate, its mode, whether `match_play` forced it and
   how many searches and jumps it made.
 
@@ -492,6 +495,9 @@ message that says how to fix it; `engine.diagnostics` lists them and `animation.
   `match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_for` and
   `match_trajectory_follows_a_walk_that_accelerates_brakes_and_turns_at_its_rates`.
 - `regression_test.odin`, `graph_test.odin`, `program_test.odin`: affected earlier paths.
+- Sources that load in a job (`source_content_test.odin`):
+  `an_animation_that_compresses_in_a_job_plays_once_it_is_ready_without_problems` and
+  `a_library_that_compresses_in_a_job_keeps_what_plays_until_it_is_ready`.
 - By name:
   - `transition_entries_restart_continue_and_match_phase_with_expected_pose_and_root_motion`
   - `graph_branch_layers_keep_their_masks_through_repeated_state_transitions_without_allocations`

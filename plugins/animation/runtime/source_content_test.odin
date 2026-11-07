@@ -195,3 +195,78 @@ an_animation_that_compresses_in_a_job_plays_once_it_is_ready_without_problems ::
         testing.expect(t,abs(playback.states[0].local[1].position.x-.25)<1e-4,"the tick after it is ready plays it")
     }
 }
+
+// A weapon's set swapped into Animation.library while its .anim compresses in a job: until it is
+// ready the entity plays on what it played, with the action it fired, without a problem; then
+// the set joins its sources.
+@(test)
+a_library_that_compresses_in_a_job_keeps_what_plays_until_it_is_ready :: proc(t:^testing.T) {
+    directory:=fmt.tprintf(".mirai/test-animation-swap-%d",os.get_pid());os.make_directory_all(directory);defer os.remove_all(directory)
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    CLIPS :: base.Asset_Id{0x9e2,1}
+    SET :: base.Asset_Id{0x9e2,2}
+    GRAPH :: base.Asset_Id{0x9e2,3}
+    ACTIONS :: base.Asset_Id{0x9e2,4}
+    for id,i in ([2]base.Asset_Id{CLIPS,SET}) {
+        keys:=[2]lib.Keyframe{{time=0},{time=1,value={1 if i==0 else -1,0,0,0}}}
+        tracks:=[1]asset.Animation_Track_Desc{{target="hip",property=.Position,keys=keys[:]}}
+        clips:=[1]asset.Animation_Clip_Desc{{name="walk",tracks=tracks[:]}}
+        if !testing.expect_value(t,asset.animation_save(fmt.tprintf("%s/%d.anim",directory,i),&types,{id=id,clips=clips[:]}),asset.Error.None) {return}
+    }
+    nodes:=[1]Graph_Node{GRAPH_NODE_DEFAULT};nodes[0].sync_mode=.Independent
+    base.text_set(nodes[0].name[:],"walk");base.text_set(nodes[0].clip[:],"walk")
+    if !testing.expect_value(t,graph_save(fmt.tprintf("%s/walk.agraph",directory),&types,GRAPH,{info={animation=CLIPS},nodes=nodes[:]}),asset.Error.None) {return}
+    definitions:=[1]Action_Definition{ACTION_DEFINITION_DEFAULT}
+    base.text_set(definitions[0].name[:],"slash");base.text_set(definitions[0].clip[:],"walk");definitions[0].animation=CLIPS
+    if !testing.expect_value(t,action_profile_save(fmt.tprintf("%s/blade.action",directory),&types,ACTIONS,{info={animation=CLIPS},actions=definitions[:]}),asset.Error.None) {return}
+    assets:host.Assets;if !testing.expect(t,host.assets_init(&assets,{root=directory,capacity=8})) {return};defer host.assets_destroy(&assets)
+    app:=host.App{assets=&assets,allocator=context.allocator}
+    if !testing.expect(t,jobs.system_init(&app.jobs,{threads=2})) {return}
+    defer {host.app_content_destroy(&app);jobs.system_destroy(&app.jobs)}
+    entities:core.Entities;core.entities_init(&entities);defer core.entities_destroy(&entities)
+    transforms:core.Table(core.Transform);parents:core.Table(core.Parent);names:core.Table(core.Name);targets:core.Table(Animation_Target);animations:core.Table(Animation)
+    defer {core.table_destroy(&transforms);core.table_destroy(&parents);core.table_destroy(&names);core.table_destroy(&targets);core.table_destroy(&animations)}
+    actor,hip:=core.create(&entities),core.create(&entities)
+    core.add(&transforms,actor,core.TRANSFORM_IDENTITY);core.add(&transforms,hip,core.TRANSFORM_IDENTITY);core.add(&parents,hip,{entity=actor})
+    name:core.Name;base.text_set(name.text[:],"hip");core.add(&names,hip,name)
+    animation:=ANIMATION_DEFAULT;animation.asset=GRAPH;animation.actions=ACTIONS;animation.fade=0
+    core.add(&animations,actor,animation)
+    core.table_settle(&transforms,&entities);core.table_settle(&parents,&entities);core.table_settle(&names,&entities);core.table_settle(&targets,&entities);core.table_settle(&animations,&entities)
+    hierarchy:core.Hierarchy;defer core.value_free(&hierarchy,type_info_of(core.Hierarchy))
+    core.hierarchy_settle(&hierarchy,core.read(&parents),&entities)
+    requests:Animation_Requests;events:Animation_Events;playback:Playback;skeletons:Skeleton_Assets;problems:core.Problems
+    defer {delete(requests.seeks.items);delete(requests.poses.items);delete(requests.distances.items);delete(events.items);playback_free(&playback);skeleton_assets_free(&skeletons)}
+    graphs:=Graph_Assets{allocator=context.allocator};defer graph_assets_free(&graphs)
+    sources:=Source_Assets{allocator=context.allocator};defer source_assets_free(&sources)
+    actions:=Action_Runtime{allocator=context.allocator};defer actions_runtime_free(&actions)
+    action_assets:=Actions_Assets{allocator=context.allocator};defer actions_assets_free(&action_assets)
+    action_requests:Action_Requests;defer delete(action_requests.queue.items)
+    Swap_Test :: struct {
+        animations:^core.Table(Animation),transforms:^core.Table(core.Transform),parents:^core.Table(core.Parent),hierarchy:^core.Hierarchy,
+        names:^core.Table(core.Name),targets:^core.Table(Animation_Target),requests:^Animation_Requests,events:^Animation_Events,playback:^Playback,
+        app:^host.App,skeletons:^Skeleton_Assets,problems:^core.Problems,graphs:^Graph_Assets,actions:^Action_Runtime,
+        action_requests:^Action_Requests,action_assets:^Actions_Assets,sources:^Source_Assets,
+    }
+    tick :: proc(s:Swap_Test) {
+        animation_tick(core.read(s.animations),s.transforms,core.read(s.parents),core.ref(s.hierarchy),core.read(s.names),s.requests,s.events,core.read(s.targets),{},s.playback,s.app,{dt=.1,playing=true},{},s.skeletons,s.problems,graphs=s.graphs,actions=s.actions,action_requests=s.action_requests,action_assets=s.action_assets,sources=s.sources)
+    }
+    s:=Swap_Test{&animations,&transforms,&parents,&hierarchy,&names,&targets,&requests,&events,&playback,&app,&skeletons,&problems,&graphs,&actions,&action_requests,&action_assets,&sources}
+    if !testing.expect(t,host.content_animation_wait(&app,CLIPS)!=nil) {return}
+    testing.expect(t,action_fire(&action_requests,actor,"slash"))
+    tick(s)
+    if !testing.expect(t,problems.count==0 && len(playback.states)==1 && len(playback.states[0].local)==2 && len(actions.states)==1 && actions.states[0].layers[0].active) {return}
+    before:=playback.states[0].local[1].position.x
+    core.free(&animations,actor).library=SET
+    tick(s)
+    testing.expect(t,host.content_animation_pending(&app,SET),"the set compresses in a job")
+    testing.expect_value(t,problems.count,0)
+    testing.expect(t,playback.states[0].local[1].position.x>before+.05,"it plays on what it played")
+    testing.expect(t,actions.states[0].layers[0].active && !actions.states[0].layers[0].finishing,"the action it fired goes on")
+    testing.expect(t,len(source_ids(&sources,&playback.states[0]))==0)
+    if !testing.expect(t,host.content_animation_wait(&app,SET)!=nil) {return}
+    tick(s)
+    testing.expect_value(t,problems.count,0)
+    joined:=source_ids(&sources,&playback.states[0])
+    testing.expect(t,len(joined)==2 && joined[0]==SET,"the set plays once it is ready")
+    testing.expect(t,actions.states[0].layers[0].active,"with the action")
+}

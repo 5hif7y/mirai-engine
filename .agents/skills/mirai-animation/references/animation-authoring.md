@@ -143,7 +143,8 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
   `play.inspect` gives, the only name of one the game made; in Edit it takes `id`.
 - `animation.inspect` part `Match` lists the clips of the database and the candidates of its last
   forced search with their costs per feature, then the best row of each clip it left out with its
-  `reason`: why a jump or a start chose its clip, or never picks one, is read there.
+  `reason`: why a jump or a start chose its clip, or never picks one, is read there. The tick keeps
+  only that search's request; inspect searches it again to note them.
 - `animation.inspect` part `Pose` (only when asked, with `names`) places bones and sockets in the
   world and in the space of the entity from the pose its rig ended its last tick with: a pose,
   socket or root-motion problem is read as numbers, in a paused Play after `play.step`, instead of

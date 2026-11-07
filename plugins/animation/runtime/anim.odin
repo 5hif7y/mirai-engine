@@ -246,6 +246,10 @@ animation_tick :: proc(
     pose_requests:=core.take(&requests.poses)
     match_goals:=core.take(&requests.match_goals)
     match_plays:=core.take(&requests.match_plays)
+    // Each rig gets its own goal, the last one told for it, found once for all of them; a rig
+    // made in this tick is not there yet and looks for its own.
+    unindexed:=0
+    for goal,i in match_goals {if state:=constraint_playing(playback,goal.rig);state!=nil {state.program.match.goal=i32(i)+1} else {unindexed+=1}}
     rig_count:=len(playback.rigs)
     for row in 0..<rig_count+core.count(animations) {
         skeletal:=row<rig_count
@@ -275,7 +279,12 @@ animation_tick :: proc(
         defer source_markers_resolve(sources,state,events.items[first_event:])
         facing:=mm.Vec3{0,0,1};placed:=mm.TRANSFORM_IDENTITY
         if state.program.kind==MATCH_KIND {if world,ok:=constraint_world(core.read(transforms),parents,{},e);ok {placed=world;facing=mm.quat_rotate(world.rotation,facing)}}
-        program,programmed,program_valid:=program_resolve(state,animation,app,blends,graphs,dt,events,playback,content,problems,match_goals,match_plays,facing)
+        rig_goals:[]Match_Goal
+        if at:=int(state.program.match.goal)-1;at>=0 && at<len(match_goals) && match_goals[at].rig==e {rig_goals=match_goals[at:][:1]} else if unindexed>0 {
+            for &goal,i in match_goals {if goal.rig==e {rig_goals=match_goals[i:][:1]}}
+        }
+        state.program.match.goal=0
+        program,programmed,program_valid:=program_resolve(state,animation,app,blends,graphs,dt,events,playback,content,problems,rig_goals,match_plays,facing)
         if !program_valid {program_problem(problems,e,app,animation,state.program.error);continue}
         if !programmed && animation.library!={} {
             name:[base.ASSET_ID_TEXT]u8

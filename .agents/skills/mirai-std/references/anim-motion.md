@@ -29,8 +29,9 @@ temporal state. The world integration and the authoring are in
 - `match_trajectory` predicts the trajectory with the acceleration and braking of the locomotion and
   the turn at its rate: the same numbers that move the body. A wall normal takes out of the
   velocity and of the desired one what goes into the wall, so a body pushing against it stands and
-  one along it slides. The past point comes from a `Match_Trail` of the last velocities (the time it
-  does not hold went at the oldest one); without a trail the body went at its velocity.
+  one along it slides. The past point comes from a `Match_Trail`, how far the body went in each of
+  its last spans of time, whatever the tick (the time it does not hold went at the pace of the
+  oldest span); without a trail the body went at its velocity.
 - `match_search` gives the lowest-cost row among the clips of the requested modes and the rate at
   which its clip plays (the trajectory is scaled per clip, so a few clips cover the velocities
   between theirs). The query is taken to the rate of each clip (the velocities of its pose, by the
@@ -45,11 +46,15 @@ temporal state. The world integration and the authoring are in
   first `MATCH_ENTRY_SPAN` seconds and only with `Match_Request.entry`; the continuous search leaves
   them out. With `Match_Candidates` it also notes the best row of each clip, least cost first, with
   its cost per kind of feature, and gives the same row: each clip is bounded by its own best row.
-  The clips it leaves out follow, each by its best row and its `Match_Reject`.
+  The clips it leaves out follow, each by its best row and its `Match_Reject`. That walks every
+  clip whole, so only inspection asks for it, never the tick.
 - An event (a landing): `match_database_build` keeps per row the seconds to the next marker of the
-  event in its clip, and a request with `event` searches only the rows that reach it at a rate of
-  `event_rates`, scored as usual and given at that rate; entry or not, without tail or stationary
-  filter unless it enters.
+  event in its clip, and a request with `event` searches only the rows in its window
+  (`match_event_window`: the marker is reached at a rate of `event_rates` within half a row, and
+  not further than `event_from`), scored as usual and given at that rate; entry or not, without tail
+  or stationary filter unless it enters.
+- The database keeps per mode which have entry clips, clips with the event, clips that stand and
+  clips that travel, so a tick asks them without walking its clips.
 - A database of more than `MATCH_LINEAR_ROWS` rows stores the minimum and maximum of its features
   per runs of rows, small and large; the search skips a run whose bound does not improve the best
   row found and gives the same row as the full walk. Without bounds, the walk is linear with
@@ -83,19 +88,6 @@ temporal state. The world integration and the authoring are in
   clears the deficit.
 - Applying before advancing keeps the capture pose exactly, and the target is evaluated on each tick
   without continuing to evaluate the outgoing clip.
-
-## Dead blending
-
-- `dead_capture` shares `Inertial_State`, its deficit and `Inertial_Input` with inertialization:
-  `[]Dead_Bone` and `[]Dead_Curve` keep the captured pose and its velocities (from `previous` and
-  `current`).
-- `dead_pose_apply` goes on with the captured pose at its velocities, each decaying with a
-  half-life of its own, and fades it into the target with a smoothstep over the duration. The
-  half-life of a channel is the time its velocity would take to cover the gap to the target, by
-  `DEAD_HALF_LIFE`, within `DEAD_HALF_LIFE_MIN` and `DEAD_HALF_LIFE_MAX`: a velocity that heads away
-  from the target dies at the least. `dead_curves_apply` does the same with floats.
-- It starts exactly at the captured pose and ends exactly at the target; a mask weight of zero
-  leaves the target.
 - Each output may coincide exactly with its target, not partially overlap. NaN, infinities,
   incompatible sizes, invalid states or overflows return `false`; the output may be left partly
   written, but the capture state is published only after validating and computing.
@@ -148,8 +140,7 @@ rig; `fraction` is the part of the remaining time that this step consumes.
   `match_search_leaves_out_rows_near_the_playing_one_across_a_loop_seam_and_those_just_left`,
   `match_trajectory_follows_a_walk_that_accelerates_brakes_and_turns_at_its_rates`,
   `inertial_offsets_never_overshoot_and_drop_a_velocity_that_heads_away_from_the_target`,
-  `transitions_that_interrupt_each_other_give_up_the_time_the_one_before_left_undone` and
-  `dead_blends_go_on_with_the_velocity_of_the_pose_and_end_at_the_target`.
+  and `transitions_that_interrupt_each_other_give_up_the_time_the_one_before_left_undone`.
 - The hostile cases accept `ANIM_INERTIAL_HOSTILE_ROUNDS` and `ANIM_WARP_HOSTILE_ROUNDS`; when
   changing validations or state, repeat them with `--release` and 20000 rounds.
 - Pose and stride warp are run with null allocators: e.g.

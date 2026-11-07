@@ -443,9 +443,10 @@ a_new_mode_of_the_match_goal_enters_by_its_entry_clip :: proc(t:^testing.T) {
     db:=animation_match_database(&f.graphs,&f.content,f.state)
     searched:=f.state.program.match.searched
     if testing.expect(t,db!=nil) {
-        candidates:=searched.candidates.items[:searched.candidates.count]
-        reasons:=match_test_reasons(db,searched.candidates)
-        testing.expectf(t,searched.search==1 && searched.mode==GROUND && !searched.entry && len(candidates)==4 && reasons[2]==.Mode && reasons[3]==.Mode,"the first search weighs idle and walk and leaves out the air, not %v",searched)
+        noted:=match_searched_candidates(db,searched)
+        candidates:=noted.items[:noted.count]
+        reasons:=match_test_reasons(db,noted)
+        testing.expectf(t,searched.search==1 && searched.request.modes==1<<GROUND && !searched.request.entry && len(candidates)==4 && reasons[2]==.Mode && reasons[3]==.Mode,"the first search weighs idle and walk and leaves out the air, not %v",searched)
         for candidate,i in candidates {
             sum:f32;for part in candidate.costs {sum+=part}
             testing.expectf(t,abs(sum-candidate.cost)<=1e-3*max(1,candidate.cost),"the kinds of feature sum %.4f, not its cost %.4f",sum,candidate.cost)
@@ -457,7 +458,7 @@ a_new_mode_of_the_match_goal_enters_by_its_entry_clip :: proc(t:^testing.T) {
         }
         // Noting candidates bounds each clip by its own best row and gives the same row.
         request:=lib.Match_Request{query=lib.match_features(db,0),trajectory=lib.match_row_trajectory(db,int(db.ranges[1].first)),modes=~u32(0),min_rate=.5,max_rate=1}
-        noted:lib.Match_Candidates
+        noted=lib.Match_Candidates{}
         best,cost,_:=lib.match_search(db,request)
         same,same_cost,_:=lib.match_search(db,request,candidates=&noted)
         testing.expect(t,best==same && cost==same_cost && noted.count>=2 && int(noted.items[0].row)==best)
@@ -466,8 +467,8 @@ a_new_mode_of_the_match_goal_enters_by_its_entry_clip :: proc(t:^testing.T) {
     value,_=animation_match(&f.playback,f.rig)
     testing.expectf(t,value.mode==AIR && value.clip==base.name_hash("jump") && value.time<=lib.MATCH_ENTRY_SPAN+dt+1e-4 && !value.forced,"entering the air starts its entry clip near its start, not %v",value)
     searched=f.state.program.match.searched
-    reasons:=match_test_reasons(db,searched.candidates)
-    testing.expectf(t,searched.entry && searched.mode==AIR && reasons=={.Mode,.Mode,.Entry,.None,max(lib.Match_Reject)} && searched.search==value.searches,"entering the air notes its entry search, not %v",searched)
+    reasons:=match_test_reasons(db,match_searched_candidates(db,searched))
+    testing.expectf(t,searched.request.entry && searched.request.modes==1<<AIR && reasons=={.Mode,.Mode,.Entry,.None,max(lib.Match_Reject)} && searched.search==value.searches,"entering the air notes its entry search, not %v",searched)
     testing.expectf(t,value.rate==1,"an entry clip plays at its own rate whatever the body moves, not %.2f",value.rate)
     for _ in 0..<120 {testing.expect(t,match_step(&f,dt,AIR))}
     value,_=animation_match(&f.playback,f.rig)
@@ -539,8 +540,8 @@ a_body_in_the_air_lands_on_the_landing_marker_of_its_clip_when_physics_says :: p
         db:=animation_match_database(&f.graphs,&f.content,f.state)
         searched:=f.state.program.match.searched
         if !testing.expect(t,db!=nil) {return}
-        reasons:=match_test_reasons(db,searched.candidates)
-        testing.expectf(t,value.clip==base.name_hash("jump") && value.time>=.3 && searched.time_to_land==.25 && reasons[2]==.Event && reasons[3]==.None,"off a ledge the jump plays from %.3f s; the fall has no marker: %v",value.time,reasons)
+        reasons:=match_test_reasons(db,match_searched_candidates(db,searched))
+        testing.expectf(t,value.clip==base.name_hash("jump") && value.time>=.3 && searched.request.event==.25 && reasons[2]==.Event && reasons[3]==.None,"off a ledge the jump plays from %.3f s; the fall has no marker: %v",value.time,reasons)
         clips:=match_test_fall(t,&f,dt,.25-dt)
         value,_=animation_match(&f.playback,f.rig)
         testing.expectf(t,len(clips)==1 && abs(value.time-.8)<.01,"and reaches its marker as it lands, at %.3f s",value.time)
@@ -555,8 +556,8 @@ a_body_in_the_air_lands_on_the_landing_marker_of_its_clip_when_physics_says :: p
         testing.expectf(t,value.clip==base.name_hash("jump"),"standing, the jump in place, not %v",value)
         clips:=match_test_fall(t,&f,dt,.8-dt,turn={0,0,3})
         value,_=animation_match(&f.playback,f.rig)
-        // Within the slack of its marker at the fastest landing rate.
-        testing.expectf(t,len(clips)==2 && clips[1]==base.name_hash("leap") && abs(value.time-.8)<=2*lib.MATCH_EVENT_SLACK+.01,"moving, the leap takes over and lands at %.3f s",value.time)
+        // Within half a row of its marker and a tick at the fastest landing rate.
+        testing.expectf(t,len(clips)==2 && clips[1]==base.name_hash("leap") && abs(value.time-.8)<=.5/30+2*dt+.01,"moving, the leap takes over and lands at %.3f s",value.time)
     }
 }
 
@@ -673,28 +674,7 @@ a_jump_nothing_forces_waits_the_hold_after_the_one_before :: proc(t:^testing.T) 
 }
 
 @(test)
-matching_starts_and_stops_by_dead_blending_as_its_transition_says :: proc(t:^testing.T) {
-    for transition in Match_Transition {
-        f:Match_Fixture;defer match_fixture_free(&f)
-        if !testing.expect(t,match_fixture(t,&f)) {continue}
-        info:=&f.graphs.matches[0].profile.info;info.transition,info.stationary_speed=transition,.15
-        dt:=f32(1.0/60)
-        for _ in 0..<20 {testing.expect(t,match_step(&f,dt,GROUND))}
-        value,_:=animation_match(&f.playback,f.rig)
-        testing.expect_value(t,value.clip,base.name_hash("idle"))
-        started,dead:=false,false
-        for _ in 0..<60 {
-            jumps:=value.jumps
-            testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,1.5},desired={0,0,1.5}))
-            value,_=animation_match(&f.playback,f.rig)
-            if value.jumps>jumps && value.clip==base.name_hash("walk") {started,dead=true,f.state.program.dead;break}
-        }
-        testing.expectf(t,started && dead==(transition!=.Inertial),"%v starts the walk by dead blending: %v",transition,dead)
-    }
-}
-
-@(test)
-the_root_of_the_pose_follows_a_body_that_stops_at_once_within_its_lag_and_out_of_a_wall :: proc(t:^testing.T) {
+the_root_of_the_pose_follows_a_body_that_stops_within_its_lag_out_of_a_wall_and_closes_as_it_walks :: proc(t:^testing.T) {
     for blocked in ([2]bool{false,true}) {
         f:Match_Fixture;defer match_fixture_free(&f)
         if !testing.expect(t,match_fixture(t,&f)) {continue}
@@ -716,12 +696,17 @@ the_root_of_the_pose_follows_a_body_that_stops_at_once_within_its_lag_and_out_of
             match_lag_apply(f.state,mm.TRANSFORM_IDENTITY)
             testing.expect(t,linalg.length(f.state.local[hips].position-rest-value.lag)<1e-5,"the root of the pose moves by the lag")
         }
-        testing.expectf(t,linalg.length(value.lag)<.01 && linalg.length(value.velocity)<.01,"the root settles on the body: %v",value)
+        // Standing, the root holds where it stopped instead of sliding the feet to the body.
+        testing.expectf(t,linalg.length(value.velocity)<.01,"the root of a pose that stands holds still: %v",value)
         if blocked {
             testing.expectf(t,ahead<=1e-5,"a wall keeps the root out of it: %.4f m in",ahead)
         } else {
             testing.expectf(t,ahead>.02 && change<.5,"the root goes on %.3f m past the stop and slows by %.2f m/s a tick at most",ahead,change)
         }
+        // Walking again, it closes on the body within the stride.
+        for _ in 0..<90 {testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,1.5},desired={0,0,1.5}))}
+        value,_=animation_match(&f.playback,f.rig)
+        testing.expectf(t,linalg.length(value.lag)<.01,"the root settles on the body as it walks: %v",value)
     }
 }
 

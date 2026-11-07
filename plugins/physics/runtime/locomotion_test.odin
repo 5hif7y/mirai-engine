@@ -101,33 +101,44 @@ walking_toward_plus_x_turns_the_front_of_the_body_to_plus_x_and_keeps_the_look :
 }
 
 // From 3 m up it lands on flat ground or on a ledge below whose top is 1.5 m up, when and as fast
-// as predicted from the start and again in the middle of the fall; with no ground nothing is.
+// as predicted from the start and again in the middle of the fall; going across off a ledge it
+// lands on the floor where its arc reaches it, not on the ledge below its feet; with no ground
+// nothing is.
 @(test)
-a_falling_character_predicts_when_and_how_fast_it_lands_on_the_ground_below :: proc(t:^testing.T) {
-    Case :: struct {ground,ledge:bool,height:f32}
-    for c in ([3]Case{{ground=true,height=3},{ground=true,ledge=true,height=1.5},{}}) {
+a_falling_character_predicts_when_and_how_fast_it_lands_on_the_arc_it_follows :: proc(t:^testing.T) {
+    Case :: struct {ground:bool,start:[3]f32,ledge,height,across:f32}
+    cases:=[4]Case{
+        {ground=true,start={0,3,0},height=3},
+        {ground=true,start={0,3,0},ledge=1.5,height=1.5},
+        {ground=true,start={.6,3.5,0},ledge=3,height=3.5,across=6},
+        {start={0,3,0},height=3},
+    }
+    for c in cases {
         f:Loco_Test
-        if !testing.expect(t,loco_test_init(&f,{0,3,0},c.ground)) {continue}
+        if !testing.expect(t,loco_test_init(&f,c.start,c.ground)) {continue}
         defer sim.world_destroy(&f.w)
-        if c.ledge {loco_test_box(&f,{1,.25,1},{0,1.25,0})}
+        if c.ledge>0 {loco_test_box(&f,{1,c.ledge/2,1},{0,c.ledge/2,0})}
+        sim.body_set_linear_velocity(&f.w,sim.character_body(&f.w,f.ch),{c.across,0,0})
         g:=-f.w.gravity.y
-        time,speed:=character_landing(&f.w,f.ch,f.w.gravity)
+        time,speed,found:=landing_on_arc(&f.w,f.ch)
         if !c.ground {
-            testing.expectf(t,time==0 && speed==0,"with no ground below nothing lands, not %.3f s",time)
+            testing.expectf(t,!found,"with no ground below nothing lands, not in %.3f s",time)
             continue
         }
         expected:=cmath.sqrt(2*c.height/g)
-        testing.expectf(t,near(time,expected,.02) && near(speed,g*expected,.2),"from %.1f m it lands in %.3f s at %.2f m/s, not %.3f s at %.2f m/s",c.height,expected,g*expected,time,speed)
+        testing.expectf(t,found && near(time,expected,.02) && near(speed,g*expected,.2),"from %.1f m it lands in %.3f s at %.2f m/s, not %.3f s at %.2f m/s",c.height,expected,g*expected,time,speed)
         ticks:=0
         for ; ticks<240; ticks+=1 {
             if .Standing in sim.character_state(&f.w,f.ch).ground {break}
             loco_test_tick(&f,{})
             if ticks==20 {
-                left,_:=character_landing(&f.w,f.ch,f.w.gravity)
+                left,_,_:=landing_on_arc(&f.w,f.ch)
                 testing.expectf(t,near(left,expected-21.0/60,.03),"in the middle of the fall it lands in %.3f s, not %.3f s",expected-21.0/60,left)
             }
         }
         testing.expectf(t,near(f32(ticks)/60,time,3.0/60),"it lands after %.3f s, as predicted %.3f s",f32(ticks)/60,time)
+        at:=sim.character_position(&f.w,f.ch)
+        testing.expectf(t,near(at.x,c.start.x+c.across*time,.2) && near(at.y,c.start.y-c.height,.05),"it lands at %v, where its arc reaches the ground",at)
     }
 }
 

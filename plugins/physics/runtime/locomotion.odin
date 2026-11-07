@@ -398,28 +398,62 @@ overriding :: proc "contextless" (loco:^Character) -> bool {
     return false
 }
 
-LANDING_REACH :: 20 // m below its feet a falling character looks for where it lands
+LANDING_REACH :: 20 // m below its feet, along its up, down to which a falling arc is swept
+LANDING_SEGMENTS :: 8 // straight sweeps along the arc
 
-// When and how fast (seconds, m/s) the feet of a character falling with gravity reach what lies
-// below them, found by a sphere of its radius cast down from its feet along its up: the arc of its
-// vertical velocity, ignoring how far it moves across. 0, 0 with nothing within LANDING_REACH or
-// with no gravity along its up.
-character_landing :: proc(w:^sim.World,h:sim.Character_Handle,gravity:[3]f32) -> (time,speed:f32) {
+// When a falling character lands and how fast its feet then move down along its up (seconds, m/s;
+// negative when what it hits is on its way up). A sphere a little narrower than its capsule, so a
+// wall it brushes is not where it lands, sweeps the ballistic arc of its velocity under its
+// gravity (that of its body times Character.gravity_scale) until it is LANDING_REACH below its
+// feet; time is along the arc to the first hit. Not found without a character made by the
+// simulation, with no gravity along its up or with nothing on the arc. Queried on demand: the
+// simulation does not keep it.
+character_landing :: proc(physics:core.Ref(Physics_State),e:core.Entity) -> (time,speed:f32,ok:bool) {
+    if physics.ptr==nil || !physics.ready {return}
+    l:=link_find(physics.ptr,e)
+    if l==nil || l.kind!=.Character {return}
+    return landing_on_arc(&physics.world,l.character)
+}
+
+@(private)
+landing_on_arc :: proc(w:^sim.World,h:sim.Character_Handle) -> (time,speed:f32,ok:bool) {
     if !sim.character_valid(w,h) {return}
     desc:=sim.character_desc(w,h)
+    body:=sim.character_body(w,h)
+    gravity:=sim.body_gravity(w,body)*desc.gravity_scale
     up:=mm.quat_rotate(sim.character_state(w,h).up_frame,{0,1,0})
     pull:=-linalg.dot(gravity,up)
-    if !(pull>1e-4) || pull>max(f32) {return}
-    // The sphere a little narrower than the capsule, so a wall it brushes is not where it lands.
+    velocity:=sim.character_velocity(w,h)
+    if !(pull>1e-4) || pull>max(f32) || !(linalg.dot(gravity,gravity)<=max(f32)) || !(linalg.dot(velocity,velocity)<=max(f32)) {return}
+    rising:=linalg.dot(velocity,up)
+    end:=(rising+cmath.sqrt(rising*rising+2*pull*LANDING_REACH))/pull
+    if !(end>0) || end>max(f32) {return}
     radius:=desc.radius*.9
-    feet:=sim.character_position(w,h)
-    hit,found:=sim.shape_cast_closest(w,sim.Sphere{radius},{feet+up*desc.radius,mm.QUAT_IDENTITY},-up*LANDING_REACH,{filter=desc.filter,ignore_body=sim.character_body(w,h)})
-    if !found {return}
-    height:=max(hit.fraction*LANDING_REACH-(desc.radius-radius),0)
-    rising:=linalg.dot(sim.character_velocity(w,h),up)
-    speed=cmath.sqrt(rising*rising+2*pull*height)
-    time=(rising+speed)/pull
-    if !(time>0) || time>max(f32) {return 0,0}
+    start:=sim.character_position(w,h)+up*desc.radius
+    filter:=sim.Query_Filter{filter=desc.filter,ignore_body=body}
+    from:=start
+    for i in 1..=LANDING_SEGMENTS {
+        at:=end*f32(i)/LANDING_SEGMENTS
+        to:=start+velocity*at+gravity*(.5*at*at)
+        if !(linalg.dot(to-from,to-from)<=max(f32)) {return}
+        hit,found:=sim.shape_cast_closest(w,sim.Sphere{radius},{from,mm.QUAT_IDENTITY},to-from,filter)
+        if !found {
+            from=to
+            continue
+        }
+        along:=end*(f32(i-1)+hit.fraction)/LANDING_SEGMENTS
+        if rising-pull*along>0 {
+            time,speed=along,pull*along-rising
+        } else {
+            // On its way down the time comes from the height it falls, exact on a straight drop.
+            contact:=from+(to-from)*hit.fraction
+            height:=max(-linalg.dot(contact-start,up)-(desc.radius-radius),0)
+            speed=cmath.sqrt(rising*rising+2*pull*height)
+            time=(rising+speed)/pull
+        }
+        if !(time>0) || time>max(f32) {return 0,0,false}
+        return time,speed,true
+    }
     return
 }
 

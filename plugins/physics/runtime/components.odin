@@ -207,10 +207,6 @@ Character_State :: struct {
     head_depth:f32 `mirai:"transient,readonly,unit=m"`,       // of the top of the head under the surface; negative above it
     depth:f32 `mirai:"transient,readonly,hidden,unit=m"`,     // of fluid over the feet
     fluid_velocity:[3]f32 `mirai:"transient,readonly,hidden,unit=m/s"`, // the current around it
-    // Falling: when and how fast its feet reach the ground below, by its vertical velocity and its
-    // gravity; 0 in another mode or with no ground within LANDING_REACH.
-    land_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,
-    land_speed:f32 `mirai:"transient,readonly,hidden,unit=m/s"`,
 }
 
 character_state_of :: proc "contextless" (found:sim.Character_State) -> Character_State {

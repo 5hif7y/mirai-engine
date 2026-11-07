@@ -17,17 +17,6 @@ Inertial_Input :: struct {
     previous_curves,current_curves,target_previous_curves,target_curves:[]f32,
     dt,duration:f32,
 }
-// What a dead blend extrapolates of a bone: where it was at the capture, its velocities per channel
-// (position, the logarithm of its turn and scale, per second) and the half-life of each one, s
-// (x position, y rotation, z scale).
-Dead_Bone :: struct {position:math.Vec3,rotation:math.Quat,scale,velocity,spin,growth,decay:math.Vec3}
-Dead_Curve :: struct {value,velocity,decay:f32}
-// The half-life of a velocity a dead blend extrapolates, s: the time it would take to cover the
-// gap to the target scaled by DEAD_HALF_LIFE, within the least and the most. One that heads away
-// from the target dies at the least.
-DEAD_HALF_LIFE :: f32(1)
-DEAD_HALF_LIFE_MIN :: f32(.05)
-DEAD_HALF_LIFE_MAX :: f32(1)
 
 @(private)
 inertial_rotation_delta :: proc "contextless" (from,to:math.Quat) -> math.Vec3 {
@@ -193,100 +182,6 @@ inertial_curves_apply :: proc "contextless" (state:Inertial_State,curves:[]Inert
     for value,i in curves {
         result:=target[i]
         if len(filtered)==0 || !filtered[i] {result+=cmath.sign(value.offset)*inertial_value(abs(value.offset),value.speed,t,value.end)}
-        if !anim_finite(result) {return false}
-        out[i]=result
-    }
-    return true
-}
-
-// The half-life of a velocity that leaves gap to its target.
-@(private)
-dead_half_life :: proc "contextless" (gap,velocity:math.Vec3) -> f32 {
-    speed:=linalg.dot(velocity,velocity)
-    if !(speed>1e-12) {return DEAD_HALF_LIFE_MAX}
-    return clamp(DEAD_HALF_LIFE*linalg.dot(gap,velocity)/speed,DEAD_HALF_LIFE_MIN,DEAD_HALF_LIFE_MAX)
-}
-// Seconds of its starting velocity a velocity that decays with half_life covers in t.
-@(private)
-dead_reach :: #force_inline proc "contextless" (half_life,t:f32) -> f32 {
-    if !(half_life>0) || !(t>0) {return 0}
-    rate:=f32(cmath.LN2)/half_life
-    return (1-math.exp_det(-rate*t))/rate
-}
-// The share of the target in a dead blend at its time: a smoothstep over its duration.
-@(private)
-dead_share :: #force_inline proc "contextless" (state:Inertial_State) -> f32 {
-    if !state.active || !(state.duration>0) || state.elapsed>=state.duration {return 1}
-    x:=state.elapsed/state.duration
-    return x*x*(3-2*x)
-}
-
-// Captures a dead blend: the current pose goes on at the velocities it had, each decaying with its
-// half-life, and fades into the target over the duration. It reads previous, current and target
-// (and their curves) of input; the state is shared with inertial_capture.
-dead_capture :: proc "contextless" (state:^Inertial_State,bones:[]Dead_Bone,curves:[]Dead_Curve,input:Inertial_Input) -> bool {
-    if state==nil || !inertial_input_valid(input,len(bones),len(curves)) {return false}
-    probe:=state^
-    inertial_begin(&probe,input.duration)
-    for current,i in input.current {
-        target:=input.target[i]
-        value:=Dead_Bone{position=current.position,rotation=current.rotation,scale=current.scale}
-        if input.dt>1e-8 {
-            previous:=input.previous[i]
-            value.velocity=(current.position-previous.position)/input.dt
-            value.spin=inertial_rotation_delta(previous.rotation,current.rotation)/input.dt
-            value.growth=(current.scale-previous.scale)/input.dt
-        }
-        value.decay={dead_half_life(target.position-current.position,value.velocity),dead_half_life(inertial_rotation_delta(current.rotation,target.rotation),value.spin),dead_half_life(target.scale-current.scale,value.growth)}
-        if !anim_vec3_valid(value.velocity) || !anim_vec3_valid(value.spin) || !anim_vec3_valid(value.growth) || !anim_vec3_valid(value.decay) {return false}
-        bones[i]=value
-    }
-    for current,i in input.current_curves {
-        value:=Dead_Curve{value=current}
-        if input.dt>1e-8 {value.velocity=(current-input.previous_curves[i])/input.dt}
-        value.decay=dead_half_life({input.target_curves[i]-current,0,0},{value.velocity,0,0})
-        if !anim_finite(value.velocity) {return false}
-        curves[i]=value
-    }
-    state^=probe
-    return true
-}
-
-dead_pose_apply :: proc "contextless" (state:Inertial_State,bones:[]Dead_Bone,target,out:[]math.Transform,mask:[]f32=nil) -> bool {
-    if len(bones)!=len(target) || len(out)!=len(target) || len(mask)!=0 && len(mask)!=len(target) || !anim_pose_valid(target) {return false}
-    if raw_data(target)!=raw_data(out) && inertial_buffers_overlap(target,out) {return false}
-    if !inertial_state_valid(state) {return false}
-    for value in bones {if !anim_vec3_valid(value.position) || !anim_rotation_valid(value.rotation) || !anim_vec3_valid(value.scale) || !anim_vec3_valid(value.velocity) || !anim_vec3_valid(value.spin) || !anim_vec3_valid(value.growth) || !anim_vec3_valid(value.decay) {return false}}
-    for value in mask {if !anim_finite(value) || value<0 || value>1 {return false}}
-    share:=dead_share(state)
-    t:=state.elapsed
-    for value,i in target {
-        weight:=mask[i] if len(mask)>0 else f32(1)
-        blend:=1-(1-share)*weight
-        if blend>=1 {out[i]=value;continue}
-        bone:=bones[i]
-        rotation:=linalg.normalize0(bone.rotation*quat_exp(bone.spin*dead_reach(bone.decay.y,t)))
-        if linalg.dot(rotation,value.rotation)<0 {rotation=-rotation}
-        result:=math.Transform{
-            position=linalg.lerp(bone.position+bone.velocity*dead_reach(bone.decay.x,t),value.position,blend),
-            rotation=math.quat_slerp(rotation,value.rotation,blend),
-            scale=linalg.lerp(bone.scale+bone.growth*dead_reach(bone.decay.z,t),value.scale,blend),
-        }
-        if !anim_transform_valid(result) {return false}
-        out[i]=result
-    }
-    return true
-}
-
-dead_curves_apply :: proc "contextless" (state:Inertial_State,curves:[]Dead_Curve,target,out:[]f32,filtered:[]bool=nil) -> bool {
-    if len(curves)!=len(target) || len(out)!=len(target) || len(filtered)!=0 && len(filtered)!=len(target) {return false}
-    if raw_data(target)!=raw_data(out) && inertial_buffers_overlap(target,out) {return false}
-    if !inertial_state_valid(state) {return false}
-    for value,i in curves {if !anim_finite(value.value) || !anim_finite(value.velocity) || !anim_finite(value.decay) || !anim_finite(target[i]) {return false}}
-    share:=dead_share(state)
-    for value,i in curves {
-        result:=target[i]
-        if share<1 && (len(filtered)==0 || !filtered[i]) {result=math.lerp(value.value+value.velocity*dead_reach(value.decay,state.elapsed),target[i],share)}
         if !anim_finite(result) {return false}
         out[i]=result
     }

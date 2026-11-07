@@ -35,10 +35,12 @@ The same `world_step` serves the server, the predicting client and resimulation.
   (`wall_normal`, across its up and out of the wall, and `wall_push`, how fast its drive heads into
   it), found with the ground among what it touches and cannot push; and `up_frame`, the frame of its
   [vertical](#the-vertical).
-- `Character_State.land_time` and `land_speed` (component, not solver state): while the
-  `Character` falls, the sync of each step predicts from its vertical velocity, its gravity and a
-  sphere cast down from its feet (`character_landing`, within `LANDING_REACH`) when and how fast it
-  lands; 0 in another mode or with nothing below. Animation plays its landing marker toward it.
+- `character_landing(physics,e)` (a query of the plugin, not state the step keeps) predicts when a
+  `Character` lands and how fast its feet then move down: a sphere a little narrower than the
+  capsule, so a wall it brushes is not where it lands, sweeps in `LANDING_SEGMENTS` straight pieces
+  the ballistic arc of its velocity under its gravity (that of the body times `gravity_scale`), down
+  to `LANDING_REACH` below its feet; the time is along the arc to the first hit. Only who needs it
+  asks, while it falls: animation plays its landing marker toward it.
 - `Character` (private) gathers the three with the handles of the body and the shape, without
   padding or pointers.
 

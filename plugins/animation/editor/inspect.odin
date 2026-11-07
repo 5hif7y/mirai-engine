@@ -1,5 +1,6 @@
 package animation_editor
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:strings"
 import aa "mirai:asset"
@@ -185,7 +186,7 @@ Instance_Match_Candidate :: struct {
     rate:f32 `mirai:"label=It plays at to follow the trajectory, or to reach its landing marker"`,
     cost:f32,
     costs:Instance_Match_Costs,
-    reason:lib.Match_Reject `mirai:"label=None: the one it chose; Cost: it cost more; Mode, Entry, Stationary, Reselect, Event (no landing marker ahead), Rate (its marker is not reached at a landing rate) and Arc (its rows go back in the arc in the air): why it was left out"`,
+    reason:lib.Match_Reject `mirai:"label=None: the one it chose; Cost: it cost more; Mode, Entry, Stationary, Reselect, Event (no landing marker ahead) and Window (its marker is not reached at a landing rate, or its rows go back in the arc in the air): why it was left out"`,
 }
 Instance_Match_Costs :: struct {foot_position,foot_velocity,hip_velocity,body_velocity,trajectory_position,trajectory_direction:f32}
 Instance_Pose :: struct {
@@ -453,12 +454,14 @@ instance_match :: proc(s:^editor.Session,call:^api.Call,world:core.World_Ref,ent
     serial.write_u8(out,']')
     if db!=nil && state.program.match.searched.search>0 {
         searched:=&state.program.match.searched
-        name,named:=locomotion_mode_name(modes,searched.mode)
+        mode:=u16(intrinsics.count_trailing_zeros(searched.request.modes))
+        name,named:=locomotion_mode_name(modes,mode)
         api.write_key(out,"search");serial.text_write_raw(out,"{");api.write_uint(out,"search",u64(searched.search),true)
-        api.write_text(out,"mode",name if named else fmt.tprintf("%d",searched.mode));api.write_bool(out,"entry",searched.entry)
-        if searched.time_to_land>0 {api.write_key(out,"time_to_land");api.write_number(out,searched.time_to_land)}
+        api.write_text(out,"mode",name if named else fmt.tprintf("%d",mode));api.write_bool(out,"entry",searched.request.entry)
+        if searched.request.event>0 {api.write_key(out,"time_to_land");api.write_number(out,searched.request.event)}
         api.write_key(out,"candidates");serial.write_u8(out,'[');written:=0
-        for &candidate in searched.candidates.items[:clamp(searched.candidates.count,0,lib.MATCH_CANDIDATES)] {
+        noted:=anim.match_searched_candidates(db,searched^)
+        for &candidate in noted.items[:clamp(noted.count,0,lib.MATCH_CANDIDATES)] {
             range:=lib.match_range_of(db,int(candidate.row));if range<0 {continue}
             if written>0 {serial.write_u8(out,',')};written+=1
             r:=db.ranges[range];c:=candidate.costs

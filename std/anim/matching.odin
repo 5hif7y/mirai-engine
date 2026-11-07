@@ -47,12 +47,10 @@ MATCH_ENTRY_SPAN :: .1
 MATCH_TAIL_MIN :: .3
 // m/s at or below which a clip stands still.
 MATCH_STILL :: .05
-MATCH_EVENT_MISS :: f32(100) // cost of a second a row toward an event misses its marker at the nearest rate
-MATCH_EVENT_SLACK :: f32(.05) // s a row toward an event may miss its marker by; past it, it is left out
 // Rows a rig left that a search remembers.
 MATCH_RECENT :: 8
-// Ticks of the velocity of a body its trail keeps.
-MATCH_TRAIL :: 64
+// Spans of MATCH_PAST seconds a trail keeps how far the body went in, whatever the tick.
+MATCH_TRAIL :: 8
 // Clips a search notes the best row of.
 MATCH_CANDIDATES :: 16
 
@@ -60,10 +58,9 @@ MATCH_CANDIDATES :: 16
 // Mode: the clip serves none of the modes; Entry: an entry clip while not entering, or one that is
 // not while entering; Stationary: it travels while the body stands, or stands while it moves;
 // Reselect: its rows are near the one playing or among those just left; Event: none of its rows
-// has the marker of the event ahead; Rate: its marker misses the event by more than MATCH_EVENT_SLACK
-// at every rate of the event; Arc: its rows toward the event are all further from its marker than
-// the row that plays, which an arc in the air does not go back to.
-Match_Reject :: enum u8 {None,Cost,Mode,Entry,Stationary,Reselect,Event,Rate,Arc}
+// has the marker of the event ahead; Window: none reaches its marker when the event comes at a rate
+// of the event, or within the arc the playing row is in (match_search).
+Match_Reject :: enum u8 {None,Cost,Mode,Entry,Stationary,Reselect,Event,Window}
 // The best row of a clip in a search, the rate it plays at, its cost split by kind of feature
 // (cost is their sum) and why the search did not give it.
 Match_Candidate :: struct {row:i32,cost,rate:f32,costs:[Match_Feature]f32,reason:Match_Reject}
@@ -98,6 +95,9 @@ Match_Database :: struct {
     rows:int,
     small,large:[]simd.f32x4,      // per run of MATCH_BOUND_SMALL or _LARGE rows: MATCH_LANES of its least, then of its greatest features; empty up to MATCH_LINEAR_ROWS rows
     events:[]f32,                  // per row, seconds of its clip to the next marker of the event (a landing); negative: none ahead. Empty: no clip has one
+    // Bit m for each mode m with an entry clip, a clip with a marker of the event, a clip that is no
+    // entry and stands (MATCH_STILL), and one that is no entry and travels.
+    entry_modes,event_modes,still_modes,moving_modes:u32,
     allocator:mem.Allocator,
 }
 Match_Build_Error :: enum u8 {None,Invalid,Memory_Limit,Out_Of_Memory}
@@ -112,9 +112,10 @@ Match_Trajectory :: struct {velocity,past:math.Vec2,positions,directions:[MATCH_
 // Rows a rig jumped away from, oldest first, and the seconds since it left each.
 Match_Recent :: struct {rows:[MATCH_RECENT]i32,ages:[MATCH_RECENT]f32,count:i32}
 
-// The horizontal velocities of a body in its last ticks and their seconds, in a ring: next is
-// where the next one goes.
-Match_Trail :: struct {velocities:[MATCH_TRAIL]math.Vec3,steps:[MATCH_TRAIL]f32,next,count:i32}
+// How far a body went horizontally in each of its last MATCH_TRAIL spans of MATCH_PAST/MATCH_TRAIL
+// seconds, in a ring (next: where the next span goes), and in the span it is in, elapsed seconds
+// of it.
+Match_Trail :: struct {spans:[MATCH_TRAIL]math.Vec3,current:math.Vec3,elapsed:f32,next,count:i32}
 
 match_database_free :: proc(db:^Match_Database) {
     if db.allocator.procedure!=nil {delete(db.features,db.allocator);delete(db.ranges,db.allocator);delete(db.small,db.allocator);delete(db.large,db.allocator);delete(db.events,db.allocator)}
@@ -263,6 +264,10 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
     }
     db^={rate=rate,features=features,ranges=ranges,rows=total,small=small,large=large,events=times,allocator=allocator}
     for i in 0..<MATCH_LANES*4 {db.scale[i]=1}
+    for r in ranges {
+        if r.entry {db.entry_modes|=r.modes} else if r.speed>MATCH_STILL {db.moving_modes|=r.modes} else {db.still_modes|=r.modes}
+        if events && times[r.first]>=0 {db.event_modes|=r.modes}
+    }
     for span,kind in MATCH_FEATURES {
         spread:f64
         for i in span[0]..<span[1] {
@@ -359,12 +364,11 @@ match_query_trajectory :: proc "contextless" (db:^Match_Database,query:^Match_Qu
 // starts of the entry clips of the modes alone; otherwise they are left out. With
 // filter_stationary, a clip that is not an entry is searched only if it stands (MATCH_STILL) when
 // the body does not move, and moves when the body does. event, when positive with the events of
-// the database, is the seconds to the event (a landing): only rows whose next marker of it plays
-// then at a rate of event_rates (least and most), or misses it by up to MATCH_EVENT_SLACK at the
-// nearest one, are searched, and give that rate; entry searches the starts of the entry clips
-// alone, and otherwise every row of the clips of the modes, with no tail or stationary filter.
-// event_from, when positive, is the seconds to its marker of the row that plays: rows further from
-// theirs are left out, as an arc in the air only goes on.
+// the database, is the seconds to the event (a landing): only rows in its window are searched
+// (match_event_window), and give the rate that reaches their marker then; entry searches the starts
+// of the entry clips alone, and otherwise every row of the clips of the modes, with no tail or
+// stationary filter. event_from, when positive, is the seconds to its marker of the row that
+// plays: rows further from theirs are out of the window, as an arc in the air only goes on.
 Match_Request :: struct {query:Match_Query,trajectory:Match_Trajectory,modes:u32,min_rate,max_rate,rate:f32,entry:bool,filter_stationary,moving:bool,event:f32,event_rates:[2]f32,event_from:f32}
 
 // The query against the rows of a range, its weights and the rate the range plays at to go where
@@ -409,14 +413,11 @@ match_bound :: #force_inline proc "contextless" (bounds:[]simd.f32x4,box:int,que
 
 // Whether some clip serves one of modes, entry or not.
 match_serves :: proc "contextless" (db:^Match_Database,modes:u32,entry:bool) -> bool {
-    for r in db.ranges {if r.modes&modes!=0 && r.entry==entry {return true}}
-    return false
+    return (db.entry_modes if entry else db.still_modes|db.moving_modes)&modes!=0
 }
 // Whether some clip that serves one of modes has a marker of the event.
 match_event_serves :: proc "contextless" (db:^Match_Database,modes:u32) -> bool {
-    if len(db.events)!=db.rows {return false}
-    for r in db.ranges {if r.modes&modes!=0 && db.events[r.first]>=0 {return true}}
-    return false
+    return len(db.events)==db.rows && db.event_modes&modes!=0
 }
 // Seconds of its clip from time to the next marker of the event of a range; negative: none ahead.
 match_event_ahead :: proc "contextless" (db:^Match_Database,range:int,time:f32) -> f32 {
@@ -510,7 +511,6 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
             continue
         }
         playing:=range==near_range
-        arc:=false
         found,least,found_rate:=-1,max(f32),scaled
         skipped,skipped_cost:=-1,max(f32)
         row,end:=int(r.first),int(r.first)+last
@@ -525,13 +525,8 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
                     if value>=(least if candidates!=nil else cost) {continue}
                     at_rate:=scaled
                     if event {
-                        if db.events[row]<0 {continue}
-                        if request.event_from>0 && db.events[row]>request.event_from+1/db.rate {arc=true;continue}
-                        miss:f32
-                        at_rate,miss=match_event_rate(db,row,request)
-                        if miss>MATCH_EVENT_SLACK {continue}
-                        value+=miss*MATCH_EVENT_MISS
-                        if value>=(least if candidates!=nil else cost) {continue}
+                        inside:bool
+                        if at_rate,inside=match_event_window(db,row,request);!inside {continue}
                     }
                     excluded:=playing && (whole || match_behind(r,row,near,reach) || match_behind(r,near,row,reach))
                     for l in left[:left_count] {if excluded {break};if l.range==range && match_behind(r,row,l.row,l.reach) {excluded=true}}
@@ -552,7 +547,7 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
         } else if event {
             reached:=false
             for ahead in db.events[r.first:][:last] {if ahead>=0 {reached=true;break}}
-            match_candidates_reject(db,candidates,int(r.first),int(r.first)+last,query,weights,scaled,.Arc if arc else .Rate if reached else .Event)
+            match_candidates_reject(db,candidates,int(r.first),int(r.first)+last,query,weights,scaled,.Window if reached else .Event)
         }
     }
     if candidates!=nil {
@@ -561,14 +556,18 @@ match_search :: proc "contextless" (db:^Match_Database,request:Match_Request,cur
     return
 }
 
-// The rate a row toward the event of request plays at, the one that reaches its marker then within
-// event_rates, and the seconds it misses it by at the nearest one. Up to MATCH_EVENT_SLACK the
-// miss costs MATCH_EVENT_MISS a second and weighs with the pose: a clip whose marker comes a frame
-// early is not left for one that fits the body worse.
-match_event_rate :: proc "contextless" (db:^Match_Database,row:int,request:Match_Request) -> (rate,miss:f32) {
+// Whether a row lies in the window of the event of request, as PoseSearch's events: its marker is
+// reached when the event comes at a rate of event_rates, within half a row, and is not further
+// than event_from (when positive) by more than a row; and the rate that reaches it then, within
+// event_rates. Request must hold an event the database has.
+match_event_window :: proc "contextless" (db:^Match_Database,row:int,request:Match_Request) -> (rate:f32,inside:bool) {
     ahead:=db.events[row]
-    rate=clamp(ahead/request.event,request.event_rates[0],request.event_rates[1])
-    return rate,abs(ahead/rate-request.event)
+    if ahead<0 {return 1,false}
+    rates:=request.event_rates
+    half:=.5/db.rate
+    inside=ahead>=request.event*rates[0]-half && ahead<=request.event*rates[1]+half
+    if request.event_from>0 && ahead>request.event_from+1/db.rate {inside=false}
+    return clamp(ahead/request.event,rates[0],rates[1]),inside
 }
 
 // Notes the best row of a clip a search leaves out (rows first..<end), with why.
@@ -608,23 +607,38 @@ match_range_of :: proc "contextless" (db:^Match_Database,row:int) -> int {
 // Notes the horizontal velocity of a body in a tick of dt seconds; a value that is not finite or
 // a tick without time is left out.
 match_trail_add :: proc "contextless" (trail:^Match_Trail,velocity:math.Vec3,dt:f32) {
+    SPAN :: MATCH_PAST/MATCH_TRAIL
     if !anim_vec3_valid(velocity) || !anim_finite(dt) || dt<=0 {return}
-    next:=clamp(trail.next,0,MATCH_TRAIL-1)
-    trail.velocities[next],trail.steps[next]={velocity.x,0,velocity.z},dt
-    trail.next=(next+1)%MATCH_TRAIL;trail.count=clamp(trail.count+1,1,MATCH_TRAIL)
-}
-// How far a body went in its last seconds: the time its trail does not hold went at the oldest
-// velocity it holds, or at velocity with an empty trail.
-match_trail_moved :: proc "contextless" (trail:Match_Trail,seconds:f32,velocity:math.Vec3) -> (moved:math.Vec3) {
-    left:=seconds if anim_finite(seconds) && seconds>0 else 0
-    oldest:=math.Vec3{velocity.x,0,velocity.z}
-    for i in 0..<clamp(int(trail.count),0,MATCH_TRAIL) {
-        if left<=0 {return}
-        k:=(int(trail.next)-1-i)%%MATCH_TRAIL
-        step:=min(trail.steps[k],left)
-        moved+=trail.velocities[k]*step;left-=step;oldest=trail.velocities[k]
+    if !anim_vec3_valid(trail.current) || !anim_finite(trail.elapsed) || trail.elapsed<0 || trail.elapsed>SPAN {trail^={}}
+    flat:=math.Vec3{velocity.x,0,velocity.z}
+    // What is older than the trail does not matter: it holds at most MATCH_PAST and a span.
+    left:=min(dt,MATCH_PAST+SPAN)
+    for left>0 {
+        step:=min(SPAN-trail.elapsed,left)
+        trail.current+=flat*step;trail.elapsed+=step;left-=step
+        if trail.elapsed<SPAN*(1-1e-4) {break}
+        next:=clamp(trail.next,0,MATCH_TRAIL-1)
+        trail.spans[next],trail.current,trail.elapsed=trail.current,{},0
+        trail.next=(next+1)%MATCH_TRAIL;trail.count=clamp(trail.count+1,1,MATCH_TRAIL)
     }
-    return moved+oldest*left
+}
+// How far a body went in its last MATCH_PAST seconds: the time its trail does not hold went at the
+// pace of the oldest span it holds, or at velocity with an empty trail.
+match_trail_moved :: proc "contextless" (trail:Match_Trail,velocity:math.Vec3) -> (moved:math.Vec3) {
+    SPAN :: MATCH_PAST/MATCH_TRAIL
+    pace:=math.Vec3{velocity.x,0,velocity.z}
+    left:=f32(MATCH_PAST)
+    if anim_vec3_valid(trail.current) && anim_finite(trail.elapsed) && trail.elapsed>0 && trail.elapsed<=SPAN {
+        moved,left,pace=trail.current,left-trail.elapsed,trail.current/trail.elapsed
+    }
+    for i in 0..<clamp(int(trail.count),0,MATCH_TRAIL) {
+        if left<=0 {break}
+        span:=trail.spans[(int(trail.next)-1-i)%%MATCH_TRAIL]
+        share:=min(left/SPAN,1)
+        moved+=span*share;left-=SPAN*share;pace=span/SPAN
+    }
+    if left>0 {moved+=pace*left}
+    return
 }
 
 // Where the body goes in the next MATCH_HORIZON seconds and went in the last MATCH_PAST, in the
@@ -649,7 +663,7 @@ match_trajectory :: proc "contextless" (velocity,desired:math.Vec3,acceleration,
     if wanted,ok:=anim_unit(flat(desired_facing));ok {turn=cmath.atan2(linalg.dot(linalg.cross(heading,wanted),math.Vec3{0,1,0}),linalg.dot(heading,wanted))}
     inverse:=math.quat_inverse(match_yaw(heading))
     now:=math.quat_rotate(inverse,v)
-    moved:=match_trail_moved(trail^,MATCH_PAST,v) if trail!=nil else v*MATCH_PAST
+    moved:=match_trail_moved(trail^,v) if trail!=nil else v*MATCH_PAST
     behind:=math.quat_rotate(inverse,-moved)
     trajectory.velocity,trajectory.past={now.x,now.z},{behind.x,behind.z}
     for horizon,k in MATCH_HORIZON {

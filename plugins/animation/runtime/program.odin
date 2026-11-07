@@ -51,10 +51,7 @@ Program_Playing :: struct {
     inertia_bones:[dynamic]lib.Inertial_Bone,
     inertia_curves:[dynamic]lib.Inertial_Curve,
     inertia_values:[dynamic]f32,
-    dead_bones:[dynamic]lib.Dead_Bone,
-    dead_curves:[dynamic]lib.Dead_Curve,
     capture:bool,
-    dead:bool, // the transition is a dead blend
 
     epoch:u16,
     compiled_stamp:u64,
@@ -318,7 +315,7 @@ program_resolve :: proc(state:^Playing,animation:Animation,app:^host.App,blends:
     }
     if reset {
         mem.zero_slice(runtime.players[:]);mem.zero_slice(runtime.leader_keys[:])
-        runtime.fade=0;runtime.epoch=0;runtime.capture,runtime.dead=false,false;runtime.inertia={}
+        runtime.fade=0;runtime.epoch=0;runtime.capture=false;runtime.inertia={}
     }
     if !ok {return nil,true,false}
     output.asset=source
@@ -338,7 +335,7 @@ program_free :: proc(runtime:^Program_Playing) {
     delete(runtime.nodes);delete(runtime.reference_nodes);delete(runtime.node_curves);delete(runtime.reference_curves);delete(runtime.node_properties);delete(runtime.node_weights)
     delete(runtime.masks);program_output_free(&runtime.output)
     delete(runtime.history);delete(runtime.current);delete(runtime.history_curves);delete(runtime.prior_curves)
-    delete(runtime.inertia_bones);delete(runtime.inertia_curves);delete(runtime.inertia_values);delete(runtime.dead_bones);delete(runtime.dead_curves)
+    delete(runtime.inertia_bones);delete(runtime.inertia_curves);delete(runtime.inertia_values)
     runtime^={}
 }
 
@@ -552,7 +549,7 @@ program_buffers :: proc(state:^Playing,output:^Program_Output,content:^host.Cont
     // Regrowing masks clears rows whose keys can still be cached.
     if masks_grow {runtime.mask_bound=~state.bound}
     if len(runtime.current)!=n {runtime.kept,runtime.history_dt=false,0}
-    if !program_array_resize(&runtime.history,n) || !program_array_resize(&runtime.current,n) || !program_array_resize(&runtime.history_curves,c) || !program_array_resize(&runtime.prior_curves,c) || !program_array_resize(&runtime.inertia_bones,n) || !program_array_resize(&runtime.inertia_curves,c*5) || !program_array_resize(&runtime.inertia_values,c*5*4) || !program_array_resize(&runtime.dead_bones,n) || !program_array_resize(&runtime.dead_curves,c*5) {return false}
+    if !program_array_resize(&runtime.history,n) || !program_array_resize(&runtime.current,n) || !program_array_resize(&runtime.history_curves,c) || !program_array_resize(&runtime.prior_curves,c) || !program_array_resize(&runtime.inertia_bones,n) || !program_array_resize(&runtime.inertia_curves,c*5) || !program_array_resize(&runtime.inertia_values,c*5*4) {return false}
     return true
 }
 
@@ -674,10 +671,9 @@ program_pose :: proc(playback:^Playback,state:^Playing,content:^host.Content_Ani
         for value,b in before {old:=value;old.position-=(state.local[b].position-value.position)*ratio;old.scale-=(state.local[b].scale-value.scale)*ratio;delta:=mm.quat_inverse(value.rotation)*state.local[b].rotation;old.rotation=value.rotation*mm.quat_slerp(1,mm.quat_inverse(delta),ratio);older[b]=old}
         for &value,k in target {value=target_previous[k]-(value-target_previous[k])*ratio}
         input:=lib.Inertial_Input{previous=previous,current=runtime.from[:],target=before,target_previous=older,previous_curves=old,current_curves=now,target_curves=target_previous,target_previous_curves=target,dt=runtime.history_dt,duration=runtime.fade}
-        captured:=lib.dead_capture(&runtime.inertia,runtime.dead_bones[:],runtime.dead_curves[:],input) if runtime.dead else lib.inertial_capture(&runtime.inertia,runtime.inertia_bones[:],runtime.inertia_curves[:],input)
-        if !captured {runtime.error=.Invalid_Parameter;return false}
+        if !lib.inertial_capture(&runtime.inertia,runtime.inertia_bones[:],runtime.inertia_curves[:],input) {runtime.error=.Invalid_Parameter;return false}
         // A bone no clip moves stays where the target puts it.
-        for binding,b in state.bindings {if binding.target==0 {runtime.inertia_bones[b]={};runtime.dead_bones[b]={rotation=before[b].rotation,position=before[b].position,scale=before[b].scale,decay={1,1,1}}}}
+        for binding,b in state.bindings {if binding.target==0 {runtime.inertia_bones[b]={}}}
         runtime.capture=false
     }
     if runtime.inertia.active {
@@ -687,13 +683,12 @@ program_pose :: proc(playback:^Playback,state:^Playing,content:^host.Content_Ani
         root_bone:=bone_resolve(state,runtime.root.bone) if runtime.has_root else -1
         old_root,new_root:=mm.TRANSFORM_IDENTITY,mm.TRANSFORM_IDENTITY
         if root_bone>=0 {old_root,new_root=before[root_bone],state.local[root_bone]}
-        if !program_transition_apply(runtime,before,before) {runtime.error=.Invalid_Parameter;return false}
+        if !lib.inertial_pose_apply(runtime.inertia,runtime.inertia_bones[:],before,before) {runtime.error=.Invalid_Parameter;return false}
         previous_correction:=mm.TRANSFORM_IDENTITY
         if root_bone>=0 {previous_correction.position=before[root_bone].position-old_root.position;previous_correction.rotation=mm.quat_inverse(old_root.rotation)*before[root_bone].rotation}
-        if !lib.inertial_advance(&runtime.inertia,runtime.last_dt if animation.playing else 0) || !program_transition_apply(runtime,state.local[:],state.local[:]) {runtime.error=.Invalid_Parameter;return false}
+        if !lib.inertial_advance(&runtime.inertia,runtime.last_dt if animation.playing else 0) || !lib.inertial_pose_apply(runtime.inertia,runtime.inertia_bones[:],state.local[:],state.local[:]) {runtime.error=.Invalid_Parameter;return false}
         values:=runtime.inertia_values[:c*5];for value,k in state.curves {for v,j in value.value {values[k*5+j]=v};values[k*5+4]=value.weight}
-        curved:=lib.dead_curves_apply(runtime.inertia,runtime.dead_curves[:],values,values) if runtime.dead else lib.inertial_curves_apply(runtime.inertia,runtime.inertia_curves[:],values,values)
-        if !curved {runtime.error=.Invalid_Parameter;return false}
+        if !lib.inertial_curves_apply(runtime.inertia,runtime.inertia_curves[:],values,values) {runtime.error=.Invalid_Parameter;return false}
         for &value,k in state.curves {for &v,j in value.value {v=values[k*5+j]};value.weight=mm.saturate(values[k*5+4])}
         if root_bone>=0 && animation.playing && runtime.last_dt>0 {
             correction:=mm.TRANSFORM_IDENTITY;correction.position=state.local[root_bone].position-new_root.position;correction.rotation=mm.quat_inverse(new_root.rotation)*state.local[root_bone].rotation
@@ -704,12 +699,6 @@ program_pose :: proc(playback:^Playback,state:^Playing,content:^host.Content_Ani
     if runtime.last_dt>0 && runtime.kept {copy(runtime.history[:],runtime.current[:]);copy(runtime.history_curves[:],runtime.prior_curves[:]);runtime.history_dt=runtime.last_dt}
     copy(runtime.current[:],state.local[:]);copy(runtime.prior_curves[:],state.curves[:]);runtime.kept=true
     return true
-}
-// The transition of the program over a target pose: inertial or dead.
-@(private)
-program_transition_apply :: proc(runtime:^Program_Playing,target,out:[]mm.Transform) -> bool {
-    if runtime.dead {return lib.dead_pose_apply(runtime.inertia,runtime.dead_bones[:],target,out)}
-    return lib.inertial_pose_apply(runtime.inertia,runtime.inertia_bones[:],target,out)
 }
 @(private)
 program_mask_key :: proc(state:^Playing,instruction:Program_Instruction) -> u64 {

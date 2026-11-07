@@ -228,6 +228,16 @@ match_trajectory_follows_a_walk_that_accelerates_brakes_and_turns_at_its_rates :
     steady:=match_trajectory({0,0,3},{0,0,3},20,20,{0,0,1},{0,0,1},0)
     testing.expectf(t,linalg.length(walked.past-{0,-.5})<1e-4 && linalg.length(walked.velocity-{0,3})<1e-4,"a body that stood until a sixth of a second ago was half a metre back, not %v",walked.past)
     testing.expectf(t,linalg.length(steady.past-{0,-1})<1e-4,"without a trail it went at its velocity, not %v",steady.past)
+    // The same at any tick: many short ones, or one longer than the past.
+    for ticks in ([2]int{240,1}) {
+        fast:Match_Trail
+        dt:=f32(1)/f32(ticks)
+        if ticks>1 {for _ in 0..<ticks/2 {match_trail_add(&fast,{},dt)}}
+        for _ in 0..<max(ticks/6,1) {match_trail_add(&fast,{0,0,3},dt if ticks>1 else 1)}
+        moved:=match_trail_moved(fast,{0,0,3})
+        expected:=f32(.5) if ticks>1 else 1
+        testing.expectf(t,abs(moved.z-expected)<1e-3,"%d ticks a second: %.4f m in the past, not %.4f",ticks,moved.z,expected)
+    }
 }
 
 // The walk and the clips of match_test_rig, with a step: half a second of walk that does not loop.
@@ -382,20 +392,20 @@ an_event_searches_the_rows_that_reach_its_marker_in_time_at_the_rate_that_does :
     request.event,request.event_from=.6,.1
     best,_,_=match_search(&db,request,candidates=&noted)
     reasons:=match_test_reasons(&db,noted)
-    testing.expectf(t,best<0 && reasons[3]==.Arc,"rows .6 s away go back in the arc: %v",reasons)
+    testing.expectf(t,best<0 && reasons[3]==.Window,"rows .6 s away go back in the arc: %v",reasons)
     request.event_from=0
-    // A jump whose marker comes a little early even at the slowest rate still plays, at that rate:
-    // a frame off the landing is not worth a clip that fits the body worse.
-    request.event,request.entry=.8/.5+MATCH_EVENT_SLACK*.5,true
+    // A jump whose marker comes less than half a row early even at the slowest rate still plays,
+    // at that rate.
+    request.event,request.entry=(.8+.25/db.rate)/.5,true
     best,_,rate=match_search(&db,request)
     testing.expectf(t,match_range_of(&db,best)>=3 && rate==.5,"a start a frame early at rate .5, not row %d at %.3f",best,rate)
     request.entry=false
-    // Ten seconds before it lands no row reaches it: the jump lands too soon (Rate), the fall loop
+    // Ten seconds before it lands no row reaches it: the jump lands too soon (Window), the fall loop
     // has no marker (Event) and the ground serves another mode.
     request.event=10
     best,_,_=match_search(&db,request,candidates=&noted)
     reasons=match_test_reasons(&db,noted)
-    testing.expectf(t,best<0 && reasons=={.Mode,.Mode,.Event,.Rate},"nothing lands in 10 s: %v",reasons)
+    testing.expectf(t,best<0 && reasons=={.Mode,.Mode,.Event,.Window},"nothing lands in 10 s: %v",reasons)
     // Without an event the entry jump is left out of the steady search of the air.
     request.event=0
     best,_,_=match_search(&db,request,candidates=&noted)

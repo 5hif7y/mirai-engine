@@ -135,8 +135,10 @@ Per tick:
 - With `lag` (for a body that stops or starts harder than its clips; off by default and in
   `animation.character.setup`), the root of the pose follows the body by a critically damped spring of
   `lag_half_life`: a change of velocity the body makes at once the root takes in over the
-  half-life, never farther than `lag` from the body nor into the wall of the goal, and returns onto
-  the body. The bones right under the rig move by that offset after layers and warping. Matching,
+  half-life, never farther than `lag` from the body nor into the wall of the goal. It returns onto
+  the body only while the pose walks, at most `MATCH_LAG_CLOSE` of the speed of its clip, so a pose
+  that stands holds its offset instead of sliding its feet. The bones right under the rig move by
+  that offset after layers and warping. Matching,
   the rate of a loop and the stride warping follow the velocity of that root. With `lag` 0 the root
   stays on the body.
 - Every `interval` (0: every tick) it searches the lowest-cost row among the clips of the mode; a
@@ -156,13 +158,10 @@ Per tick:
 - Entering a mode that has entry clips searches only among their starts; without them, among the
   clips of the mode. An entry clip does not take part in the continuous search, except to keep
   playing it.
-- Every jump enters through a transition of `blend` seconds, chosen by `transition`: `Inertial`
-  captures pose and velocity and evaluates only the target with decaying offsets; `Dead` goes on
-  with the outgoing pose at its velocities, decaying, and fades into the target; `Auto` blends dead
-  a jump between a clip that stands and one that travels (a start or a stop, where the velocities
-  differ most) and inertializes the rest. `match_play` always inertializes. The capture is of the
-  boundary before the new advance, before the component layers; a tick with zero dt leaves it
-  pending.
+- Every jump, and every `match_play`, enters through an inertial transition of `blend` seconds: it
+  captures pose and velocity and evaluates only the target with decaying offsets, so the target
+  keeps its own motion (its planted feet). The capture is of the boundary before the new advance,
+  before the component layers; a tick with zero dt leaves it pending.
 - `animation_match` says which clip plays, its rate, its mode, whether `match_play` forced it and
   how many searches and jumps it made.
 
@@ -184,16 +183,20 @@ with inertialization of `fade`:
 ### Landing
 
 A jump lands on time with no game code: its clips carry the marker `landing_marker` of the
-`.match` at first contact, and physics publishes `time_to_land` of the goal (the `Character_State`
-of a falling `Character`).
+`.match` at first contact, and `animation_physics` gives `time_to_land` of the goal: while the
+`Character` falls and the clips of that mode carry the marker (`Animation_Match.landing_modes`), it
+asks physics where its arc lands (`character_landing`).
 
 - With a time to land and clips of the mode that have the marker, every search (on entering the
-  mode, and each `interval` in the air) weighs only rows whose next marker is reached at a rate of
-  `landing_rates`, at their own rate, and plays the chosen one at that rate: entering, the entry
-  starts first, then (off a ledge, a short fall) any row of the clips of the mode, entry or not. A
-  body whose velocity changes in the air moves to the clip that fits, its marker still on time.
+  mode, and each `interval` in the air) weighs only the rows in the window of the landing: their
+  next marker is reached at a rate of `landing_rates` within half a row, and in the air not further
+  than that of the row playing (the arc only goes on). It plays the chosen one at that rate:
+  entering, the entry starts first, then (off a ledge, a short fall) any row of the clips of the
+  mode, entry or not. A body whose velocity changes in the air moves to the clip that fits, its
+  marker still on time.
 - Each tick the rate follows the time to land physics gives; the clip searches again only when no
-  landing rate reaches its marker. Without a marker or a prediction it matches as before.
+  landing rate reaches its marker. One that passes its marker in the air matches again, and plays
+  on unless a row fits better by `bias`. Without a marker or a prediction it matches as before.
 - A clip at or past its marker when the body changes mode plays on in the new mode, its tail
   bound only by the clip: until it ends or a periodic search leaves it.
 

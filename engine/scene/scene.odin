@@ -267,7 +267,6 @@ current :: proc(d:Documents,file:^asset.Asset,resolved:^asset.Asset) -> (documen
 
 // What reads and writes the values of a world: the schema of its World_Info,
 // or one made for this call when it has none. nil without memory.
-@(private)
 schema_of :: proc(w:core.World_Ref) -> ^core.World_Schema {
     if w.info.schema!=nil {return w.info.schema}
     return core.world_schema_make(w.info,context.temp_allocator)
@@ -511,17 +510,24 @@ sections_load :: proc(w:core.World_Ref,a:^asset.Asset,asset_types:^asset.Types,d
 // at its default.
 @(private)
 component_read :: proc(a:^asset.Asset,component:^asset.Scene_Component,types:^core.World_Schema,info:^core.Table_Info,value_type:^core.Value_Schema,values:[]u8) -> bool {
-    identity:=core.TRANSFORM_IDENTITY
-    default:[]u8
-    if info.default!=nil {
-        allocated,allocation:=make([]u8,info.info.size,context.temp_allocator)
-        if allocation!=nil {return false}
-        default=allocated
-        info.default(raw_data(default))
-    } else if info.type==core.Transform {
-        default=mem.ptr_to_bytes(&identity)
-    }
+    default:=read_default(info) or_return
     return asset.scene_component_read(a,component,&types.schema,value_type.type,values,default)==.None
+}
+
+// What a field of a component that a document does not keep reads as, as one value of the component in
+// memory: its default, the identity for a transform, and zero for the rest, which is nil.
+read_default :: proc(info:^core.Table_Info,allocator:=context.temp_allocator) -> (default:[]u8,ok:bool) {
+    if info.default==nil && info.type!=core.Transform {return nil,true}
+    allocation:mem.Allocator_Error
+    default,allocation=make([]u8,info.info.size,allocator)
+    if allocation!=nil {return nil,false}
+    if info.default!=nil {
+        info.default(raw_data(default))
+    } else {
+        identity:=core.TRANSFORM_IDENTITY
+        copy(default,mem.ptr_to_bytes(&identity))
+    }
+    return default,true
 }
 
 @(private)

@@ -1213,6 +1213,59 @@ prefab_variants_follow_their_base_and_apply_to_it :: proc(t:^testing.T) {
     }
 }
 
+// A prefab file written before its component gained a field: the field is no override of an instance until
+// the instance changes it, and applying it writes the component with every field, those the instance did not
+// change with the value loading gave them.
+@(test)
+prefab_apply_writes_fields_the_file_of_the_prefab_did_not_have :: proc(t:^testing.T) {
+    f:=new(Prefab_Fixture);defer free(f)
+    if !testing.expect(t,prefab_fixture_init(f,"old-fields")) {return}
+    defer prefab_fixture_destroy(f)
+    s:=&f.s
+    w:=edited_world(s)
+    lamps:=&f.tables[5]
+    lamps.default=proc(dst:rawptr) {(^Prefab_Test_Lamp)(dst)^={intensity=1,range=10}}
+    Lamp_Without_Range :: struct {intensity:f32}
+    old:asset.Scene
+    if !testing.expect_value(t,asset.scene_init(&old,&f.assets.types,asset.KIND_PREFAB,{1,2}),asset.Error.None) {return}
+    lamp_id,bulb_id:=base.Entity_Id(0x11),base.Entity_Id(0x12)
+    asset.scene_entity_add(&old,lamp_id,0,"Lamp")
+    asset.scene_entity_add(&old,bulb_id,lamp_id,"Bulb")
+    old.info.root=lamp_id
+    for id in ([]base.Entity_Id{lamp_id,bulb_id}) {
+        identity:=core.TRANSFORM_IDENTITY
+        without:=Lamp_Without_Range{intensity=3}
+        asset.scene_set(&old,id,"Transform",&identity)
+        asset.scene_set(&old,id,"Prefab_Test_Lamp",&without)
+    }
+    file:=fmt.tprintf("%s/lamp.prefab",f.root)
+    saved:=asset.scene_save(&old,file)
+    asset.scene_destroy(&old)
+    if !testing.expect_value(t,saved,asset.Error.None) {return}
+    core.world_settle(w)
+    edits_reset(&f.edits,w)
+    prefabs_follow(s,&f.prefabs)
+    id,located:=prefab_locate(s,"lamp",{})
+    if !testing.expect_value(t,located,Prefab_Error.None) {return}
+    placed,placed_error:=prefab_instantiate(s,id,{})
+    if !testing.expect_value(t,placed_error,Prefab_Error.None) {return}
+    prefabs_follow(s,&f.prefabs)
+    testing.expect_value(t,len(f.document.previous.overrides),0)
+
+    reach:=f32(25)
+    testing.expect(t,field_write(s,lamps,{prefab_fixture_find(f,placed)},int(offset_of(Prefab_Test_Lamp,range)),mem.ptr_to_bytes(&reach)))
+    prefab_fixture_step(f)
+    count,applied:=prefab_apply(s,prefab_fixture_find(f,placed),{"Prefab_Test_Lamp.range"})
+    testing.expectf(t,applied==.None && count==1,"apply: %v, %d applied",applied,count)
+    written:asset.Scene
+    if !testing.expect_value(t,asset.scene_load(&written,&f.assets.types,file),asset.Error.None) {return}
+    defer asset.scene_destroy(&written)
+    lamp,_:=asset.scene_get(&written,lamp_id,"Prefab_Test_Lamp",Prefab_Test_Lamp)
+    bulb,_:=asset.scene_get(&written,bulb_id,"Prefab_Test_Lamp",Prefab_Test_Lamp)
+    testing.expect_value(t,lamp,Prefab_Test_Lamp{intensity=3,range=25})
+    testing.expect_value(t,bulb,Prefab_Test_Lamp{intensity=3,range=10})
+}
+
 // Whether the records of the document name only what the World has, and how many instances they hold.
 @(private="file")
 prefab_fixture_records_follow_the_world :: proc(t:^testing.T,f:^Prefab_Fixture,instances:int,loc:=#caller_location) -> bool {

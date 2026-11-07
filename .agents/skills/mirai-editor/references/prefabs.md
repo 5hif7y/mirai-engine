@@ -32,7 +32,10 @@ phase, with every skinned mesh in its rest pose.
   editor changes of a member are observed by each one.
 - A prefab is read with its own instances up to date with its prefabs (`prefab_scene_load`, by the
   [resolver](../../mirai-assets/references/scenes.md#resolution-against-the-current-prefab)): what
-  is applied, the base and what `prefab.inspect` shows start from it.
+  is applied, the base and what `prefab.inspect` shows start from it. Its components take the layout
+  the program gives them, and a field its file does not keep takes what loading gives it (the
+  component's default): such a field is not an override until the instance changes it, and every
+  file an apply writes keeps every field of the components.
 
 Procedures, with their action and API method:
 

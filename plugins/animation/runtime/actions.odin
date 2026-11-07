@@ -10,6 +10,7 @@ import mm "mirai:std/math"
 
 ACTION_KIND :: asset.Fourcc(u32('A')|u32('C')<<8|u32('T')<<16|u32('N')<<24)
 ACTION_VERSION :: 1
+ACTION_OLDEST :: ACTION_VERSION
 ACTION_CAPACITY :: 64
 ACTION_ROWS :: 256
 ACTION_EVENT_CAPACITY :: 1024
@@ -89,7 +90,7 @@ action_profile_save :: proc(path:string,types:^asset.Types,id:base.Asset_Id,prof
     return asset.document_save(&doc,path)
 }
 action_profile_view :: proc(file:^asset.Asset,types:^asset.Types) -> (profile:Action_Profile,error:asset.Error) {
-    asset.kind_check(file,ACTION_KIND,ACTION_VERSION) or_return
+    asset.kind_check(file,ACTION_KIND,ACTION_OLDEST,ACTION_VERSION) or_return
     info:=asset.asset_rows(file,types,"info","",Action_Info) or_return
     if len(info)!=1 {return {},.Corrupt};profile.info=info[0]
     profile.actions=asset.asset_rows(file,types,"actions","",Action_Definition) or_return

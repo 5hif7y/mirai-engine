@@ -703,7 +703,7 @@ shell_build :: proc(s:^Session,w:core.World_Ref) {
         }
         if rect,found:=ui.widget_rect(ctx,id);found {g.rects.left=rect}
         if left_dock>0 {dock_edge(s,.Left,left_width,bars)}
-    } else if (panels && !l.left_open || play && !s.play_chat_open) && !s.viewport.pick.active {
+    } else if (panels && !l.left_open || s.mode==.Paused && !s.play_chat_open) && !s.viewport.pick.active {
         if ui.panel(ctx,shell_id(g,"library_reopen"),{width=ui.fixed(30),height=ui.fixed(30),offset={th.margin,top}}) {
             if ui.button(ctx,shell_id(g,"library_reopen_button"),{icon=play?.Sparkle:ui.icon_user(u8(User_Icon.Panel_Open)),icon_size=15,style=.Ghost,width=30,height=30,tip=play?"":"Show panel"}).clicked {
                 if play {play_chat_set(s,true)} else {l.left_open=true}

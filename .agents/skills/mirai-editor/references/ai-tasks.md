@@ -214,8 +214,10 @@ Each turn has its folder `.mirai/ai/<conversation-id>-<sequence>/` (`AI_FILE_*`)
 the editor's instructions (`ai_prompt_write`), `message.md` with the user's message, which Retry
 puts back in the composer and which is rebuilt from the chat if the folder lost it, `context.json`
 with mode, region, camera, selection, document and the region's entities (in Play, the live
-player), `region.png` with the region on sending, without panels and at half the drawable's pixels
-(`ai_half_pixels`), written by a job that `view_viewport` waits for, and `mcp.json`
+player), `state.json` (only from the pause, with a selection) with the selected entities and the
+values of their components at the paused tick, `region.png` with the region on sending, without
+panels and at half the drawable's pixels (`ai_half_pixels`), written by a job that `view_viewport`
+waits for, and `mcp.json`
 with the `mirai` server and the turn's header.
 
 MCP and attribution:
@@ -335,7 +337,9 @@ Entities in the context:
 The turns' runs are in [Play](editor.md#play).
 
 - A turn that starts inside the user's Play reads it and keeps that run if the user leaves it
-  without the turn having one of its own.
+  without the turn having one of its own. The user sends it from the pause: the entities they
+  select there go with their values at that tick (`ai_state_write`), which the game changes once
+  it resumes.
 - The turn carries a snapshot of the live world: local seat, the body it drives, camera, transforms
   and clock. `play.player` shares that function; its live handles allow inspecting entities created
   in the game without `Id`. The instructions ask for read-only observations with `play.player`,

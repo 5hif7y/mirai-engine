@@ -17,6 +17,7 @@ Ai_Context_Test_World :: struct {
     names:core.Table(core.Name),
     transforms:core.Table(core.Transform),
     parents:core.Table(core.Parent),
+    time:core.Time,
 }
 
 Ai_Context_Test_Editor :: struct {api:Api}
@@ -60,7 +61,10 @@ ai_context_continues_project_chats_and_passes_instructions_skills_and_live_play 
         {name="Transform",type=core.Transform,info=type_info_of(core.Transform),offset=offset_of(Ai_Context_Test_World,transforms)},
         {name="Parent",type=core.Parent,info=type_info_of(core.Parent),offset=offset_of(Ai_Context_Test_World,parents)},
     }
-    storages:=[1]core.Storage_Info{{name="Api",type=Api,info=type_info_of(Api),place=.Editor,offset=offset_of(Ai_Context_Test_Editor,api)}}
+    storages:=[2]core.Storage_Info{
+        {name="Api",type=Api,info=type_info_of(Api),place=.Editor,offset=offset_of(Ai_Context_Test_Editor,api)},
+        {name="Time",type=core.Time,info=type_info_of(core.Time),offset=offset_of(Ai_Context_Test_World,time)},
+    }
     info:=core.World_Info{entities=offset_of(Ai_Context_Test_World,entities),tables=tables[:],storages=storages[:]}
     state:=Api_State{server={port=7940}}
     editor_world:=Ai_Context_Test_Editor{api={state=&state}}
@@ -161,6 +165,24 @@ ai_context_continues_project_chats_and_passes_instructions_skills_and_live_play 
     testing.expect_value(t,ai_store_load(&ai.store,first.conversation.id,&restored),"")
     testing.expect_value(t,restored.count,playing.transcript.count)
     playing.state=.Done
+    // Sent from the pause, the turn has the selected entities with their values at that tick;
+    // the next turn without a selection in the pause does not keep them.
+    api_schema_build(&s,&state)
+    defer api_schema_free(&state)
+    s.mode,live.time.tick=.Paused,120
+    paused,paused_error:=ai_task_create(&s,ai,{0,0,800,600},"Why is it here?","codex",first.id)
+    if !testing.expect(t,paused!=nil && paused_error=="") {return}
+    snapshot,snapshot_error:=os.read_entire_file(ai_task_path(&s,paused,AI_FILE_STATE),context.temp_allocator)
+    testing.expect(t,snapshot_error==nil && strings.contains(string(snapshot),`"tick":120`))
+    testing.expect(t,strings.contains(string(snapshot),"Live player") && strings.contains(string(snapshot),`"position":[42,0,0]`))
+    paused_prompt,_:=os.read_entire_file(ai_task_path(&s,paused,AI_FILE_PROMPT),context.temp_allocator)
+    testing.expect(t,strings.contains(string(paused_prompt),"paused at tick 120") && strings.contains(string(paused_prompt),AI_FILE_STATE))
+    paused.state=.Done
+    selection_clear(&selection)
+    unselected,unselected_error:=ai_task_create(&s,ai,{0,0,800,600},"And now?","codex",first.id)
+    if !testing.expect(t,unselected!=nil && unselected_error=="") {return}
+    testing.expect(t,!os.exists(ai_task_path(&s,unselected,AI_FILE_STATE)))
+    unselected.state=.Done
     s.mode=.Edit;s.runs[0]={}
     selection_clear(&selection)
     ai.connections[AI_CLAUDE].configured=true

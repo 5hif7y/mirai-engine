@@ -367,6 +367,45 @@ a_modal_on_top_blocks_the_seats_it_covers_until_it_leaves :: proc(t:^testing.T) 
     testing.expect(t,!gui.instances[0].blocking)
 }
 
+// What a Modal takes from the seats it covers, its own buttons still get:
+// they read the actions they name past its block, and the game does not.
+@(test)
+the_buttons_of_a_modal_get_the_actions_it_takes_from_the_game :: proc(t:^testing.T) {
+    DROP :: inp.Action(4)
+    es:core.Entities
+    core.entities_init(&es)
+    defer core.entities_destroy(&es)
+    seat,inventory,cinematic:=core.create(&es),core.create(&es),core.create(&es)
+    seats:core.Table(inp.Seat)
+    core.table_init(&seats,"Seat")
+    defer core.table_destroy(&seats)
+    core.add(&seats,seat,inp.Seat{})
+    core.table_settle(&seats,&es)
+    bindings:inp.Input_Map
+    inp.input_map_action(&bindings,DROP,.Button)
+    inp.input_map_bind(&bindings,DROP,inp.binding_key(.X))
+    device:=core.Input{keys_down={.X},keys_pressed={.X}}
+    inp.seat_feed(core.get(&seats,seat),&device,&bindings,false)
+    state:inp.Seats
+    state.blocks[0]={owner=inventory,mask=inp.ALL_ACTIONS,active=true}
+    core.get(&seats,seat).blocked=inp.ALL_ACTIONS
+    names:=[1]core.Name_Info{{type=inp.Action,value=i64(DROP),name="drop_item"}}
+    info:=core.World_Info{names=names[:]}
+    app:=new(host.App)
+    defer free(app)
+    app.info=&info
+    gui:Gui
+    defer delete(gui.actions)
+    instance:=Instance{entity=inventory}
+    src:=Source{gui=&gui,app=app,player=1,seat=seat,seat_state=&state,seats=core.read(&seats),building=&instance}
+    down,pressed:=source_action(&src,base.name_hash("drop_item"))
+    testing.expect(t,down && pressed)
+    testing.expect(t,!inp.seat_action(core.read(&seats),seat,DROP).down,"the game does not get it")
+    instance.entity=cinematic
+    down,pressed=source_action(&src,base.name_hash("drop_item"))
+    testing.expect(t,!down && !pressed,"another interface does not read past the block of the Modal")
+}
+
 // A screen on top with an input context puts the seats it covers in it,
 // modal for a Modal, instead of blocking them, and takes them out as it leaves.
 @(test)

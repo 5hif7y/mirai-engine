@@ -148,6 +148,14 @@ a_block_of_no_seat_takes_every_local_seat :: proc(t:^testing.T) {
     testing.expect(t,blocked(&seats,first)==ALL_ACTIONS && blocked(&seats,second)==ALL_ACTIONS)
     testing.expect_value(t,blocked(&seats,remote),Action_Mask(0))
     testing.expect(t,!seat_down(read,first,.Jump))
+    // Its owner still gets what it takes, until another owner takes it too.
+    testing.expect(t,seat_action_for(&state,core.read(&seats),first,TEST_JUMP,menu).pressed)
+    cinematic:=core.create(&es)
+    request_apply(&a,{kind=.Block_Add,owner=cinematic,seat=first,mask=action_bit(TEST_JUMP)})
+    blocks_apply(&seats,&state)
+    testing.expect(t,!seat_action_for(&state,core.read(&seats),first,TEST_JUMP,menu).down)
+    request_apply(&a,{kind=.Block_Remove,owner=cinematic})
+    blocks_apply(&seats,&state)
     // Given back, the button held through the block waits for its release.
     request_apply(&a,{kind=.Block_Remove,owner=menu})
     blocks_apply(&seats,&state)

@@ -148,7 +148,9 @@ tree_button :: proc(ctx:^Context,b:^Tree_Build,node:^Node,index,slot:int,node_id
     takes:=node.action!=0 && !b.desc.passive && !disabled
     down,pressed:bool
     if takes && ctx.game.action!=nil {down,pressed=ctx.game.action(ctx.game.user,node.action)}
-    if !down {state.armed=true}
+    // A press of a fixed tick lasts for the frames of that tick: one clicks, and the button waits
+    // for a frame with the action neither down nor pressed.
+    if !down && !pressed {state.armed=true}
     if !state.armed {down,pressed=false,false}
     clicked:=false
     if node.hold>0 {
@@ -165,7 +167,10 @@ tree_button :: proc(ctx:^Context,b:^Tree_Build,node:^Node,index,slot:int,node_id
                 element_leaf(ctx,{layout={width=fixed(r.w*clamp(state.held/node.hold,0,1)),height=fixed(bar)},float={to=.Surface,offset={r.x,r.y+r.h-bar},layer=ctx.layer+1},custom=paint_add(ctx,{kind=.Rect,fill=style.mark})})
             }
         }
-    } else {clicked=it.clicked || pressed}
+    } else {
+        clicked=it.clicked || pressed
+        if pressed {state.armed=false}
+    }
     if clicked {
         tree_emit(b,{name=node.name,node=i32(index),kind=.Clicked,item=item})
         tree_sound(ctx,base_style,.Press)

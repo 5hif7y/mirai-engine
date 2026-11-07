@@ -206,7 +206,7 @@ action_state :: proc(s:^Session,action:Action) -> (state:Action_State) {
     case .Stop:  state.disabled=s.mode==.Edit && !play_plugin_active(s)
     case .Release_Input: state.disabled=!player_processes_captured(s) && (s.mode!=.Play || s.play_input_released)
     case .Import:    state.disabled=!edit || s.app.assets==nil
-    case .Ai_Chat:   state.checked=s.ai.chat_open && (s.gui.layout.left_open || play_shown(s))
+    case .Ai_Chat:   state.disabled,state.checked=s.mode==.Play,s.ai.chat_open && (s.gui.layout.left_open || play_shown(s))
     case .Source_Control: state.disabled=!s.has_project;state.checked=s.gui.layout.left_open && s.gui.layout.library_tab==.Git
     case .Projects:  state.disabled=s.mode!=.Edit || s.engine_root=="" || s.projects==nil
     case .Graphics:  state.checked=ui.popup_is_open(s.gui.ctx,graphics_popup(s.gui))

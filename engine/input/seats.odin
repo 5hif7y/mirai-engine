@@ -179,6 +179,26 @@ seat_action :: proc(seats:core.Read(Seat),seat:core.Entity,a:Action) -> Action_S
     return action(&source.actions,a)
 }
 
+// The state of an action of a seat as the owner of blocks sees it: past its
+// own blocks, so that what takes the actions of a seat (a modal screen) still
+// gets them; released while a block of another owner takes it or it waits
+// for its release.
+seat_action_for :: proc(state:^Seats,seats:core.Read(Seat),seat:core.Entity,a:Action,owner:core.Entity) -> Action_State {
+    row:=core.row_of(seats,seat)
+    if row<0 {return {}}
+    source:=&seats.table.values[row]
+    bit:=action_bit(a)
+    if source.rearm&bit!=0 {return {}}
+    if source.blocked&bit!=0 {
+        if state==nil || owner==core.NONE {return {}}
+        local:=seat_local(source^)
+        for block in state.blocks {
+            if block.active && block.owner!=owner && block.mask&bit!=0 && (block.seat==seat || block.seat==core.NONE && local) {return {}}
+        }
+    }
+    return action(&source.actions,a)
+}
+
 // The button actions of a seat that are down this tick, as seat_down sees them.
 seat_buttons :: proc(seats:core.Read(Seat),seat:core.Entity,bindings:^Input_Map) -> (mask:Action_Mask) {
     row:=core.row_of(seats,seat)

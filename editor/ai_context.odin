@@ -26,6 +26,7 @@ AI_FILE_MESSAGE :: "message.md" // what the user asked: read when the turn start
 AI_FILE_CONTEXT :: "context.json"
 AI_FILE_IMAGE :: "region.png" // the region, cut from the capture
 AI_FILE_MCP :: "mcp.json"
+AI_FILE_STATE :: "state.json" // the entities selected in the paused Play, as they were when the message was sent
 AI_ENTITY_CAPACITY :: 64      // entities of a region listed in the context
 
 Ai_Entity :: struct {
@@ -321,7 +322,47 @@ ai_context_write :: proc(s:^Session,task:^Ai_Task,entities:[]Ai_Entity) -> bool 
     }
     data,error:=json.marshal(context_value,{pretty=true},context.temp_allocator)
     if error!=nil {return false}
-    return os.write_entire_file(ai_task_path(s,task,AI_FILE_CONTEXT),data)==nil
+    return os.write_entire_file(ai_task_path(s,task,AI_FILE_CONTEXT),data)==nil && ai_state_write(s,task,w)
+}
+
+// The tick of the paused Play of the user a message is sent from; false
+// outside the pause.
+@(private)
+ai_paused_tick :: proc(s:^Session,task:^Ai_Task) -> (tick:u64,paused:bool) {
+    if !task.play || s.mode!=.Paused {return}
+    r:=ai_task_run(s,task)
+    if r==nil {return}
+    if t:=core.world_storage_of(run_ref(s,r),core.Time);t!=nil {tick=t.tick}
+    return tick,true
+}
+
+// The entities selected in the paused Play, with the values of their
+// components at that tick: what the message refers to, which the game may
+// change once it resumes. A turn sent otherwise has none.
+@(private)
+ai_state_write :: proc(s:^Session,task:^Ai_Task,w:core.World_Ref) -> bool {
+    path:=ai_task_path(s,task,AI_FILE_STATE)
+    tick,paused:=ai_paused_tick(s,task)
+    st:=api_state(s)
+    if !paused || st==nil || s.selection==nil || len(s.selection.entities)==0 || asset_document_in_front(s)!=nil {
+        if os.exists(path) {return os.remove(path)==nil}
+        return true
+    }
+    scratch,memory:=make([]u8,max(st.largest,1),context.temp_allocator)
+    if memory!=nil {return false}
+    out:serial.Writer
+    serial.writer_init(&out,0,context.temp_allocator)
+    serial.text_write_raw(&out,`{"tick":`);serial.text_write_int(&out,i64(tick))
+    api.write_key(&out,"entities");serial.write_u8(&out,'[')
+    first:=true
+    for e in s.selection.entities {
+        if !entity_alive(w,e) {continue}
+        if !first {serial.write_u8(&out,',')}
+        first=false
+        api_entity_write(s,w,&out,e,true,scratch,true,true)
+    }
+    serial.text_write_raw(&out,"]}")
+    return os.write_entire_file(path,serial.writer_bytes(&out))==nil
 }
 
 // The methods a turn uses most, named in the instructions by their MCP tool.
@@ -399,7 +440,12 @@ ai_prompt_write :: proc(s:^Session,task:^Ai_Task,entities:[]Ai_Entity) -> bool {
     strings.write_string(&b,"- The tools of the server `mirai` are the basics of a scene. Every other method, of the editor or of a plugin (animation, terrain, navigation, physics, particles, interfaces and the rest), goes through the tool `call` with its name as `method` and its `params`; `engine_describe` with `methods` (several names at once), `prefix` or `plugin` gives their schemas. The methods named below by their tool name (such as `panel_save`) go through `call` too when they are not tools.\n")
     if tool:=ai_client_path(engine);tool!="" {fmt.sbprintf(&b,"- For many calls, write and run a script instead of calling tools one by one, with `%s rpc <method> '<json>'` (or `--file params.json`) for each call, never with requests of your own to the editor.\n",tool)}
     strings.write_string(&b,"- Do not edit scene files while the editor has them open.\n")
-    if task.play {
+    if tick,paused:=ai_paused_tick(s,task);paused {
+        fmt.sbprintf(&b,"- The game of the user is paused at tick %d. Answer questions about it using read-only observations: `play.player`, `play.status` and `play.inspect` with `include_runtime=true`. Do not edit files or scenes, resume, step or stop the game, or mutate the paused world.\n",tick)
+        if os.exists(ai_task_path(s,task,AI_FILE_STATE)) {
+            fmt.sbprintf(&b,"- %s has the entities the user selected in the paused game, which the message refers to, with the values of their components at tick %d, when they sent it.\n",ai_task_path(s,task,AI_FILE_STATE),tick)
+        }
+    } else if task.play {
         strings.write_string(&b,"- The game is playing. Answer questions about the live game and player using read-only observations. The context includes a player snapshot; use `play.player`, `play.status` and `play.inspect` with `include_runtime=true` for current values, components of the body it drives and runtime storage. Do not edit files or scenes, stop or pause the game, or mutate the playing world.\n")
     }
     strings.write_string(&b,"- To test the game, `play_start` opens a copy of your own that only `play_step` advances, with keys, the pointer (`mouse_position` clicks its UI), `text`, gamepads of local seats, `segments` that change them along the ticks, `until` to run until conditions hold and a `trace` that returns values every some ticks. Change your copy between steps with `play_set` (component values and teleports), `play_spawn`, `play_destroy` and `play_push` (requests to its queues); read it with `play_inspect` (`storages` gives score and match state) and assert with `play_check`; `play_ui` gives its live interface with the rectangle of each node to click and `play_audio` the voices that sound. `play_capture` returns the image of your copy (with `every` and `count`, one filmstrip of it stepping, around an entity it `follow`s), and `editor_capture` that of the editor or of an open `.ui`. In the scene, `scene_raycast`, `scene_bounds` and `scene_ground` (rests entities on what is under them) answer where things are.\n")

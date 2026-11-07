@@ -540,14 +540,17 @@ result of `play.status`, `paused`, `simulating` and `input_released` are the use
 - `play.walk` (registered by the `navigation` plugin): walks the body of a seat to a point or
   an entity tick by tick through the meshes and says how it ended
   ([walk](../../mirai-plugins/references/navigation.md#editor-and-api)).
-- `play.capture`: requires a GPU. The run of a turn is drawn offscreen with its camera and its game
-  UI, without the editor; the user's Play is the window. A job writes the PNG, at `path` like that
+- `play.capture`: requires a GPU. The game is drawn offscreen with its camera and its game UI,
+  without the editor (a turn's run and the user's Play alike); `ui:true` takes the user's Play as
+  the window shows it, editor around it. Drawn offscreen, its temporal effects start over in that
+  view (`frames` lets them settle): to measure stability frame to frame, use `editor.capture` with
+  `ui:true`. A job writes the PNG, at `path` like that
   of `editor.capture` or, without it, in `.mirai/captures/`.
   - Filmstrip (`every` and `count`): steps the caller's own run like `play.step` (pausing the
     user's Play), with `segments` as its input and nothing held after them, and draws a cell
     before the first tick and every `every` ticks: the whole image, a `region`, or a cell of
-    `size` centered where the `follow` entity projects through the game camera (in the user's
-    Play, inside the viewport). One PNG, cells left to right and top to bottom with their tick
+    `size` centered where the `follow` entity projects through the game camera (with `ui`, inside
+    the viewport). One PNG, cells left to right and top to bottom with their tick
     in the corner, scaled down past a sheet width; `structuredContent` gives each cell's tick.
 - `play.record`: requires a GPU. Deletes the previous sequence in the folder, pauses the run,
   advances it `1/fps` of game time per frame (with its `Clock`), draws the world alone through the

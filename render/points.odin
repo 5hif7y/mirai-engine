@@ -31,10 +31,16 @@ Material_Points :: struct {
 	programs:  u32, // bins: the largest Surface program id of the catalog, plus one
 	wanted:    u32, // the most points a batch asked for, read back: the buffer grows to it
 	readback:  [rhi.MAX_FRAMES_IN_FLIGHT]rhi.Buffer,
-	pipelines: [POINTS_PROGRAM_CAPACITY]rhi.Pipeline, // of the stage of each program, by id, asked for when first needed
+	using stages: Program_Computes, // of surface_points__<program>.comp
+	started:   bool, // a batch started this frame: the next one keeps what it asked for
+}
+
+// The pipelines of a compute stage of the engine compiled for each Surface
+// program (<stem>__<program>.comp), by id, asked for when first needed.
+Program_Computes :: struct {
+	pipelines: [POINTS_PROGRAM_CAPACITY]rhi.Pipeline, // 0 until made, or when the shaders have no such stage
 	codes:     [POINTS_PROGRAM_CAPACITY]^rhi.Shader_Code, // and the code it was made with
 	asked:     [POINTS_PROGRAM_CAPACITY]bool,
-	started:   bool, // a batch started this frame: the next one keeps what it asked for
 }
 
 // The buffer of the frame, as large as the frames before asked for. Without a
@@ -86,28 +92,52 @@ points_destroy :: proc(r: ^Renderer) {
 // With the GPU idle: when the shaders they were made from go.
 @(private)
 points_pipelines_destroy :: proc(r: ^Renderer) {
-	m := &r.points
-	for &pipeline, id in m.pipelines {
+	program_computes_destroy(r, &r.points.stages)
+	program_computes_destroy(r, &r.vertex_stages)
+}
+
+@(private)
+program_computes_destroy :: proc(r: ^Renderer, table: ^Program_Computes) {
+	for &pipeline, id in table.pipelines {
 		if pipeline != 0 {rhi.pipeline_destroy(r.device, pipeline)}
-		pipeline, m.asked[id], m.codes[id] = 0, false, nil
+		pipeline, table.asked[id], table.codes[id] = 0, false, nil
 	}
 }
 
-// The stage of a Surface program over its points; 0 until it is made, or
-// when the shaders have none.
+// With the GPU idle, before the renderer takes the stages of programs of
+// another generation, next: the pipelines whose code is the same stay.
 @(private)
-points_pipeline :: proc(r: ^Renderer, program: Program) -> rhi.Pipeline {
-	m := &r.points
+program_computes_publish :: proc(r: ^Renderer, table: ^Program_Computes, next: []rhi.Shader_Code) {
+	for &pipeline, id in table.pipelines {
+		if code := program_code_same(next, table.codes[id]); code != nil && pipeline != 0 {
+			table.codes[id] = code
+			continue
+		}
+		if pipeline != 0 {rhi.pipeline_destroy(r.device, pipeline)}
+		pipeline, table.asked[id], table.codes[id] = 0, false, nil
+	}
+}
+
+// The stage <stem>__<program>.comp of a Surface program; 0 until it is made
+// (pipeline_thread.odin), or when the shaders have none.
+@(private)
+program_compute :: proc(r: ^Renderer, table: ^Program_Computes, program: Program, stem, label: string) -> rhi.Pipeline {
 	if program.id >= POINTS_PROGRAM_CAPACITY {return 0}
-	if !m.asked[program.id] {
-		m.asked[program.id] = true
+	if !table.asked[program.id] {
+		table.asked[program.id] = true
 		name: [192]u8
-		if code := program_shader(r, fmt.bprintf(name[:], "surface_points__%s.comp", program.name)); code != nil {
-			m.codes[program.id] = code
-			m.asked[program.id] = pipeline_make(r, &m.pipelines[program.id], compute = {shader = code, name = "surface points"})
+		if code := program_shader(r, fmt.bprintf(name[:], "%s__%s.comp", stem, program.name)); code != nil {
+			table.codes[program.id] = code
+			table.asked[program.id] = pipeline_make(r, &table.pipelines[program.id], compute = {shader = code, name = label})
 		}
 	}
-	return m.pipelines[program.id]
+	return table.pipelines[program.id]
+}
+
+// The stage of a Surface program over its points.
+@(private)
+points_pipeline :: proc(r: ^Renderer, program: Program) -> rhi.Pipeline {
+	return program_compute(r, &r.points.stages, program, "surface_points", "surface points")
 }
 
 // Whether the passes of the frame need batches: a material of the scene has a program.

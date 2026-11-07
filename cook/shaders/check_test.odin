@@ -232,6 +232,11 @@ Mirai_Surface evaluate(Mirai_Surface_Context ctx, Parameters p) {Mirai_Surface s
 
     missing:=check_text(t,&f,"rules","//! mirai surface Rules\nnamespace Rules {\nstruct Parameters {float a;};\n}\n")
     expect_rule(t,missing,"mirai.declaration",1,.Error)
+
+    // `//! vertex` asks for the function vertex.
+    unmoved:=check_text(t,&f,"rules","//! mirai surface Rules\n//! vertex\nnamespace Rules {\nstruct Parameters {float a;};\nMirai_Surface evaluate(Mirai_Surface_Context ctx, Parameters p) {return mirai_surface_default(ctx);}\n}\n")
+    declared:=expect_rule(t,unmoved,"mirai.declaration",1,.Error)
+    testing.expect(t,strings.contains(declared.message,"vertex") && strings.contains(declared.fix,"Mirai_Vertex vertex("),declared.fix)
 }
 
 @(test)

@@ -104,8 +104,14 @@ scene_instances_clear :: proc(s: ^Scene_State) {
 
 // Removes only this mesh's ranges and hides the instances that named it.
 mesh_remove :: proc(r: ^Renderer, handle: Mesh_Handle) -> bool {
+	scene_changed(&r.scene)
+	return mesh_release(r, handle)
+}
+
+// The same without changing the light of the scene: for a pose no instance shows.
+@(private)
+mesh_release :: proc(r: ^Renderer, handle: Mesh_Handle) -> bool {
 	s := &r.scene
-	scene_changed(s)
 	if int(handle) >= len(s.meshes) || s.meshes[handle].vertex_count == 0 {return false}
 	removed := s.meshes[handle]
 	freed := u64(removed.vertex_span + removed.index_span) * 4
@@ -120,6 +126,8 @@ mesh_remove :: proc(r: ^Renderer, handle: Mesh_Handle) -> bool {
 	skin_binding_release(r,removed.skin_binding)
 	if removed.stream!=nil {mesh_stream_remove(r,u32(handle),removed.stream)}
 	if removed.skin!=nil {for skin,index in s.skinned {if skin==handle {unordered_remove(&s.skinned,index);break}}}
+	// A pose of it keeps its copy, of a source no other mesh that takes the handle is.
+	for _,pose in s.displaced {if pose!=handle && mesh_displaced(s,u32(pose)) && s.meshes[pose].skin.source==handle {s.meshes[pose].skin.source=Mesh_Handle(GPU_NONE)}}
 	pool_release(&s.vertices,&s.pool_free[.Vertex],removed.vertex_word,removed.vertex_span)
 	pool_release(&s.indices,&s.pool_free[.Index],removed.index_word,removed.index_span)
 	for ray in removed.rays[:removed.ray_count] {

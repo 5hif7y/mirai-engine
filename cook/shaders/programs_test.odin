@@ -334,7 +334,9 @@ program_declaration_and_metadata_lines_are_recognized :: proc(t:^testing.T) {
     said=program_directives("//! mirai vfx Swarm\n//! parameter speed {\"default\":1}\n//! resource ground grid\n  //! resource indented surface\n//! stage settle over ground\n  //! moves\n//! births\n")
     testing.expect(t,said.name=="Swarm" && len(said.metadata)==1 && said.metadata[0][0]=="speed" && said.metadata[0][1]=="{\"default\":1}")
     testing.expect(t,len(said.resources)==1 && said.resources[0][2]=="ground" && len(said.stages)==1 && said.stages[0][2]=="settle")
-    testing.expect(t,said.moves && said.births && !said.prepare)
+    testing.expect(t,said.moves && said.births && !said.prepare && said.vertex==nil)
+    said=program_directives("//! mirai surface Sway\n//! vertex animated reach 0.5\n")
+    testing.expect(t,len(said.vertex)==5 && said.vertex[2]=="animated" && said.vertex[4]=="0.5")
     field,value,found:=parameter_metadata("//! parameter tint {\"default\":[1,1,1]}  ")
     testing.expect(t,found && field=="tint" && value=="{\"default\":[1,1,1]}")
     for line in ([]string{"//! parameter tint","//! parameter tint [1]","//!parameter tint {}","// parameter tint {}","//! parameter {}"}) {
@@ -587,4 +589,58 @@ programs_leave_out_one_that_fails_and_publish_the_others :: proc(t:^testing.T) {
     _,broken:=program_named(catalog,"Broken")
     testing.expect(t,good && !broken,"the program that compiles is published and the broken one is left out")
     testing.expect(t,len(catalog.refused)==1 && strings.contains(catalog.refused[0],"Broken"),"the refusal names the program")
+}
+
+// A Surface program that says `//! vertex` has its function vertex called in
+// its own include, says in the catalog whether it is animated and how far it
+// reaches, a number or a float parameter, and is listed for the stages
+// compiled per vertex program; a wrong line leaves it out, saying why.
+@(test)
+programs_that_move_vertices_declare_their_function_and_reach :: proc(t:^testing.T) {
+    f:Programs_Fixture
+    if !programs_fixture(t,&f) {return}
+    defer fixture_remove(f.project)
+    program :: proc(name,line,fields:string) -> string {
+        return fmt.tprintf("//! mirai surface %s\n%s\nnamespace %s {{struct Parameters {{%s}}; Mirai_Vertex vertex(Mirai_Vertex_Context ctx,Parameters p) {{Mirai_Vertex v=mirai_vertex_default(ctx);v.position.y+=sin(ctx.time);return v;}} Mirai_Surface evaluate(Mirai_Surface_Context ctx,Parameters p) {{return mirai_surface_default(ctx);}}}}\n",name,line,name,fields)
+    }
+    fixture_write(t,f.project,"shaders/sway.slang",program("Sway","//! vertex animated reach 0.25","float strength;"))
+    fixture_write(t,f.project,"shaders/spread.slang",program("Spread","//! vertex reach distance","float3 color;float distance;"))
+    catalog,problem:=programs_of(&f)
+    testing.expect_value(t,problem,"")
+    sway,has_sway:=program_named(catalog,"Sway")
+    spread,has_spread:=program_named(catalog,"Spread")
+    ocean,_:=program_named(catalog,"Ocean")
+    if !testing.expect(t,has_sway && has_spread) {return}
+    testing.expect(t,sway.vertex.declared && sway.vertex.animated && sway.vertex.reach==0.25 && sway.vertex.reach_parameter=="")
+    testing.expect(t,spread.vertex.declared && !spread.vertex.animated && spread.vertex.reach_parameter=="distance")
+    testing.expect(t,!ocean.vertex.declared,"a program without the line moves no vertices")
+    listed :: proc(names:[]string,name:string) -> bool {
+        for n in names {if n==name {return true}}
+        return false
+    }
+    testing.expect(t,listed(catalog.vertex,"Sway") && listed(catalog.vertex,"Spread") && listed(catalog.vertex,"Pieces") && !listed(catalog.vertex,"Ocean"))
+    own,_:=os.read_entire_file(path_join(f.output,"include",SURFACE_FOLDER,"Sway",SURFACE_INCLUDE,allocator=context.temp_allocator),context.temp_allocator)
+    testing.expect(t,strings.contains(string(own),"inout Mirai_Vertex value) {value=Sway::vertex(ctx,mirai_load_Sway(packed));return true;}"),string(own))
+    still,_:=os.read_entire_file(path_join(f.output,"include",SURFACE_FOLDER,"Ocean",SURFACE_INCLUDE,allocator=context.temp_allocator),context.temp_allocator)
+    testing.expect(t,strings.contains(string(still),NO_VERTEX_PROGRAM),"a program that moves no vertices has the function that moves none")
+    stored,_:=os.read_entire_file(path_join(f.output,"catalog.json",allocator=context.temp_allocator),context.temp_allocator)
+    testing.expect(t,strings.contains(string(stored),"\"reach\": \"distance\"") && strings.contains(string(stored),"\"animated\": true"),string(stored))
+
+    Refused :: struct {line,fields,says:string}
+    refused:=[]Refused{
+        {"//! vertex reach color","float3 color;","one float"},
+        {"//! vertex reach far","float amount;","neither a number nor a parameter"},
+        {"//! vertex reach -1","float amount;","reach is metres"},
+        {"//! vertex wobbly","float amount;","declare a vertex function"},
+    }
+    os.remove(path_join(f.project,"shaders/sway.slang",allocator=context.temp_allocator))
+    os.remove(path_join(f.project,"shaders/spread.slang",allocator=context.temp_allocator))
+    for c in refused {
+        fixture_write(t,f.project,"shaders/bad.slang",program("Bad",c.line,c.fields))
+        _,said:=programs_of(&f)
+        testing.expectf(t,strings.contains(said,"Bad") && strings.contains(said,c.says),"%s: %s",c.line,said)
+    }
+    fixture_write(t,f.project,"shaders/bad.slang","//! mirai postprocess Bad\n//! vertex\nnamespace Bad {struct Parameters {float amount;}; float4 evaluate(Mirai_PostProcess_Context ctx,Parameters p) {return ctx.color;}}\n")
+    _,said:=programs_of(&f)
+    testing.expect(t,strings.contains(said,"only a Surface program moves vertices"),said)
 }

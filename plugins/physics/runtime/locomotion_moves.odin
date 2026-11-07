@@ -45,7 +45,7 @@ Mantle :: struct {
 
 MANTLE_DEFAULT :: Mantle{reach=1,min_height=0.5,max_height=2.5,ground_height=1.2,facing=45*mm.RAD_PER_DEG,time=0.6,delay=0.25}
 
-@(component,replicated,description="The sprint of the character spends energy for more speed (tactical sprint): sprinting on the ground with at least min_energy, its top speed ramps from the sprint_speed of its Walk to speed_multiplier times it, by speed_step every step_time, it accelerates acceleration_multiplier times faster and its jumps go up to jump_multiplier times faster (ramped by jump_step). It spends cost_per_second while it runs (not in the air when pause_falling), cost_jump on a jump and cost_slide when it slides; it ends without energy, after fall_grace in the air, or once sprint has been let go for grace. Energy comes back at recharge per second recharge_delay after it was last spent. Without energy it sprints as its Walk says. It needs a Walk.")
+@(component,replicated,description="The sprint of the character spends energy for more speed (tactical sprint): sprinting on the ground with at least min_energy, its top speed ramps from the sprint_speed of its Walk to speed_multiplier times it, by speed_step every step_time, it accelerates acceleration_multiplier times faster and its jumps go up to jump_multiplier times faster (ramped by jump_step). It spends cost_per_second while it runs (not in the air when pause_falling), cost_jump on a jump and cost_slide when it slides; it ends without energy, after going down in the air for fall_grace, or once sprint has been let go for grace. Energy comes back at recharge per second recharge_delay after it was last spent. Without energy it sprints as its Walk says. It needs a Walk.")
 Tactical_Sprint :: struct {
     speed_multiplier:f32 `mirai:"min=1"`,        // of the sprint_speed of its Walk, at the end of the ramp
     acceleration_multiplier:f32 `mirai:"min=0"`, // of the acceleration of its Walk on the ground while it lasts
@@ -60,7 +60,7 @@ Tactical_Sprint :: struct {
     cost_slide:f32 `mirai:"min=0"`,
     recharge:f32 `mirai:"min=0,unit=1/s"`,
     recharge_delay:f32 `mirai:"min=0,unit=s"`,   // after energy was last spent
-    fall_grace:f32 `mirai:"min=0,unit=s"`,       // in the air past this it ends
+    fall_grace:f32 `mirai:"min=0,unit=s"`,       // going down in the air past this it ends
     grace:f32 `mirai:"min=0,unit=s"`,            // sprint let go (or the move off forward) this long ends it; back within it, it goes on
     pause_falling:bool,                          // it spends nothing in the air
 }
@@ -115,7 +115,7 @@ tactical_update :: proc "contextless" (loco:^Character,tactical:Tactical_Sprint,
     loco.sprint_rest+=dt
     if loco.sprint_active {
         loco.sprint_off=0 if sprinting else loco.sprint_off+dt
-        if !walking || !standing && loco.air_time>tactical.fall_grace || loco.sprint_off>=tactical.grace {loco.sprint_active=false}
+        if !walking || !standing && loco.fall_time>tactical.fall_grace || loco.sprint_off>=tactical.grace {loco.sprint_active=false}
     } else if sprinting && walking && standing && tactical_energy(loco^,tactical)>=tactical.min_energy && tactical.energy>0 {
         loco.sprint_active,loco.sprint_time,loco.sprint_off=true,0,0
     }

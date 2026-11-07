@@ -368,6 +368,7 @@ api_methods_register :: proc(s:^Session,st:^Api_State) {
     api_simulation_register(s,st)
     api_assets_register(s,st)
     unsaved_api_register(s,st)
+    asset_reload_api_register(s,st)
     prefab_api_register(s,st)
     documents_api_register(s,st)
     collab_api_register(s,st)

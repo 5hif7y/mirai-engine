@@ -160,6 +160,9 @@ Character :: struct {
     crouch_on:bool `mirai:"transient,readonly,hidden"`,   // it asks to crouch: crouch held, or toggled on with crouch_toggle
     crouch_buffer:f32 `mirai:"transient,readonly,hidden,unit=s"`, // left of a crouch pressed in the air, which slides on landing
     air_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,       // since it last stood
+    fall_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,      // going down in the air without a stop: what a long fall is
+    jump_speed:f32 `mirai:"transient,readonly,hidden,unit=m/s"`,   // up, of its last jump: a jump held keeps it (Walk.jump_rise)
+    jump_rise:f32 `mirai:"transient,readonly,hidden,unit=s"`,      // left in which its jump held keeps jump_speed
     slide_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,     // it has slid
     slide_cooldown:f32 `mirai:"transient,readonly,hidden,unit=s"`, // left before crouch starts another slide
     slide_course:[3]f32 `mirai:"transient,readonly,hidden"`,       // where it started sliding, across its up

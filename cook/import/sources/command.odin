@@ -26,7 +26,11 @@ import "mirai:std/jobs"
 // --rebuild. Importing a source again keeps the ids and files of what an
 // earlier import of it wrote under --root (or --out); --into <id> names that
 // import by its prefab, texture or sound when the source was moved or
-// renamed. Only models and images have settings.
+// renamed. An image imported for the first time without --srgb, --data or
+// --normal holds what its name says (image_use). An earlier output outside --out is not written unless asked:
+// the import fails naming it, --in-place writes it again where it is and
+// --copy makes a separate import in --out with new ids, leaving the earlier
+// one alone. Only models and images have settings.
 // The report goes to output, one asset per line: id, kind, bytes and path, and
 // under it, indented, what the asset holds; then the settings file and the
 // warnings. A failure goes to errors as "mirai import: <file>: <reason>".
@@ -37,11 +41,13 @@ import "mirai:std/jobs"
 // Exit codes: 0 done, 1 failed, 2 misuse.
 
 @(private="file")
-IMPORT_USAGE :: "Usage: mirai import <file> --out <folder> [--max-texture N] [--uncompressed|--blocks] [--rdo-lambda L] [--root <folder>] [--into <id>] [--srgb|--normal|--normal-green-down|--data] [--alpha-coverage C] [--lods auto|none] [--max-triangles N] [--collision none|hull|pieces|mesh] [--force-collision] [--hulls N] [--parts auto|all|none] [--rig source|humanoid|fox|horse|bird|dragon|kaiju|shark|snake|spider] [--rig-crotch M] [--rig-neck M] [--rebuild] [--no-save] [--texture-cache <folder>] [--mesh-cache <folder>] [--profile] [--dev|--release]"
+IMPORT_USAGE :: "Usage: mirai import <file> --out <folder> [--max-texture N] [--uncompressed|--blocks] [--rdo-lambda L] [--root <folder>] [--into <id>] [--in-place|--copy] [--srgb|--normal|--normal-green-down|--data] [--alpha-coverage C] [--lods auto|none] [--max-triangles N] [--collision none|hull|pieces|mesh] [--force-collision] [--hulls N] [--parts auto|all|none] [--rig source|humanoid|fox|horse|bird|dragon|kaiju|shark|snake|spider] [--rig-crotch M] [--rig-neck M] [--rebuild] [--no-save] [--texture-cache <folder>] [--mesh-cache <folder>] [--profile] [--dev|--release]"
 
 command :: proc(args:[]string,output,errors:io.Writer) -> int {
     file,out:string
     options:importer.Import_Options
+    options.outside=.Refuse
+    placed:bool // --in-place or --copy was given
     profiled:bool
     // What the options change of the settings the source has.
     Change :: enum {Max_Texture,Textures,Rdo_Lambda,Image,Alpha_Coverage,Lods,Max_Triangles,Collision,Force_Collision,Hulls,Parts,Rig,Rig_Crotch,Rig_Neck}
@@ -110,6 +116,9 @@ command :: proc(args:[]string,output,errors:io.Writer) -> int {
                 changed+={.Alpha_Coverage}
             }
         case "--force-collision": given.force_collision=true;changed+={.Force_Collision}
+        case "--in-place","--copy":
+            if placed {fmt.wprintln(errors,"mirai import: --in-place and --copy do not go together; pass one of them");return 2}
+            options.outside,placed=importer.Earlier_Outside.Copy if args[at]=="--copy" else .In_Place,true
         case "--no-save": options.no_save=true
         case "--texture-cache": options.texture_cache,ok=value(args,&at)
         case "--mesh-cache": options.mesh_cache,ok=value(args,&at)
@@ -189,12 +198,14 @@ command :: proc(args:[]string,output,errors:io.Writer) -> int {
     if changed&{.Lods,.Max_Triangles,.Collision,.Force_Collision,.Hulls,.Parts,.Rig,.Rig_Crotch,.Rig_Neck}!={} && kind!=.Model {fmt.wprintln(errors,"mirai import: --lods, --max-triangles, --collision, --force-collision, --hulls, --parts and the --rig options apply only to models");return 2}
 
     if kind==.Model || kind==.Image {
-        stored,_,settings_error:=importer.settings_load(file)
+        stored,found,settings_error:=importer.settings_load(file)
         if settings_error.code!=.None {
             fmt.wprintfln(errors,"mirai import: %s: %s",file,settings_error.message)
             return 1
         }
         options.settings,options.ignore_stored=stored,true
+        // An image with no settings yet holds what its name says, as in the editor.
+        if kind==.Image && !found {options.image=image_use(file)}
         if .Max_Texture in changed {options.max_texture_size=given.max_texture_size}
         if .Textures in changed {options.textures=given.textures}
         if .Rdo_Lambda in changed {options.rdo_lambda=given.rdo_lambda}

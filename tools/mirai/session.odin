@@ -14,7 +14,7 @@ import "mirai:cook/workspace"
 import "mirai:project"
 import "mirai:std/subprocess"
 
-SESSION_USAGE :: "session start|restart|stop|status [project] [--dev|--release] [--no-build] [--copy] [--discard] [--orphans] [--timeout S] [editor arguments]"
+SESSION_USAGE :: "session start|restart|stop|status|sync [project] [paths of sync] [--dev|--release] [--no-build] [--copy] [--discard] [--orphans] [--timeout S] [editor arguments]"
 
 // <proyecto>/.mirai/session.json: the editor mirai session opened last in the
 // project, with the mode of its binaries and its arguments, which restart
@@ -42,6 +42,9 @@ Session_Record :: struct {
 //            what is unsaved and deletes the copy
 //   status   says whether one answers, and which editors of this checkout no
 //            port file names
+//   sync     brings only the files named from the project into a copy and
+//            restarts its session, or has it read the assets again
+//            (session_sync.odin)
 // The editor names its port in <proyecto>/.mirai/api.json (api.PORT_FILE). An
 // editor with a window is never reused, replaced nor closed.
 cmd_session :: proc(root:string,args:[]string) -> int {
@@ -66,6 +69,7 @@ cmd_session :: proc(root:string,args:[]string) -> int {
     case "restart": return session_restart(root,folder,rest)
     case "stop":    return session_stop(root,folder,rest)
     case "status":  return session_status(root,folder)
+    case "sync":    return session_sync(root,folder,rest)
     }
     fmt.eprintfln("Usage: mirai %s",SESSION_USAGE)
     return 2
@@ -179,7 +183,8 @@ session_start :: proc(root,folder:string,args:[]string) -> int {
         if copy_problem!="" {fmt.eprintfln("mirai session: %s",copy_problem);return 1}
         opened=copy
     }
-    file,code:=session_open(root,opened,options.mode,options.no_build,options.timeout,options.editor_args)
+    editor_args:=session_copy_args(options.editor_args) if options.copy else options.editor_args
+    file,code:=session_open(root,opened,options.mode,options.no_build,options.timeout,editor_args)
     if code!=0 {
         if options.copy {session_copy_remove(opened,"session start")}
         return code
@@ -431,6 +436,16 @@ session_copy :: proc(folder:string) -> (copy,problem:string) {
     return copy,""
 }
 
+// The editor arguments of a copy: a free API port, never api.DEFAULT_PORT, which stays the one
+// of the user's editor (and of the tools that call it without a project), unless they name one.
+session_copy_args :: proc(editor_args:[]string) -> []string {
+    for arg in editor_args {if arg=="--api-port" || arg=="--no-api" {return editor_args}}
+    args:=make([dynamic]string,0,len(editor_args)+2,context.temp_allocator)
+    append(&args,..editor_args)
+    append(&args,"--api-port","0")
+    return args[:]
+}
+
 // Whether folder is a copy session_copy made.
 session_copied :: proc(folder:string) -> bool {
     if !strings.has_prefix(os.base(folder),SESSION_COPY_PREFIX) {return false}
@@ -659,11 +674,12 @@ engine_process_text :: proc(p:Engine_Process,role:Engine_Role) -> string {
     return ""
 }
 
-// Frees the binaries of the engine of a mode before a build replaces them:
-// Windows does not replace what a program loaded. The session mirai session
-// opened for the project at folder closes, and session_reopen opens it again
-// after the build; anything else that runs them stops the build, each one
-// said with what to do, and ok is false. folder "" closes no session.
+// Before a build replaces the binaries of the engine of a mode. The build
+// moves aside the ones a program runs (build.engine_unlock), so nothing stops
+// it: the other programs that run them go on with the binaries they started
+// with, each one said in a line, until they start again. The session mirai
+// session opened for the project at folder closes, and session_reopen opens it
+// again after the build on the new ones. folder "" closes no session.
 engine_release :: proc(root,folder:string,mode:Build_Mode,command:string) -> (closed:Session_Record,discarded:int,ok:bool) {
     binaries:=build.engine_paths(root,mode,context.temp_allocator).folder
     running:=engine_processes(binaries)
@@ -673,17 +689,13 @@ engine_release :: proc(root,folder:string,mode:Build_Mode,command:string) -> (cl
         roles[i]=engine_process_role(p)
         if roles[i]==.Session && folder!="" && path_same(p.project,folder) {session=p.pid}
     }
-    blocking:=0
+    others:=0
     for p,i in running {
         // What the session started, as its players, ends with it.
         if session!=0 && (p.pid==session || p.parent==session) {continue}
-        if blocking==0 {fmt.eprintfln("mirai %s: the engine binaries of %s cannot be replaced while they run:",command,binaries)}
-        blocking+=1
-        fmt.eprintfln("  %s",engine_process_text(p,roles[i]))
-    }
-    if blocking>0 {
-        fmt.eprintfln("mirai %s: close them, or build in a worktree (mirai worktree new <name>), which has binaries of its own",command)
-        return {},0,false
+        if others==0 {fmt.eprintfln("mirai %s: these go on with the engine binaries of %s they started with; they take the new ones when they start again:",command,binaries)}
+        others+=1
+        fmt.eprintfln("  pid %d, %s %s of %s",p.pid,filepath.base(p.program),p.headless?"headless":"windowed",p.project!=""?p.project:"no project")
     }
     if session==0 {return {},0,true}
     file,_:=session_find(folder)

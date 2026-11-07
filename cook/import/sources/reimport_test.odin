@@ -332,3 +332,112 @@ an_image_imported_on_its_own_takes_no_texture_of_a_model_whose_source_moved :: p
     testing.expect(t,image.assets[0].id!=texture.id && image.assets[0].path!=texture.path,"the texture of the model stays its own")
     testing.expect_value(t,header_of(texture.path).id,texture.id)
 }
+
+// mirai import does not write an earlier output outside --out unless asked:
+// with --root reaching the live import, a scratch --out fails and leaves it
+// alone; --copy makes a separate import there, --in-place updates the live one.
+@(test)
+mirai_import_writes_nothing_outside_out_unless_asked :: proc(t:^testing.T) {
+    root:=temp_folder("reimport-outside");defer os.remove_all(root)
+    os.make_directory_all(fmt.tprintf("%s/source",root))
+    source:=box_source(fmt.tprintf("%s/source",root),"box.gltf","Wood","Paint")
+    first,ok:=box_import(t,source,root);if !ok {return};defer importer.report_destroy(&first)
+    prefab,_:=written_of(&first,asset.KIND_PREFAB,"box")
+    live,_:=os.read_entire_file(prefab.path,context.temp_allocator)
+    live_mesh,_:=written_of(&first,asset.KIND_MESH,"Box")
+    mesh_bytes,_:=os.read_entire_file(live_mesh.path,context.temp_allocator)
+    run :: proc(args:..string) -> (code:int,out,err:string) {
+        output,errors:=strings.builder_make(context.temp_allocator),strings.builder_make(context.temp_allocator)
+        code=command(args,strings.to_writer(&output),strings.to_writer(&errors))
+        return code,strings.to_string(output),strings.to_string(errors)
+    }
+    scratch:=fmt.tprintf("%s/assets/scratch",root)
+    unchanged :: proc(path:string,bytes:[]u8) -> bool {
+        now,_:=os.read_entire_file(path,context.temp_allocator)
+        return slice.equal(now,bytes)
+    }
+
+    code,_,err:=run(source,"--out",scratch,"--root",root,"--uncompressed","--no-save","--rebuild")
+    testing.expect_value(t,code,1)
+    testing.expect(t,strings.contains(err,"box.prefab") && strings.contains(err,"--in-place") && strings.contains(err,"--copy"),err)
+    testing.expect(t,unchanged(prefab.path,live) && unchanged(live_mesh.path,mesh_bytes),"the live import is left as it was")
+    entries,_:=os.read_all_directory_by_path(scratch,context.temp_allocator)
+    testing.expect_value(t,len(entries),0)
+
+    code,_,err=run(source,"--out",scratch,"--root",root,"--uncompressed","--no-save","--copy")
+    testing.expect_value(t,code,0)
+    testing.expect(t,unchanged(prefab.path,live) && unchanged(live_mesh.path,mesh_bytes),"a copy leaves the live import alone")
+    copied:=header_of(fmt.tprintf("%s/box.prefab",scratch))
+    testing.expect(t,copied.id!={} && copied.id!=prefab.id,"the copy has an id of its own")
+
+    code,_,err=run(source,"--in-place","--copy","--out",scratch)
+    testing.expect_value(t,code,2)
+
+    // With the copy there, each import of the source updates the one in its folder.
+    box:=fmt.tprintf("%s/assets/models/box",root)
+    copy_bytes,_:=os.read_entire_file(fmt.tprintf("%s/box.prefab",scratch),context.temp_allocator)
+    out:string
+    code,out,err=run(source,"--out",box,"--root",root,"--uncompressed","--no-save","--rebuild")
+    testing.expectf(t,code==0,"%s",err)
+    testing.expect(t,!strings.contains(out,"warning:"),out)
+    testing.expect(t,unchanged(fmt.tprintf("%s/box.prefab",scratch),copy_bytes),"the copy is left alone")
+    for written in first.assets {
+        testing.expectf(t,strings.contains(out,written.path),"%s is written again where it is: %s",written.path,out)
+    }
+
+    // A part moved outside --out is refused too, and --in-place writes it where it is.
+    wood,_:=written_of(&first,asset.KIND_MATERIAL,"Wood")
+    os.make_directory_all(fmt.tprintf("%s/assets/materials",root))
+    moved:=fmt.tprintf("%s/assets/materials/Wood.mat",root)
+    testing.expect(t,os.rename(wood.path,moved)==nil)
+    code,_,err=run(source,"--out",box,"--root",root,"--uncompressed","--no-save")
+    testing.expect_value(t,code,1)
+    testing.expect(t,strings.contains(err,"Wood.mat"),err)
+    code,_,err=run(source,"--out",box,"--root",root,"--uncompressed","--no-save","--in-place")
+    testing.expect_value(t,code,0)
+    testing.expect_value(t,header_of(moved).id,wood.id)
+    testing.expect(t,!os.exists(wood.path),"the material stays where it was moved")
+}
+
+// An image with no settings holds what its name says, from mirai import as
+// from the editor: a packed mask is linear data, a photo a color. A use
+// given once stays in its settings.
+@(test)
+an_image_on_its_own_holds_what_its_name_says_until_its_settings_say_otherwise :: proc(t:^testing.T) {
+    root:=temp_folder("image-use");defer os.remove_all(root)
+    out:=fmt.tprintf("%s/textures",root)
+    run :: proc(args:..string) -> (code:int,err:string) {
+        output,errors:=strings.builder_make(context.temp_allocator),strings.builder_make(context.temp_allocator)
+        code=command(args,strings.to_writer(&output),strings.to_writer(&errors))
+        return code,strings.to_string(errors)
+    }
+    stored :: proc(source:string) -> importer.Image_Use {
+        settings,_,_:=importer.settings_load(source)
+        return settings.image
+    }
+    masks:=fmt.tprintf("%s/T_Katana_SpecularMasks.png",root)
+    diffuse:=fmt.tprintf("%s/T_Katana_Diffuse.png",root)
+    for path in ([?]string{masks,diffuse}) {_=os.write_entire_file(path,png_bytes(4,4,{10,200,30}))}
+
+    code,err:=run(masks,"--out",out,"--uncompressed")
+    testing.expectf(t,code==0,"%s",err)
+    testing.expect_value(t,stored(masks),importer.Image_Use.Data)
+    code,err=run(diffuse,"--out",out,"--uncompressed")
+    testing.expectf(t,code==0,"%s",err)
+    testing.expect_value(t,stored(diffuse),importer.Image_Use.Color)
+
+    // Given once, the use stays: the name no longer decides.
+    code,err=run(masks,"--out",out,"--uncompressed","--srgb")
+    testing.expectf(t,code==0,"%s",err)
+    code,err=run(masks,"--out",out,"--uncompressed")
+    testing.expectf(t,code==0,"%s",err)
+    testing.expect_value(t,stored(masks),importer.Image_Use.Color)
+
+    Named :: struct {name:string,use:importer.Image_Use}
+    for named in ([?]Named{{"data",.Data},{"Color",.Color},{"normal",.Normal},{"NORMAL_GREEN_DOWN",.Normal_Green_Down}}) {
+        got,known:=image_use_from_name(named.name)
+        testing.expectf(t,known && got==named.use,"%s: %v",named.name,got)
+    }
+    _,known:=image_use_from_name("metallic")
+    testing.expect(t,!known)
+}

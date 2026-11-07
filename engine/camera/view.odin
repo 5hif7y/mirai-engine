@@ -16,7 +16,10 @@ import mm "mirai:std/math"
 // camera over the blend. Around the pivot of an Orbit it turns at a distance
 // between both, so that it does not cross the target; between a perspective
 // and an orthographic lens it is a dolly zoom. A blend asked in the middle of
-// another starts from what is drawn.
+// another starts from what is drawn. When a camera changes mode, what it left
+// sheds the lag of its pivot as fast as that mode would have closed it: the old
+// mode would have gone on following its target, so after a fast move (a dash)
+// the view does not stay behind for the whole blend.
 
 // The narrowest field a dolly zoom reaches before the view turns orthographic.
 DOLLY_FOV :: 2.5*mm.RAD_PER_DEG
@@ -33,6 +36,10 @@ Camera_View :: struct {
     blending:bool,
     cut:bool,              // it jumped this frame
     fade:f32,              // how much of the body its camera follows it leaves out, the camera being near it: 1 all of it
+    lag:[3]f32,            // how far the pivot of its Camera_Follow trailed its goal in the last frame
+    lag_half_life:f32,     // of that pivot in the last frame
+    from_lag:[3]f32,       // the lag what it left had, which it sheds over from_half_life
+    from_half_life:f32,
 }
 
 // What each local slot is drawn from.
@@ -117,6 +124,8 @@ view_update :: proc(
         v.cut=!v.blending
         if v.blending {
             v.from=v.pose
+            v.from_lag,v.from_half_life={},0
+            if camera==v.camera {v.from_lag,v.from_half_life=v.lag,v.lag_half_life}
             v.anchor=core.NONE
             if at,ok:=anchor_at(worlds,body,frame);ok {
                 v.from.position-=at
@@ -134,6 +143,7 @@ view_update :: proc(
             if v.anchor!=core.NONE {
                 if at,ok:=anchor_at(worlds,v.anchor,frame);ok {from.position+=at}
             }
+            if v.from_half_life>0 {from.position-=v.from_lag*(1-math.exp(-math.LN2*v.elapsed/v.from_half_life))}
             pivot:=live.position+mm.quat_rotate(live.rotation,{0,0,-1})*10
             if at,ok:=anchor_at(worlds,body,frame);ok {pivot=at}
             around:=follows_it && follow.mode==.Orbit && follow.state.ready
@@ -142,6 +152,8 @@ view_update :: proc(
         } else {v.blending=false}
     }
     v.pose=live
+    v.lag,v.lag_half_life={},0
+    if follows_it && follow.state.ready {v.lag,v.lag_half_life=follow.state.pivot.position-follow.state.zone,follow.half_life}
 }
 
 // Where a body is in this frame, between its last two ticks.

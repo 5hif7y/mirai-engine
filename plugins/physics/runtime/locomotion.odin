@@ -73,7 +73,8 @@ Walk :: struct {
     acceleration:f32 `mirai:"min=0,unit=m/s2"`,
     braking:f32 `mirai:"min=0,unit=m/s2"`,
     air_control:f32 `mirai:"min=0,max=1"`,  // share of the acceleration and of the traction left in the air
-    jump_height:f32 `mirai:"min=0,unit=m"`,
+    jump_height:f32 `mirai:"min=0,unit=m"`,     // of a jump let go at once
+    jump_rise:f32 `mirai:"min=0,unit=s"`,       // a jump held keeps rising at the speed it started with for up to this long, then falls as it would
     coyote_time:f32 `mirai:"min=0,unit=s"`, // after walking off a ledge, in which a jump still starts
     crouch_speed:f32 `mirai:"min=0,unit=m/s"`,  // top speed while crouched
     crouch_height:f32 `mirai:"min=0,unit=m"`,   // of its capsule crouched or sliding, from the feet to the top of the head; 0: it does not crouch
@@ -386,8 +387,18 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
         was:=loco.mode
         if ground.standing {
             loco.jumped,loco.coyote,loco.air_time,loco.ledge_jumping=false,0,0,false
+            loco.fall_time,loco.jump_rise=0,0
         } else {
             loco.air_time+=dt
+            loco.fall_time=loco.fall_time+dt if linalg.dot(v,up)<0 else 0
+            // A jump held keeps its speed up for up to jump_rise, until it is let go or something stops the rise.
+            if loco.jump_rise>0 {
+                rising:=linalg.dot(v,up)
+                if held && rising>=loco.jump_speed-2*linalg.length(gravity)*dt {
+                    move.launch+=up*(loco.jump_speed-rising)
+                    loco.jump_rise=max(loco.jump_rise-dt,0)
+                } else {loco.jump_rise=0}
+            }
             if (was==MODE_WALKING || was==MODE_CROUCHING || was==MODE_SLIDING) && !loco.jumped {
                 loco.coyote=walk.coyote_time
             } else {loco.coyote=max(loco.coyote-dt,0)}
@@ -486,6 +497,8 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
             if tacticals && loco.sprint_active && !loco.ledge_jumping {tactical_spend(loco,tactical,tactical.cost_jump)}
             loco.mode,loco.jumped,loco.coyote,loco.crouched,loco.crouch_on=MODE_FALLING,true,0,false,false
             loco.ledge_ready,loco.ledge_time=false,0
+            // A ledge jump is a launch of its own, which holding the jump does not lengthen.
+            loco.jump_speed,loco.jump_rise=rise,0 if loco.ledge_jumping else walk.jump_rise
         }
     }
     layers_apply(loco,&move,traction,pace)

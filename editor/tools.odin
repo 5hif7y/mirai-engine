@@ -4,6 +4,7 @@ import "core:math"
 import "core:strings"
 import "mirai:asset"
 import importer "mirai:cook/import"
+import "mirai:cook/import/sources"
 import "mirai:core"
 import "mirai:editor/api"
 import erender "mirai:engine/render"
@@ -42,6 +43,7 @@ Import_Params :: struct {
     rig:[16]u8 `mirai:"text,optional,label=Of a model: a template of Mesh2Motion fitted to its meshes and weighted to them, in place of what the source has: humanoid, fox, horse, bird, dragon, kaiju, shark, snake or spider, standing on +Y and facing +Z; source keeps the source's. Of a source in the project, the choice stays in its settings. Empty: what they say"`,
     rig_crotch:f32 `mirai:"optional,min=0,unit=m,label=With rig humanoid: the height of the crotch in the model, where a skirt or a coat hides it; 0 is where the fit finds it"`,
     rig_neck:f32 `mirai:"optional,min=0,unit=m,label=With rig humanoid: the height of the neck in the model; 0 is where the fit finds it"`,
+    image:[24]u8 `mirai:"text,optional,label=Of an image: what it holds; color (sRGB) or data (linear: a packed metallic-roughness or occlusion or a mask) or normal or normal_green_down (DirectX). Of a source in the project the choice stays in its settings. Empty: what they say or else what its name says"`,
 }
 
 Import_Result :: struct {
@@ -151,7 +153,16 @@ api_asset_import :: proc(s:^Session,call:^api.Call) {
         api.call_fail(call,api.INVALID_PARAMS,"rig_crotch and rig_neck go with rig humanoid")
         return
     }
-    if !import_file(s,path,into,folder,params.profile,rig) {
+    image:Maybe(importer.Image_Use)
+    if text:=base.text_get(params.image[:]);text!="" {
+        use,known:=sources.image_use_from_name(text)
+        if !known {
+            api.call_failf(call,api.INVALID_PARAMS,"image %q: give color for sRGB colors, data for linear values (packed metallic-roughness, occlusion, masks), normal or normal_green_down",text)
+            return
+        }
+        image=use
+    }
+    if !import_file(s,path,into,folder,params.profile,rig,image) {
         api.call_fail(call,api.SERVER_ERROR,string(s.importer.message[:s.importer.message_length]))
         return
     }

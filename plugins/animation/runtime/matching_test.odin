@@ -777,3 +777,66 @@ a_jump_past_its_landing_marker_in_the_air_plays_on_unless_a_row_fits_better :: p
         left-=dt
     }
 }
+
+@(private="file") MATCH_TEST_LIBRARY :: base.Asset_Id{0x3a7c,4}
+
+// A tick of the rig walking at velocity with the clips of content (the library it plays).
+@(private="file")
+match_step_with :: proc(f:^Match_Fixture,content:^host.Content_Animation,dt:f32,mode:u16,velocity:mm.Vec3) -> bool {
+    clear(&f.events.items);clear(&f.events.plays.items)
+    goals:=[1]Match_Goal{{rig=f.rig,mode=mode,velocity=velocity,desired=velocity,facing={0,0,1},acceleration=20,braking=20}}
+    copy(f.state.local[:],f.state.rest[:])
+    output,programmed,ok:=program_resolve(f.state,f.animation,&f.app,nil,&f.graphs,dt,&f.events,&f.playback,content,&f.problems,goals[:],{})
+    return ok && programmed && program_players(f.state,output,content,f.animation,&f.events,&f.playback,dt,-1,nil) && program_pose(&f.playback,f.state,content,f.animation,output,{})
+}
+
+// A weapon's set: Animation.library swaps the clips of the .match for those of the same names in
+// another .anim, here a walk with the feet in the other phase. The rig goes on with the clip of
+// the new library that the search picks, entered through an inertial transition from the pose it
+// had, as a jump of matching does: the feet do not jump to the rest pose or the new walk at once.
+@(test)
+match_library_swap_enters_the_new_clips_through_an_inertial_transition :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    left,right:=f.bones[1].target,f.bones[2].target
+    still:=[2]lib.Keyframe{{time=0,value={.1,-.95,0,0}},{time=1,value={.1,-.95,0,0}}}
+    other:=[2]lib.Keyframe{{time=0,value={-.1,-.95,0,0}},{time=1,value={-.1,-.95,0,0}}}
+    stride_l:=[4]lib.Keyframe{{time=0,value={.1,-.95,-.375,0}},{time=.25,value={.1,-.8,0,0}},{time=.5,value={.1,-.95,.375,0}},{time=1,value={.1,-.95,-.375,0}}}
+    stride_r:=[4]lib.Keyframe{{time=0,value={-.1,-.95,.375,0}},{time=.5,value={-.1,-.95,-.375,0}},{time=.75,value={-.1,-.8,0,0}},{time=1,value={-.1,-.95,.375,0}}}
+    tucked:=[2]lib.Keyframe{{time=0,value={.1,-.6,.1,0}},{time=1,value={.1,-.6,.1,0}}}
+    land:=[1]lib.Marker{{time=.8,id=0}}
+    descs:=[4]lib.Clip_Desc{
+        {name=base.name_hash("idle"),tracks={{target=left,property=.Position,keys=still[:]},{target=right,property=.Position,keys=other[:]}}},
+        {name=base.name_hash("walk"),tracks={{target=left,property=.Position,keys=stride_l[:]},{target=right,property=.Position,keys=stride_r[:]}}},
+        {name=base.name_hash("fall"),tracks={{target=left,property=.Position,keys=tucked[:]},{target=right,property=.Position,keys=other[:]}}},
+        {name=base.name_hash("jump"),tracks={{target=left,property=.Position,keys=tucked[:]},{target=right,property=.Position,keys=other[:]}},markers=land[:]},
+    }
+    weapon:host.Content_Animation
+    weapon.id,weapon.generation=MATCH_TEST_LIBRARY,1
+    if !testing.expect(t,lib.library_init(&weapon.lib,{max_keys=64,max_tracks=16,max_clips=2*len(descs),max_markers=2})) {return}
+    defer {lib.library_destroy(&weapon.lib);delete(weapon.markers)}
+    for desc in descs {_,error:=lib.clip_add(&weapon.lib,desc);testing.expect(t,error==.None)}
+    _,compressed:=lib.library_compress(&weapon.lib);testing.expect(t,compressed==.None)
+    host.content_animation_loops(&weapon.lib,len(descs));weapon.clip_count=len(descs)
+    weapon.markers=make([]u64,1);weapon.markers[0]=base.name_hash("land")
+    append(&f.assets.registry.files,asset.Registry_File{id=MATCH_TEST_LIBRARY,kind=asset.KIND_ANIMATION,state=.Asset})
+    f.assets.registry.by_id[MATCH_TEST_LIBRARY]=u32(len(f.assets.registry.files)-1)
+
+    dt:=f32(1)/30;walking:=mm.Vec3{0,0,1.5}
+    for _ in 0..<20 {testing.expect(t,match_step_with(&f,&f.content,dt,GROUND,walking))}
+    before:=[2]mm.Vec3{f.state.local[1].position,f.state.local[2].position}
+    walked,_:=animation_match(&f.playback,f.rig)
+    testing.expect(t,walked.clip==base.name_hash("walk"),"it walks before the swap")
+
+    f.animation.library=MATCH_TEST_LIBRARY
+    if !testing.expect(t,match_step_with(&f,&weapon,dt,GROUND,walking)) {return}
+    after:=[2]mm.Vec3{f.state.local[1].position,f.state.local[2].position}
+    swapped,_:=animation_match(&f.playback,f.rig)
+    jump:=max(linalg.length(after[0]-before[0]),linalg.length(after[1]-before[1]))
+    testing.expect(t,f.state.program.library==MATCH_TEST_LIBRARY && swapped.clip==base.name_hash("walk"),"the rig plays the walk of the new library")
+    testing.expect(t,f.state.program.inertia.active,"the swap enters the new clip through an inertial transition")
+    testing.expectf(t,jump<.1,"a foot jumps %.3f m in the tick of the swap",jump)
+    // Past the blend, the feet are those of the new walk.
+    for _ in 0..<15 {testing.expect(t,match_step_with(&f,&weapon,dt,GROUND,walking))}
+    testing.expect(t,!f.state.program.inertia.active,"the transition ends within its blend")
+}

@@ -17,6 +17,8 @@ Ability_World :: struct {
     characters:core.Read(phys.Character),
     worlds:core.Read(core.World_Transform),
     remotes:core.Read(core.Remote),
+    paces:core.Read(core.Own_Pace), // the windows on the Own clock count the user's own time
+    clock:core.Clock,
     physics:core.Ref(phys.Physics_State),
     moves:^phys.Locomotion_Requests,
     actions:^anim.Action_Requests,
@@ -85,12 +87,15 @@ request_apply :: proc(t:^Tick,r:Ability_Request) {
     if r.entity==core.NONE || !core.owned(t.w.remotes,r.entity) {return}
     switch r.kind {
     case .Use:
-        if u:=core.get(t.users,r.entity);u!=nil {buffer_add(u,r.ability,t.tick)}
+        // As if its input fired: it waits as its sheet says.
+        if u:=core.get(t.users,r.entity);u!=nil {
+            a:=ability_sheet(t.abilities,r.ability)
+            buffer_add(u,r.ability,t.tick,a!=nil && a.input.wait==.Running)
+        }
     case .Cancel:
         u:=core.get(t.users,r.entity)
         if u==nil || u.ability=={} {return}
-        local:=i64(t.tick-u.start) if t.tick>=u.start else 0
-        ability_end(t,r.entity,u,ability_sheet(t.abilities,u.ability),local,.Canceled,nil)
+        ability_end(t,r.entity,u,ability_sheet(t.abilities,u.ability),time_of(t,u),.Canceled,nil)
     case .Effect:
         effect_apply(t,r.entity,r.source,r.effect)
     case .Kit:
@@ -150,7 +155,7 @@ effect_apply :: proc(t:^Tick,target,source:core.Entity,effect:Ability_Effect) {
                 event_push(t,{kind=.Effect_Begin,entity=target,window=-1,cue=timer.cue,attribute=timer.attribute})
             }
         }
-        if effect.use!={} {buffer_add(u,effect.use,t.tick)}
+        if effect.use!={} {buffer_add(u,effect.use,t.tick,false)}
     }
     if effect.knockback!={} && core.has(t.w.characters,target) {
         velocity:=effect.knockback
@@ -179,7 +184,7 @@ clamp_base :: #force_inline proc "contextless" (entry:Ability_Attribute_Entry,va
 }
 
 @(private)
-buffer_add :: proc "contextless" (u:^Ability_User,ability:core.Record(Ability),tick:u64) {
+buffer_add :: proc "contextless" (u:^Ability_User,ability:core.Record(Ability),tick:u64,running:bool) {
     if ability=={} {return}
     slot:=-1
     for b,i in u.buffer {
@@ -192,7 +197,7 @@ buffer_add :: proc "contextless" (u:^Ability_User,ability:core.Record(Ability),t
             if b.tick<u.buffer[slot].tick {slot=i}
         }
     }
-    u.buffer[slot]={ability,tick}
+    u.buffer[slot]={ability=ability,tick=tick,run=u.start,running=running && u.ability!={}}
 }
 
 @(private)
@@ -201,7 +206,7 @@ ticks_of :: #force_inline proc "contextless" (seconds,dt:f32) -> u64 {
     return u64(math.round(f64(seconds)/f64(dt)))
 }
 
-// The ticks of a window from the start of its ability: open while from<=local<to.
+// The ticks of a window from the start of its ability, on its clock: open while from<=time<to.
 @(private)
 window_ticks :: #force_inline proc "contextless" (w:Ability_Window,dt:f32) -> (from,to:i64) {
     from=i64(ticks_of(w.from,dt))
@@ -209,10 +214,24 @@ window_ticks :: #force_inline proc "contextless" (w:Ability_Window,dt:f32) -> (f
     return
 }
 
-ability_window_open :: #force_inline proc "contextless" (w:Ability_Window,dt:f32,local:i64) -> bool {
+// Whether a window is open at a place of its ability's timeline, on the clock it counts.
+ability_window_open :: #force_inline proc "contextless" (w:Ability_Window,dt:f32,at:Ability_Time) -> bool {
     if w.to==0 {return false}
     from,to:=window_ticks(w,dt)
-    return local>=from && local<to
+    if w.clock==.Own {return at.own>=f32(from) && at.own<f32(to)}
+    return at.local>=from && at.local<to
+}
+
+// Where the running ability of u is at this tick.
+@(private)
+time_of :: #force_inline proc "contextless" (t:^Tick,u:^Ability_User) -> Ability_Time {
+    return {local=i64(t.tick-u.start) if t.tick>=u.start else 0,own=u.own}
+}
+
+// The ticks of its own time e lives in one tick of the world.
+@(private)
+pace_tick :: #force_inline proc "contextless" (t:^Tick,e:core.Entity) -> f32 {
+    return core.pace_of(t.w.clock,t.w.paces,e)
 }
 
 ability_ticks :: #force_inline proc "contextless" (a:^Ability,dt:f32) -> i64 {return max(i64(ticks_of(a.duration,dt)),1)}
@@ -241,25 +260,36 @@ user_tick :: proc(t:^Tick,e:core.Entity,u:^Ability_User) {
         if timer.until<=t.tick {timer_end(t,e,&timer)}
     }
     for &c in u.cooldowns {if c.until!=0 && c.until<=t.tick {c={}}}
+    // An entry leaves after the kit's buffer or, when it waits for the run it came in, once that
+    // run is over too.
     buffer:=ticks_of(kit.buffer,t.dt) if kit!=nil else 0
-    for &b in u.buffer {if b.ability!={} && b.tick+buffer<t.tick {b={}}}
+    for &b in u.buffer {
+        if b.ability=={} || b.tick+buffer>=t.tick {continue}
+        if b.running && u.ability!={} && u.start==b.run {continue}
+        b={}
+    }
     for &entry in u.attributes {
         if entry.attribute!=ATTRIBUTE_NONE && entry.regen!=0 {base_add(t,e,&entry,entry.regen*t.dt)}
     }
-    // The running ability advances to this tick.
+    // The running ability advances to this tick, on the clock of the world and on its own.
     next:core.Record(Ability)
-    local:i64
+    handoff:Ability_Statuses // of the windows open on the last tick of the ability that completed: its next starts in them
+    at:Ability_Time
     active:=sheet_valid(t,e,u.ability)
-    if u.ability!={} && active==nil {ability_end(t,e,u,nil,0,.Canceled,nil)}
+    if u.ability!={} && active==nil {ability_end(t,e,u,nil,{},.Canceled,nil)}
     if active!=nil {
-        local=i64(t.tick-u.start) if t.tick>=u.start else 0
-        windows_advance(t,e,u,active,local)
-        if local>=ability_ticks(active,t.dt) {
+        before:=time_advance(t,e,u)
+        at=time_of(t,u)
+        windows_advance(t,e,u,active,before,at)
+        if at.local>=ability_ticks(active,t.dt) {
             next=active.next
-            ability_end(t,e,u,active,local,.Completed,nil)
+            for &w in active.windows {
+                if ability_window_open(w,t.dt,before) {handoff|=w.statuses}
+            }
+            ability_end(t,e,u,active,at,.Completed,nil)
             active=nil
         } else if active.hold && active.input.on!=.None && !input_down(t,e,active.input) {
-            ability_end(t,e,u,active,local,.Completed,nil)
+            ability_end(t,e,u,active,at,.Completed,nil)
             active=nil
         }
     }
@@ -267,50 +297,60 @@ user_tick :: proc(t:^Tick,e:core.Entity,u:^Ability_User) {
         for ref in kit.abilities {
             a:=ability_sheet(t.abilities,ref)
             if a!=nil && a.input.on>max(Ability_Trigger) {a=sheet_valid(t,e,ref)}
-            if a!=nil && input_fired(t,e,a.input) {buffer_add(u,ref,t.tick)}
+            if a==nil || !input_fired(t,e,a.input) {continue}
+            // Over a running ability, the input counts only from after seconds into it.
+            if active!=nil && at.local<i64(ticks_of(a.input.after,t.dt)) {continue}
+            buffer_add(u,ref,t.tick,a.input.wait==.Running)
         }
     }
-    derive(t,u,active,local)
+    derive(t,u,active,at)
     // The best valid candidate starts.
     best:=-1
     best_ref:=next
     best_sheet:=sheet_valid(t,e,next) if next!={} else nil
-    if best_sheet!=nil && !can_start(t,e,u,kit,active,local,best_sheet,next) {best_sheet=nil}
+    if best_sheet!=nil {
+        // The next of a completed ability is its last branch: it starts in the statuses the
+        // ability had then (a dash that requires the charging status of its charge).
+        from:=u^
+        from.statuses|=handoff
+        if !can_start(t,e,&from,kit,active,at,best_sheet,next) {best_sheet=nil}
+    }
     for b,i in u.buffer {
         if b.ability=={} {continue}
         a:=sheet_valid(t,e,b.ability)
         if a==nil {u.buffer[i]={};continue}
-        if !can_start(t,e,u,kit,active,local,a,b.ability) {continue}
+        if !can_start(t,e,u,kit,active,at,a,b.ability) {continue}
         if best_sheet==nil || a.priority>best_sheet.priority || a.priority==best_sheet.priority && best>=0 && b.tick<u.buffer[best].tick {
             best,best_ref,best_sheet=i,b.ability,a
         }
     }
     if best_sheet!=nil {
-        if active!=nil {ability_end(t,e,u,active,local,.Interrupted,best_sheet)}
+        if active!=nil {ability_end(t,e,u,active,at,.Interrupted,best_sheet)}
         ability_start(t,e,u,best_ref,best_sheet)
-        active,local=best_sheet,0
-        windows_advance(t,e,u,active,0)
+        active,at=best_sheet,{}
+        windows_advance(t,e,u,active,TIME_BEFORE_START,at)
     }
-    if active!=nil {hitboxes(t,e,u,active,local)}
-    derive(t,u,active,local)
+    if active!=nil {hitboxes(t,e,u,active,at)}
+    derive(t,u,active,at)
 }
 
 // A replica follows the ability its owner runs: its statuses and the events of its windows.
 @(private)
 replica_tick :: proc(t:^Tick,e:core.Entity,u:^Ability_User) {
     active:=ability_sheet(t.abilities,u.ability)
-    local:i64
+    at:Ability_Time
     if active!=nil {
-        local=i64(t.tick-u.start) if t.tick>=u.start else 0
-        if local<ability_ticks(active,t.dt) {
+        before:=time_advance(t,e,u)
+        at=time_of(t,u)
+        if at.local<ability_ticks(active,t.dt) {
             for &w,i in active.windows {
-                was,is:=ability_window_open(w,t.dt,local-1),ability_window_open(w,t.dt,local)
+                was,is:=ability_window_open(w,t.dt,before),ability_window_open(w,t.dt,at)
                 if is && !was {event_push(t,{kind=.Window_Begin,entity=e,ability=u.ability,window=i8(i),cue=w.cue})}
                 if was && !is {event_push(t,{kind=.Window_End,entity=e,ability=u.ability,window=i8(i),cue=w.cue})}
             }
         } else {active=nil}
     }
-    derive(t,u,active,local)
+    derive(t,u,active,at)
 }
 
 // The sheet of a reference when it is there and valid; a missing or invalid one is a problem.
@@ -367,12 +407,12 @@ Ability_Block :: enum u8 {
 }
 
 @(private)
-can_start :: proc(t:^Tick,e:core.Entity,u:^Ability_User,kit:^Ability_Kit,active:^Ability,local:i64,a:^Ability,ref:core.Record(Ability)) -> bool {
-    return start_block(t.w,t.tick,t.dt,e,u,kit,active,local,a,ref)==.None
+can_start :: proc(t:^Tick,e:core.Entity,u:^Ability_User,kit:^Ability_Kit,active:^Ability,at:Ability_Time,a:^Ability,ref:core.Record(Ability)) -> bool {
+    return start_block(t.w,t.tick,t.dt,e,u,kit,active,at,a,ref)==.None
 }
 
-// Why ability a cannot start for user u at tick, with active running at local.
-start_block :: proc(w:^Ability_World,tick:u64,dt:f32,e:core.Entity,u:^Ability_User,kit:^Ability_Kit,active:^Ability,local:i64,a:^Ability,ref:core.Record(Ability)) -> Ability_Block {
+// Why ability a cannot start for user u at tick, with active running at at.
+start_block :: proc(w:^Ability_World,tick:u64,dt:f32,e:core.Entity,u:^Ability_User,kit:^Ability_Kit,active:^Ability,at:Ability_Time,a:^Ability,ref:core.Record(Ability)) -> Ability_Block {
     if u.statuses&a.requires!=a.requires {return .Status_Missing}
     if u.statuses&a.blocked_by!=0 {return .Status_Blocked}
     if a.modes!=0 {
@@ -396,7 +436,7 @@ start_block :: proc(w:^Ability_World,tick:u64,dt:f32,e:core.Entity,u:^Ability_Us
     if active!=nil {
         accepted:=kit.interrupts if kit!=nil else 0
         for &w in active.windows {
-            if ability_window_open(w,dt,local) {accepted|=w.cancel_into}
+            if ability_window_open(w,dt,at) {accepted|=w.cancel_into}
         }
         if accepted&a.tags==0 {return .No_Cancel}
     }
@@ -420,7 +460,7 @@ ability_start :: proc(t:^Tick,e:core.Entity,u:^Ability_User,ref:core.Record(Abil
         u.cooldowns[slot]={ref,t.tick+max(ticks_of(a.cooldown,t.dt),1)}
     }
     for &b in u.buffer {if b.ability==ref {b={}}}
-    u.ability,u.start,u.hits,u.hit_count=ref,t.tick,{},0
+    u.ability,u.start,u.own,u.hits,u.hit_count=ref,t.tick,0,{},0
     event_push(t,{kind=.Started,entity=e,ability=ref,window=-1})
     if name:=ability_name_text(&a.action);name!="" {
         if !anim.action_fire(t.w.actions,e,name) {core.report(t.w.problems,e,"abilities.animation","the action %q of the ability %s did not fit in the animation requests: fewer abilities should start in one tick",name,core.record_name(t.abilities,ref))}
@@ -431,14 +471,14 @@ ability_start :: proc(t:^Tick,e:core.Entity,u:^Ability_User,ref:core.Record(Abil
     }
 }
 
-// Ends the running ability at local: its open windows close, their moves stop and its animation
+// Ends the running ability at at: its open windows close, their moves stop and its animation
 // stops unless next plays one of the same kind.
 @(private)
-ability_end :: proc(t:^Tick,e:core.Entity,u:^Ability_User,a:^Ability,local:i64,kind:Ability_Event_Kind,next:^Ability) {
+ability_end :: proc(t:^Tick,e:core.Entity,u:^Ability_User,a:^Ability,at:Ability_Time,kind:Ability_Event_Kind,next:^Ability) {
     ref:=u.ability
     if a!=nil {
         for &w,i in a.windows {
-            if !ability_window_open(w,t.dt,local) {continue}
+            if !ability_window_open(w,t.dt,at) {continue}
             event_push(t,{kind=.Window_End,entity=e,ability=ref,window=i8(i),cue=w.cue})
             if w.move.velocity!={} {phys.remove_moves(t.w.moves,e,MOVE_ID+u32(i))}
         }
@@ -447,35 +487,56 @@ ability_end :: proc(t:^Tick,e:core.Entity,u:^Ability_User,a:^Ability,local:i64,k
             if ability_name_text(&a.clip)!="" && (next==nil || ability_name_text(&next.clip)=="") {anim.match_stop(t.w.animations,e)}
         }
     }
-    u.ability,u.start,u.hits,u.hit_count={},0,{},0
+    u.ability,u.start,u.own,u.hits,u.hit_count={},0,0,{},0
     event_push(t,{kind=kind,entity=e,ability=ref,window=-1})
 }
 
-// The windows that open or close at local, against the tick before.
+// Where an ability is on the tick before its start: no window is open there.
 @(private)
-windows_advance :: proc(t:^Tick,e:core.Entity,u:^Ability_User,a:^Ability,local:i64) {
+TIME_BEFORE_START :: Ability_Time{local=-1,own=-1}
+
+// Moves the running ability of u to this tick: its own time grows by the pace of e. Returns where
+// it was on the tick before.
+@(private)
+time_advance :: proc "contextless" (t:^Tick,e:core.Entity,u:^Ability_User) -> (before:Ability_Time) {
+    before=time_of(t,u)
+    if before.local<=0 {return TIME_BEFORE_START}
+    before.local-=1
+    u.own+=pace_tick(t,e)
+    return
+}
+
+// The windows that open or close at at, against before (the tick before).
+@(private)
+windows_advance :: proc(t:^Tick,e:core.Entity,u:^Ability_User,a:^Ability,before,at:Ability_Time) {
     for &w,i in a.windows {
-        was,is:=ability_window_open(w,t.dt,local-1),ability_window_open(w,t.dt,local)
+        was,is:=ability_window_open(w,t.dt,before),ability_window_open(w,t.dt,at)
         if is && !was {
             event_push(t,{kind=.Window_Begin,entity=e,ability=u.ability,window=i8(i),cue=w.cue})
             if w.move.velocity!={} {
                 velocity:=w.move.velocity
                 if pose,found:=core.get(t.w.worlds,e);found {velocity=mm.quat_rotate(pose.rotation,velocity)}
                 from,to:=window_ticks(w,t.dt)
-                phys.add_move(t.w.moves,e,{velocity=velocity,ticks=u32(to-from),mix=w.move.mix,id=MOVE_ID+u32(i)})
+                ticks:=u32(to-from)
+                // On the Own clock it lasts until the window closes, which removes it.
+                if w.clock==.Own {ticks=u32(math.ceil(f32(to-from)/max(pace_tick(t,e),1.0/64)))}
+                phys.add_move(t.w.moves,e,{velocity=velocity,ticks=ticks,mix=w.move.mix,id=MOVE_ID+u32(i)})
             }
         }
-        if was && !is {event_push(t,{kind=.Window_End,entity=e,ability=u.ability,window=i8(i),cue=w.cue})}
+        if was && !is {
+            event_push(t,{kind=.Window_End,entity=e,ability=u.ability,window=i8(i),cue=w.cue})
+            if w.clock==.Own && w.move.velocity!={} {phys.remove_moves(t.w.moves,e,MOVE_ID+u32(i))}
+        }
     }
 }
 
 // Each open hitbox touches each entity once: a Hit and the effect of the window, on the tick after.
 @(private)
-hitboxes :: proc(t:^Tick,e:core.Entity,u:^Ability_User,a:^Ability,local:i64) {
+hitboxes :: proc(t:^Tick,e:core.Entity,u:^Ability_User,a:^Ability,at:Ability_Time) {
     pose,found:=core.get(t.w.worlds,e)
     if !found {pose.rotation=1}
     for &w,i in a.windows {
-        if w.hitbox.shape==.None || !ability_window_open(w,t.dt,local) || t.overlap==nil {continue}
+        if w.hitbox.shape==.None || !ability_window_open(w,t.dt,at) || t.overlap==nil {continue}
         results:[HITBOX_RESULTS]core.Entity
         count:=clamp(t.overlap(t.w,w.hitbox,pose.transform,results[:]),0,HITBOX_RESULTS)
         each: for target in results[:count] {
@@ -497,9 +558,9 @@ hitboxes :: proc(t:^Tick,e:core.Entity,u:^Ability_User,a:^Ability,local:i64) {
     }
 }
 
-// The statuses and current values of a user: those of its timers and of the windows open at local.
+// The statuses and current values of a user: those of its timers and of the windows open at at.
 @(private)
-derive :: proc(t:^Tick,u:^Ability_User,active:^Ability,local:i64) {
+derive :: proc(t:^Tick,u:^Ability_User,active:^Ability,at:Ability_Time) {
     statuses:Ability_Statuses
     add,more:[ATTRIBUTE_ENTRIES]f32
     modify :: proc(u:^Ability_User,m:Ability_Modifier,add,more:^[ATTRIBUTE_ENTRIES]f32) {
@@ -518,7 +579,7 @@ derive :: proc(t:^Tick,u:^Ability_User,active:^Ability,local:i64) {
     }
     if active!=nil {
         for &w in active.windows {
-            if !ability_window_open(w,t.dt,local) {continue}
+            if !ability_window_open(w,t.dt,at) {continue}
             statuses|=w.statuses
             modify(u,w.modify,&add,&more)
         }

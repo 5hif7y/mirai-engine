@@ -18,3 +18,18 @@ a_headless_editor_takes_the_density_of_its_ui :: proc(t:^testing.T) {
     _,ok=options_read({"--headless","--density","high"})
     testing.expect(t,!ok)
 }
+
+// --api-port 0 asks for a free port, never the default one, which stays the one of the user's editor.
+@(test)
+api_port_zero_is_a_free_one_and_never_the_default :: proc(t:^testing.T) {
+    o,ok:=options_read({"--headless","--api-port","0"})
+    testing.expect(t,ok && o.api_port_any && o.api_port==0)
+    o,ok=options_read({"--api-port","7957"})
+    testing.expect(t,ok && !o.api_port_any && o.api_port==7957)
+    o,ok=options_read({})
+    testing.expect(t,ok && !o.api_port_any && o.api_port==0,"without it: the default one")
+    _,ok=options_read({"--api-port","-1"})
+    testing.expect(t,!ok)
+    _,ok=options_read({"--api-port","70000"})
+    testing.expect(t,!ok)
+}

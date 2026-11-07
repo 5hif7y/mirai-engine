@@ -428,8 +428,11 @@ emitter_desc :: proc(m:^effect.Particle_Info,app:^host.App,id:u64) -> (desc:Emit
     a:=app.assets
     material:=erender.Material_Handle(m.material!={}?host.assets_material_row(a,m.material):0)
     mesh:[3]u32
+    blended:=false
     ready=true
     if m.render==.Mesh {
+        // A material that blends draws its meshes over the lit scene, as a sprite.
+        if found:=host.assets_material(a,m.material);found!=nil {blended=found.info.alpha_mode==.Blend}
         entry:=m.mesh!={}?host.assets_mesh(a,m.mesh):host.assets_shape(a,.Cube)
         if entry!=nil {mesh.x,ready=erender.mesh_draw_range(app,entry.handle);mesh.y=u32(entry.handle)}
         ready||=app.renderer==nil
@@ -446,7 +449,7 @@ emitter_desc :: proc(m:^effect.Particle_Info,app:^host.App,id:u64) -> (desc:Emit
         noise_strength=m.noise,noise_frequency=m.noise_frequency,noise_speed=m.noise_speed,
         attractor=m.attractor,attractor_strength=m.attractor_strength,
         collision=m.collision,bounce=m.bounce,friction=m.friction,collision_life=m.collision_life,
-        render=m.render,blend=m.blend,material=material,mesh=mesh,
+        render=m.render,blend=m.blend,material=material,mesh=mesh,blended=blended,
         stretch=m.stretch,soft=m.soft,intensity=m.intensity,flipbook=m.flipbook,flipbook_speed=m.flipbook_speed,
         size_curve=m.size_over_life,color_curve=m.color_over_life,
     },ready

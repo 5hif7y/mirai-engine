@@ -1,5 +1,6 @@
 package physics
 
+import cmath "core:math"
 import "core:math/linalg"
 import "core:testing"
 import input "mirai:engine/input"
@@ -295,7 +296,7 @@ a_tactical_sprint_ramps_up_spends_its_energy_and_recharges_after_its_delay :: pr
 }
 
 // A jump in a tactical sprint at the end of its ramp rises jump_multiplier times faster and costs
-// cost_jump; in the air it spends nothing, and past fall_grace there it ends.
+// cost_jump; in the air it spends nothing, and going down there past fall_grace it ends.
 @(test)
 a_jump_in_a_tactical_sprint_goes_higher_costs_energy_and_a_long_fall_ends_it :: proc(t:^testing.T) {
     f:Moves_Test
@@ -311,11 +312,13 @@ a_jump_in_a_tactical_sprint_goes_higher_costs_energy_and_a_long_fall_ends_it :: 
     testing.expectf(t,abs(f.loco.sprint_spent-spent-tactical.cost_jump)<0.5,"the jump costs cost_jump: %v",f.loco.sprint_spent-spent)
     spent=f.loco.sprint_spent
     rise:=f32(0)
-    for i in 0..<60 {
+    // It rises for 0.59 s and comes down for as long: past fall_grace of that, still in the air, it ends.
+    for i in 0..<69 {
         moves_tick(&f,{0,0,-1},1,SPRINT)
         rise=max(rise,sim.character_position(&f.w,f.ch).y)
-        if i==20 {testing.expect(t,f.loco.sprint_active,"within fall_grace in the air it goes on")}
+        if i==50 {testing.expect(t,f.loco.sprint_active,"going up and then down within fall_grace it goes on")}
     }
+    testing.expect(t,f.loco.mode==MODE_FALLING,"still in the air")
     want:=f.walk.jump_height*tactical.jump_multiplier*tactical.jump_multiplier
     testing.expectf(t,abs(rise-want)<0.05,"it rises %v, jump_multiplier times faster than to %v",rise,f.walk.jump_height)
     testing.expect(t,!f.loco.sprint_active,"past fall_grace in the air it ends")
@@ -375,4 +378,33 @@ a_ledge_jump_launches_off_an_edge_at_speed_and_ends_when_it_lands :: proc(t:^tes
         moves_tick(&f,{},1)
         testing.expectf(t,!f.loco.ledge_jumping,"%v: the landing ends it",c)
     }
+}
+
+// A jump let go at once rises jump_height; held, it keeps the speed it started with for jump_rise and
+// rises that speed by jump_rise more; held longer, no more than that.
+@(test)
+a_jump_held_rises_at_its_speed_for_jump_rise :: proc(t:^testing.T) {
+    peak :: proc(t:^testing.T,held_ticks:int,rise:f32) -> f32 {
+        f:Moves_Test
+        testing.expect(t,moves_init(&f,{0,0,0}))
+        defer sim.world_destroy(&f.w)
+        f.walk.jump_rise=rise
+        moves_tick(&f,{},20)
+        start:=sim.character_position(&f.w,f.ch).y
+        top:=start
+        for i in 0..<90 {
+            moves_tick(&f,{},1,JUMP if i<held_ticks else input.Action_Mask(0))
+            top=max(top,sim.character_position(&f.w,f.ch).y)
+        }
+        return top-start
+    }
+    g:=f32(9.81)
+    speed:=cmath.sqrt(2*g*WALK_DEFAULT.jump_height)
+    tapped:=peak(t,1,0.25)
+    testing.expectf(t,abs(tapped-WALK_DEFAULT.jump_height)<0.05,"let go at once it rises %v, not jump_height %v",tapped,WALK_DEFAULT.jump_height)
+    held:=peak(t,60,0.25)
+    want:=WALK_DEFAULT.jump_height+speed*0.25
+    testing.expectf(t,abs(held-want)<0.08,"held it rises %v, want %v",held,want)
+    without:=peak(t,60,0)
+    testing.expectf(t,abs(without-WALK_DEFAULT.jump_height)<0.05,"without jump_rise holding does nothing: %v",without)
 }

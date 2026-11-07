@@ -142,37 +142,6 @@ material_value_name :: proc(value:Material_Value) -> u64 {
 }
 
 @(private)
-override_find :: proc "contextless" (o:^erender.Material_Override,slot:int,name:u64) -> int {
-    for stored,i in o.names[:min(int(o.count),len(o.names))] {
-        if stored==name && int(o.slots[i])==slot {return i}
-    }
-    return -1
-}
-
-// Takes one name of an override of a slot away: a value or a parameter.
-@(private)
-override_value_drop :: proc(o:^erender.Material_Override,slot:int,name:u64) {
-    count:=min(int(o.count),len(o.names))
-    if i:=override_find(o,slot,name);i>=0 {
-        o.slots[i],o.names[i],o.values[i]=o.slots[count-1],o.names[count-1],o.values[count-1]
-        o.slots[count-1],o.names[count-1],o.values[count-1]=0,0,{}
-        o.count-=1
-    }
-}
-
-@(private)
-override_value_put :: proc(o:^erender.Material_Override,slot:int,name:u64,value:[4]f32) -> bool {
-    if at:=override_find(o,slot,name);at>=0 {
-        o.values[at]=value
-        return true
-    }
-    if int(o.count)>=len(o.names) {return false}
-    o.slots[o.count],o.names[o.count],o.values[o.count]=u8(slot),name,value
-    o.count+=1
-    return true
-}
-
-@(private)
 override_texture_put :: proc(o:^erender.Material_Override,slot:int,name:u64,texture:base.Asset_Id,put:bool) -> bool {
     count:=min(int(o.texture_count),len(o.texture_names))
     for i in 0..<count {
@@ -246,7 +215,7 @@ appearance_read :: proc(s:^Session,w:core.World_Ref,e:core.Entity,mesh:erender.M
 @(private)
 override_store :: proc(s:^Session,e:core.Entity,slot:int,name:u64,value:[4]f32) -> bool {
     next,_:=entity_get(shown_world(s),e,erender.Material_Override)
-    if !override_value_put(&next,slot,name,value) {
+    if !erender.material_override_value_set(&next,slot,name,value) {
         notify(s,fmt.tprintf("An entity changes up to %d values of its material",erender.MATERIAL_OVERRIDE_CAPACITY))
         return false
     }

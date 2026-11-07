@@ -170,6 +170,15 @@ with its id, even if it was moved. Among several files with one id the original 
 [registry](../../mirai-assets/references/formats.md#registry); what is new receives
 `asset_id_random`.
 
+- **Outside the output folder** (`Import_Options.outside`): the editor writes an earlier output
+  again where it is (`In_Place`). `mirai import` refuses (`Refuse`, error `Outside`) before writing
+  anything when an earlier output of the source lies outside `--out` (the search reached it through
+  `--root`), naming it; `--in-place` writes it there and `--copy` (`Copy`) looks for earlier imports
+  only under `--out`, so a scratch import gets new ids and leaves the live one alone. `into` names
+  the import wherever it is. Of two imports of one source (a copy), the root under the output folder
+  is taken, and the parts the taken prefab holds (by owner and what it names) before those of the
+  other.
+
 - **The root** of an import is the prefab of a model, the texture of an image or the sound of a
   sound, without `owner`. It is found, in order:
   1. by `into` (`mirai import --into <id>`, `asset.import {into}`), which must be a root with an

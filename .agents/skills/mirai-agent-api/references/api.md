@@ -9,7 +9,8 @@ Code: `editor/api/` (package `api`: server, JSON-RPC, MCP, schemas, client),
 - It listens on `127.0.0.1:api.DEFAULT_PORT`; `--api-port N` chooses another and `--no-api` does
   not open it. Without `--api-port`, a busy port makes it choose a free one, which the editor
   prints on stderr; with a busy `--api-port`, or another failure, it continues without an API and
-  says so. If a method does not fit in the registry it does not open the API and names
+  says so. `--api-port 0` takes a free one and never the default: a `mirai session start --copy`
+  passes it, so the default port stays that of the user's editor. If a method does not fit in the registry it does not open the API and names
   `API_METHOD_CAPACITY`.
 - When it opens it writes `<project>/.mirai/api.json` (`api.Port_File`) and deletes it on close:
   `rpc`, `mcp` and `capture` take the port from there, and `session` knows which binaries and
@@ -75,12 +76,15 @@ named by `.mirai/session.json` (pid, mode and arguments) and `api.json`; its log
   `restart`. An editor of the project with a window is not reused, trampled or closed (`start`,
   `restart` and `stop` fail with its pid); a headless one that does not respond is not trampled
   either: `stop --discard` closes it.
-- **Build with an open session.** Windows does not replace loaded binaries. If `mirai build
+- **Build with an open session.** Windows does not replace loaded binaries, but it moves them: the
+  build moves the ones a program runs to `.mirai/engine/<mode>/retired/` and writes in their place
+  (`build.engine_unlock`), and a later build deletes them once nothing runs them. If `mirai build
   editor`, `edit`, `play` or `capture` rebuild the engine the project's session runs, they close it
-  (with its players), build and reopen it; if the engine does not build, it stays closed. Another
-  program that runs them stops the build with its pid and what to do: close a windowed editor by
-  hand or build in a worktree, `stop` or the build of its project for another session,
-  `stop --orphans` for an orphan. `mirai build engine` does not restart sessions: it names them.
+  (with its players), build and reopen it on the new binaries; if the engine does not build, it
+  stays closed. Every other program that runs them (another session, a person's editor) goes on
+  with the binaries it started with and is named; it takes the new ones when it starts again. An
+  editor whose engine was rebuilt restarts on the new one after its next Build instead of loading
+  the library into the old one. `mirai build engine` does not restart sessions: it names them.
 - `stop` never saves: unsaved changes (from `editor.documents` and `asset.unsaved`) are discarded
   automatically if all are copies under `.mirai/tmp/`; otherwise it fails listing them and
   `--discard` discards them.

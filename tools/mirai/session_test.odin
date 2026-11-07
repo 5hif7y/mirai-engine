@@ -6,6 +6,17 @@ import "core:slice"
 import "core:testing"
 import "mirai:project"
 
+// A copy opens its API on a free port, never the default one of the user's editor, unless the
+// arguments name a port or no API.
+@(test)
+a_session_copy_leaves_the_default_api_port_to_the_users_editor :: proc(t:^testing.T) {
+    context.allocator=context.temp_allocator
+    testing.expect(t,slice.equal(session_copy_args({"--frames","5"}),[]string{"--frames","5","--api-port","0"}))
+    testing.expect(t,slice.equal(session_copy_args({}),[]string{"--api-port","0"}))
+    testing.expect(t,slice.equal(session_copy_args({"--api-port","7957"}),[]string{"--api-port","7957"}))
+    testing.expect(t,slice.equal(session_copy_args({"--no-api"}),[]string{"--no-api"}))
+}
+
 // start and restart take the mode, the flags of their own and, for the
 // editor, everything else in order.
 @(test)
@@ -177,4 +188,54 @@ a_session_copy_takes_the_project_and_its_caches_without_the_files_of_its_editor 
     testing.expect(t,!session_copied(project.path(folder,".mirai","tmp","other")),"only what session_copy names")
     testing.expect(t,session_copy_remove(copy,"test") && !os.exists(copy))
     testing.expect(t,os.is_file(project.path(folder,".mirai","api.json")),"the project keeps its own files")
+}
+
+// A sync brings into a copy only the files named: one another session is
+// editing in the project stays out. A file gone from the project leaves the
+// copy; a path outside the project or of what a copy never takes is refused;
+// code asks for a restart and assets only for a reload, relative to assets/.
+@(test)
+a_sync_brings_only_the_files_named_into_a_copy :: proc(t:^testing.T) {
+    context.allocator=context.temp_allocator
+    folder,error:=os.make_directory_temp("","mirai-sync-*",context.temp_allocator)
+    if !testing.expect(t,error==nil) {return}
+    defer os.remove_all(folder)
+    folder=project.path_absolute(folder)
+    write :: proc(t:^testing.T,root,file,text:string) {
+        path:=project.path(root,file)
+        testing.expect(t,os.make_directory_all(os.dir(path))==nil || os.is_dir(os.dir(path)))
+        testing.expect(t,os.write_entire_file(path,text)==nil)
+    }
+    read :: proc(root,file:string) -> string {
+        data,_:=os.read_entire_file(project.path(root,file),context.temp_allocator)
+        return string(data)
+    }
+    for file in ([]string{project.PROJECT_FILE,"game/blade.odin","game/game.odin","assets/items/Blade.prefab","assets/old.tex"}) {write(t,folder,file,"before")}
+    copy,problem:=session_copy(folder)
+    if !testing.expect_value(t,problem,"") {return}
+    defer session_copy_remove(copy,"test")
+    // Another session half-edits game.odin; this one changes blade.odin and the prefab and deletes old.tex.
+    write(t,folder,"game/game.odin","half edited")
+    write(t,folder,"game/blade.odin","after")
+    write(t,folder,"assets/items/Blade.prefab","after")
+    testing.expect(t,os.remove(project.path(folder,"assets/old.tex"))==nil)
+
+    plan,refused:=session_sync_plan(folder,copy,{"assets/items/Blade.prefab",`assets\old.tex`})
+    if !testing.expect_value(t,refused,"") {return}
+    testing.expect(t,!plan.rebuild && len(plan.assets)==2 && plan.assets[0]=="items/Blade.prefab" && plan.assets[1]=="old.tex","assets alone are read again")
+    plan,refused=session_sync_plan(folder,copy,{"game/blade.odin","assets/items/Blade.prefab","assets/old.tex"})
+    if !testing.expect_value(t,refused,"") {return}
+    testing.expect(t,plan.rebuild,"code asks for a restart")
+    testing.expect_value(t,session_sync_apply(folder,copy,plan),"")
+    testing.expect_value(t,read(copy,"game/blade.odin"),"after")
+    testing.expect_value(t,read(copy,"assets/items/Blade.prefab"),"after")
+    testing.expect_value(t,read(copy,"game/game.odin"),"before")
+    testing.expect(t,!os.exists(project.path(copy,"assets/old.tex")),"what the project deleted leaves the copy")
+
+    for wrong in ([]string{"../outside.odin","C:/abs.odin","/abs.odin",".mirai/api.json","game","game/missing.odin"}) {
+        _,refused=session_sync_plan(folder,copy,{wrong})
+        testing.expectf(t,refused!="","%s is refused",wrong)
+    }
+    _,refused=session_sync_plan(folder,copy,{})
+    testing.expect(t,refused!="","a sync names its files")
 }

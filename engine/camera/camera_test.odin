@@ -481,3 +481,45 @@ shake_test_look :: proc(f:^Camera_Test,transforms:^core.Table(core.Transform),pa
     ahead:=mm.quat_rotate(placed.rotation,{0,0,-1})
     return math.asin(ahead.y) // how far up it looks
 }
+
+@(test)
+a_mode_blend_sheds_the_lag_the_old_pivot_had_as_that_mode_would_have :: proc(t:^testing.T) {
+    f:=test_make()
+    defer test_free(f)
+    camera,body:=core.create(&f.es),core.create(&f.es)
+    core.add(&f.cameras,camera,render.CAMERA_DEFAULT)
+    core.add(&f.follows,camera,Camera_Follow{mode=.Follow,half_life=0.1})
+    test_place(f,camera,{})
+    test_place(f,body,{})
+    test_settle(f)
+    frame:=core.Frame_Time{dt=0.125,alpha=1}
+    v:Camera_View
+    // The pivot trails its goal by 8 m, as after a fast move: the camera drawn is 8 m behind.
+    follow:=core.get(&f.follows,camera)
+    follow.state.ready=true
+    follow.state.pivot.position,follow.state.zone={-8,0,0},{0,0,0}
+    view_update(&v,camera,{},body,core.read(&f.cameras),core.read(&f.follows),core.read(&f.worlds),frame)
+    testing.expect(t,close_vec(v.lag,{-8,0,0}) && close(v.lag_half_life,0.1),"the view keeps the lag of the pivot it saw")
+
+    // A new mode with a long blend: the old mode would have closed its lag in a few half-lives.
+    follow.state.changes=1
+    follow.state.blend={2,.Linear}
+    follow.state.pivot.position=follow.state.zone
+    test_place(f,camera,{10,0,0})
+    view_update(&v,camera,{},body,core.read(&f.cameras),core.read(&f.follows),core.read(&f.worlds),frame)
+    shed:=f32(8*(1-math.exp(-math.LN2*0.125/0.1)))
+    want:=shed+(10-shed)*(0.125/2)
+    testing.expectf(t,v.blending && close(v.pose.position.x,want,0.01),"what it left sheds the lag: %v, want %v",v.pose.position.x,want)
+    for _ in 0..<3 {view_update(&v,camera,{},body,core.read(&f.cameras),core.read(&f.follows),core.read(&f.worlds),frame)}
+    testing.expectf(t,v.blending && v.pose.position.x>7.5,"half a second in, the lag is gone and only the framing still blends: %v",v.pose.position.x)
+
+    // Another camera (an override) keeps blending from what it drew.
+    other:=core.create(&f.es)
+    core.add(&f.cameras,other,render.CAMERA_DEFAULT)
+    test_place(f,other,{20,0,0})
+    test_settle(f)
+    v2:Camera_View
+    v2.camera,v2.pose,v2.lag,v2.lag_half_life=camera,{position={0,0,0},rotation=1},{-8,0,0},0.1
+    view_update(&v2,other,{0.5,.Linear},body,core.read(&f.cameras),core.read(&f.follows),core.read(&f.worlds),frame)
+    testing.expect(t,v2.from_half_life==0,"entering another camera sheds nothing")
+}

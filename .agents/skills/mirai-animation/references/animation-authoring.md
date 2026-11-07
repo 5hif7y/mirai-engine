@@ -157,8 +157,11 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
   the mesh ([assets](../../mirai-assets/references/formats.md#asset-types)): these methods do not
   edit joints or weights.
 - `skeleton.create` asks for parents before children (`-1` is root; identity TRS if omitted).
-  `skeleton.bone.set` changes name and reference, not path or parent: changing the topology is
-  creating another skeleton.
+  `skeleton.bone.set` changes name and reference, not path or parent. `skeleton.bone.add` adds a
+  bone under a parent (by path) after the others, so meshes and indices keep theirs; with `clips`,
+  the tracks of those `.anim` whose target ends in a node of the bone's name under another path take
+  its path and drive it (a bone the clips of another skeleton animate, such as a weapon attach bone
+  the body does not weight). Removing or reparenting a bone is creating another skeleton.
 - Sockets belong to the shared skeleton, not to a clip or to the equipped entity, which carries
   `Bone_Attachment` with its own offset.
 - `pose.profile.set` replaces, adds or removes a row of a table of the `.pose`. Targets are written

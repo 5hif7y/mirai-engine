@@ -210,8 +210,8 @@ api_material_instance_set :: proc(s:^Session,call:^api.Call) {
             now:=material_parameter_value(&given,nil,name)
             erender.material_standard_apply(&kept,name,now)
             if now==material_parameter_value(&material,nil,name) {
-                override_value_drop(&next,slot,name)
-            } else if !override_value_put(&next,slot,name,now) {
+                erender.material_override_value_drop(&next,slot,name)
+            } else if !erender.material_override_value_set(&next,slot,name,now) {
                 api.call_failf(call,api.INVALID_PARAMS,"An entity changes up to %d values of its material",erender.MATERIAL_OVERRIDE_CAPACITY)
                 return
             }
@@ -238,7 +238,7 @@ api_material_instance_set :: proc(s:^Session,call:^api.Call) {
             }
             name:=base.name_hash(parameter.name)
             if serial.text_keyword(&r.r,"null") {
-                override_value_drop(&next,slot,name)
+                erender.material_override_value_drop(&next,slot,name)
                 continue
             }
             value:[4]f32
@@ -251,7 +251,7 @@ api_material_instance_set :: proc(s:^Session,call:^api.Call) {
                 rpc_fail(&r,"parameters.%s must be an array of %d numbers",key,count)
                 break
             }
-            if !override_value_put(&next,slot,name,value) {
+            if !erender.material_override_value_set(&next,slot,name,value) {
                 rpc_fail(&r,"An entity changes up to %d values of its material",erender.MATERIAL_OVERRIDE_CAPACITY)
                 break
             }

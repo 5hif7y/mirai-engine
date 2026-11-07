@@ -378,14 +378,16 @@ writes.
     apply in the air as well.
   - Jumping: the edge of the `jump` action among the buttons of the `Move_Input`, supported or
     during the coyote time after leaving an edge, gives the `launch` that reaches `Walk.jump_height`
-    and makes `MODE_FALLING` the mode.
+    and makes `MODE_FALLING` the mode. While the button stays down, for up to `Walk.jump_rise`, each
+    tick tops the speed up back to the one it jumped with (as Unreal's `JumpMaxHoldTime`), until it
+    is let go or something stops the rise; a ledge jump is not lengthened.
   - Tactical sprint (with `Tactical_Sprint`, `locomotion_moves.odin`): sprinting forward on the
     ground with `min_energy` starts it (`Character.sprint_active`, energy left by
     `tactical_energy`). Its top speed and jump speed grow by their step every `step_time` up to
     their multipliers (`tactical_boost`), which also the animation bridge reads; the acceleration
     multiplier acts only on the ground. Energy is spent per second (not in the air with
     `pause_falling`), per jump and per slide start, and comes back `recharge_delay` after it was
-    last spent. It ends without energy, in the air past `fall_grace`, crouched, sliding or out of
+    last spent. It ends without energy, going down in the air past `fall_grace` (`Character.fall_time`: a jump still rising does not count), crouched, sliding or out of
     walking and falling, or after `grace` without sprinting; back within `grace` it keeps its ramp.
     Without energy it sprints as `Walk` says.
   - Ledge jump (with `Ledge_Jump`): standing at `min_speed` for `min_time`, `locomotion_step`

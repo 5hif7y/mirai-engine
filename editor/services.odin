@@ -16,8 +16,9 @@ services_open :: proc(s:^Session,options:Options) -> (api_ok:bool) {
     manual:=options.headless && options.frames==0
     if !options.no_api {
         port:=options.api_port>0?options.api_port:api.DEFAULT_PORT
+        if options.api_port_any {port=0}
         opened:=api_open(s,port,manual)
-        if opened==.Server && options.api_port==0 {
+        if opened==.Server && options.api_port==0 && !options.api_port_any {
             log.warnf("the API port %d is taken: the system picks another",port)
             opened=api_open(s,0,manual)
         }

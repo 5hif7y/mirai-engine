@@ -162,6 +162,9 @@ Per tick:
   captures pose and velocity and evaluates only the target with decaying offsets, so the target
   keeps its own motion (its planted feet). The capture is of the boundary before the new advance,
   before the component layers; a tick with zero dt leaves it pending.
+- A weapon's set is an `.anim` with the clips of the `.match` under the same names in
+  `Animation.library`: changing it keeps the body, the lag and the mode, searches the new clips in
+  that tick and enters the one it picks through the same inertial transition (`blend`).
 - `animation_match` says which clip plays, its rate, its mode, whether `match_play` forced it and
   how many searches and jumps it made.
 
@@ -378,7 +381,9 @@ Editor and skinning:
   `core.free` and the owner of the transform.
 - `animation_skin` interpolates the last two local poses and recomposes the palette, which it reuses
   if pose, mesh and parent did not change; it creates, updates and releases the meshes deformed by
-  `engine/render`. With `Skin_Part`, the deformed copy is created with the part and each palette
+  `engine/render`. A mesh not drawn in the last frame (new, or shown again after `Hidden`) shows
+  the pose and weights of the tick until the next one, not an interpolation from a tick it was not
+  drawn in: a weapon shown the tick its action starts is not drawn in its rest pose. With `Skin_Part`, the deformed copy is created with the part and each palette
   collapses its joints onto the bone: changing the bone creates the copy again, changing its layers
   does not.
 - A rig whose palette leaves each vertex at its bind (`palette_at_bind`) is drawn with the world's

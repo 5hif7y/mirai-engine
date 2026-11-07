@@ -103,22 +103,25 @@ post_process_write :: proc(s:^Session,sel:Post_Process_Selection,
 		int(offset_of(erender.View_Volume,layers)),mem.ptr_to_bytes(layers))
 }
 
+// Writes one field of one layer: offset is that of the field in Post_Process_Layer.
+post_process_write_field :: proc(s:^Session,sel:Post_Process_Selection,index:int,
+	offset:uintptr,bytes:[]u8) {
+	if index<0 || index>=erender.POST_PROCESS_CAPACITY {return}
+	at:=int(offset_of(erender.View_Volume,layers))+
+		index*size_of(erender.Post_Process_Layer)+int(offset)
+	field_write(s,sel.table,[]core.Entity{sel.entity},at,bytes)
+}
+
 post_process_write_enabled :: proc(s:^Session,sel:Post_Process_Selection,index:int,on:bool) {
 	value:=on
-	if index<0 || index>=erender.POST_PROCESS_CAPACITY {return}
-	offset:=int(offset_of(erender.View_Volume,layers))+
-		index*size_of(erender.Post_Process_Layer)+
-		int(offset_of(erender.Post_Process_Layer,enabled))
-	field_write(s,sel.table,[]core.Entity{sel.entity},offset,mem.ptr_to_bytes(&value))
+	post_process_write_field(s,sel,index,offset_of(erender.Post_Process_Layer,enabled),
+		mem.ptr_to_bytes(&value))
 }
 
 post_process_write_after :: proc(s:^Session,sel:Post_Process_Selection,index:int,after:bool) {
 	value:=after
-	if index<0 || index>=erender.POST_PROCESS_CAPACITY {return}
-	offset:=int(offset_of(erender.View_Volume,layers))+
-		index*size_of(erender.Post_Process_Layer)+
-		int(offset_of(erender.Post_Process_Layer,after_tonemap))
-	field_write(s,sel.table,[]core.Entity{sel.entity},offset,mem.ptr_to_bytes(&value))
+	post_process_write_field(s,sel,index,offset_of(erender.Post_Process_Layer,after_tonemap),
+		mem.ptr_to_bytes(&value))
 }
 
 post_process_add :: proc(s:^Session,id:base.Asset_Id,after:bool) {
@@ -335,6 +338,26 @@ post_process_row :: proc(s:^Session,index:int,layer:erender.Post_Process_Layer) 
 			post_process_remove(s,index)
 		}
 	}
+	post_process_fade_row(s,sel,index,layer)
+}
+
+// The fade of a layer under its row: a scrub is one undo step.
+post_process_fade_row :: proc(s:^Session,sel:Post_Process_Selection,index:int,
+	layer:erender.Post_Process_Layer) {
+	ctx:=s.gui.ctx
+	row_begin(ctx,"Fade")
+	value:=f64(layer.fade)
+	r:=ui.slider_field(ctx,ui.id(ctx,"post_fade",index+1),&value,
+		{decimals=2,speed=0.005,min=0,max=1,has_min=true,has_max=true,height=22})
+	key:=value_key(sel.entity,index,base.name_hash("Post_Process_Layer.fade"))
+	gesture_follow(s,key,r,"Fade")
+	if r.changed {
+		fade:=f32(value)
+		post_process_write_field(s,sel,index,offset_of(erender.Post_Process_Layer,fade),
+			mem.ptr_to_bytes(&fade))
+	}
+	if r.ended {gesture_end(s,key)}
+	row_end(ctx)
 }
 
 post_process_group :: proc(s:^Session,after:bool) {

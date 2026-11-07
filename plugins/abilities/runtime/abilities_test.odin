@@ -55,6 +55,7 @@ Fixture :: struct {
     characters:core.Table(phys.Character),
     worlds:core.Table(core.World_Transform),
     remotes:core.Table(core.Remote),
+    paces:core.Table(core.Own_Pace),
     requests:Ability_Requests,
     events:Ability_Events,
     moves:phys.Locomotion_Requests,
@@ -112,6 +113,7 @@ fixture_make :: proc(f:^Fixture) {
     core.table_init(&f.characters,"Character")
     core.table_init(&f.worlds,"World_Transform")
     core.table_init(&f.remotes,"Remote")
+    core.table_init(&f.paces,"Own_Pace")
     blade(f)
     for i in 0..<SHEETS {
         f.sheet_rows[i]={table=ABILITY_TABLE,row=core.Record_Id(i+1)}
@@ -140,6 +142,7 @@ fixture_make :: proc(f:^Fixture) {
     core.add(&f.worlds,f.dummy,core.World_Transform{transform={position={1.5,0,0},rotation=1,scale=1}})
     core.table_settle(&f.users,&f.es);core.table_settle(&f.seats,&f.es);core.table_settle(&f.drivables,&f.es)
     core.table_settle(&f.characters,&f.es);core.table_settle(&f.worlds,&f.es);core.table_settle(&f.remotes,&f.es)
+    core.table_settle(&f.paces,&f.es)
     f.time={tick=1,dt=1.0/RATE,playing=true}
 }
 
@@ -147,6 +150,7 @@ fixture_make :: proc(f:^Fixture) {
 fixture_destroy :: proc(f:^Fixture) {
     core.table_destroy(&f.users);core.table_destroy(&f.seats);core.table_destroy(&f.drivables)
     core.table_destroy(&f.characters);core.table_destroy(&f.worlds);core.table_destroy(&f.remotes)
+    core.table_destroy(&f.paces)
     core.entities_destroy(&f.es)
     delete(f.requests.queue.items);delete(f.events.queue.items);delete(f.moves.queue.items)
     delete(f.actions.queue.items);delete(f.animations.match_plays.items);delete(f.log)
@@ -174,7 +178,7 @@ test_overlap :: proc(w:^Ability_World,hitbox:Ability_Hitbox,pose:mm.Transform,re
 
 @(private="file")
 world_of :: proc(f:^Fixture) -> Ability_World {
-    return {time=f.time,seats=core.read(&f.seats),drivables=core.read(&f.drivables),characters=core.read(&f.characters),worlds=core.read(&f.worlds),remotes=core.read(&f.remotes),moves=&f.moves,actions=&f.actions,animations=&f.animations,problems=&f.problems}
+    return {time=f.time,seats=core.read(&f.seats),drivables=core.read(&f.drivables),characters=core.read(&f.characters),worlds=core.read(&f.worlds),remotes=core.read(&f.remotes),paces=core.read(&f.paces),clock=core.CLOCK_DEFAULT,moves=&f.moves,actions=&f.actions,animations=&f.animations,problems=&f.problems}
 }
 
 @(private="file")
@@ -297,7 +301,7 @@ a_charged_dash_spends_charges_and_is_blocked_without_them :: proc(t:^testing.T) 
     u:=user(f,f.player)
     kit:=kit_sheet({&f.kit_set},u.kit)
     w:=world_of(f)
-    testing.expect_value(t,start_block(&w,f.time.tick,f.time.dt,f.player,&u,kit,nil,0,&f.sheets[CHARGE],ref(CHARGE)),Ability_Block.Condition)
+    testing.expect_value(t,start_block(&w,f.time.tick,f.time.dt,f.player,&u,kit,nil,{},&f.sheets[CHARGE],ref(CHARGE)),Ability_Block.Condition)
     f.down[1]=false
     step(f,seconds(10))
     f.down[1]=true
@@ -381,6 +385,9 @@ invalid_sheets_and_requests_are_problems_and_never_run :: proc(t:^testing.T) {
         {proc(a:^Ability,nan:f32) {a.windows[0].hitbox.effect.period=nan},"period"},
         {proc(a:^Ability,nan:f32) {a.windows[0].hitbox.effect.max_stacks=3},"stacks but has no tags"},
         {proc(a:^Ability,nan:f32) {a.windows[0].hitbox.effect.cue=SLASH},"lasts 0 seconds"},
+        {proc(a:^Ability,nan:f32) {a.input.after=-0.1},"input.after"},
+        {proc(a:^Ability,nan:f32) {a.input.wait=Ability_Wait(7)},"input.wait"},
+        {proc(a:^Ability,nan:f32) {a.windows[1].clock=Ability_Clock(5)},"clock"},
     }
     for c in cases {
         f:=new(Fixture)
@@ -394,6 +401,12 @@ invalid_sheets_and_requests_are_problems_and_never_run :: proc(t:^testing.T) {
         testing.expect(t,core.problem_find(&f.problems,f.player,"abilities.invalid")!=nil)
         fixture_destroy(f)
         free(f)
+    }
+    // A sheet no input fires is checked too, though it never runs by input.
+    {
+        quiet:=Ability{duration=1,input={on=.None,wait=.Running}}
+        text:=ability_check(&quiet,out[:])
+        testing.expectf(t,contains(text,"no input fires"),"%q",text)
     }
     f:=new(Fixture);defer free(f)
     fixture_make(f);defer fixture_destroy(f)
@@ -453,6 +466,136 @@ a_stable_tick_allocates_nothing :: proc(t:^testing.T) {
     }
     testing.expect_value(t,calls,0)
     testing.expect_value(t,logged(f,.Hit,f.player,SLASH_1),1)
+}
+
+// Has u an entry of the ability i in its buffer?
+@(private="file")
+buffered :: proc(u:Ability_User,i:int) -> bool {
+    for b in u.buffer {if b.ability==ref(i) {return true}}
+    return false
+}
+
+// Mantis-style input rules as data. The follow-up's release counts only from after seconds into
+// the opener, so the release of the opener's own press does not fire it; a release past that
+// waits for the opener's cancel window however far it is (wait running), while the kit's buffer
+// alone would have let it go; and a waiting input leaves with the run it waited for.
+@(test)
+an_input_counts_from_its_delay_and_waits_for_the_branch_of_the_running_ability :: proc(t:^testing.T) {
+    f:=new(Fixture);defer free(f)
+    fixture_make(f);defer fixture_destroy(f)
+    f.sheets[SLASH_2].input.after=0.3
+    f.sheets[SLASH_2].input.wait=.Running
+    started:=f.time.tick
+    f.down[0]=true
+    step(f)
+    testing.expect_value(t,user(f,f.player).ability,ref(SLASH_1))
+    // Let go at 0.1 s: before after, so not even buffered.
+    step(f,seconds(0.1)-1)
+    f.down[0]=false
+    step(f)
+    testing.expect(t,!buffered(user(f,f.player),SLASH_2))
+    // Pressed again and let go at 0.32 s: buffered, and kept past the kit's 0.2 s.
+    step(f,seconds(0.3)-seconds(0.1)-1)
+    f.down[0]=true
+    step(f,seconds(0.02))
+    f.down[0]=false
+    step(f)
+    testing.expect(t,buffered(user(f,f.player),SLASH_2))
+    step(f,seconds(0.25))
+    testing.expect(t,buffered(user(f,f.player),SLASH_2))
+    testing.expect_value(t,user(f,f.player).ability,ref(SLASH_1))
+    // It starts on the first tick of the opener's cancel window [0.6, 0.7).
+    for user(f,f.player).ability==ref(SLASH_1) && f.time.tick<started+u64(seconds(1)) {step(f)}
+    testing.expect_value(t,user(f,f.player).ability,ref(SLASH_2))
+    testing.expect_value(t,user(f,f.player).start,started+u64(seconds(0.6)))
+    testing.expect_value(t,logged(f,.Interrupted,f.player,SLASH_1),1)
+    // Again, but the opener is cancelled before its window: the waiting release leaves with it.
+    step(f,seconds(1.5))
+    f.down[0]=true
+    step(f)
+    testing.expect_value(t,user(f,f.player).ability,ref(SLASH_1))
+    step(f,seconds(0.32))
+    f.down[0]=false
+    step(f)
+    testing.expect(t,buffered(user(f,f.player),SLASH_2))
+    step(f,seconds(0.25))
+    ability_cancel(&f.requests,f.player)
+    step(f)
+    testing.expect(t,!buffered(user(f,f.player),SLASH_2))
+    step(f,seconds(0.5))
+    testing.expect_value(t,logged(f,.Started,f.player,SLASH_2),1)
+    testing.expect_value(t,f.problems.count,0)
+}
+
+// A window on the Own clock counts the user's own time (core.Own_Pace), as the clip it follows
+// plays: at half pace the charge's branch at 0.5 s opens after 1 s of the world, while its
+// duration keeps the world's clock. The dash let go early waits for that branch.
+@(test)
+a_window_on_the_own_clock_follows_the_pace_of_the_user :: proc(t:^testing.T) {
+    f:=new(Fixture);defer free(f)
+    fixture_make(f);defer fixture_destroy(f)
+    c:=&f.sheets[CHARGE]
+    c.hold,c.duration=false,2
+    c.windows[0]={from=0,to=2,statuses=status_bit(CHARGING)}
+    c.windows[1]={from=0.5,to=10,clock=.Own,cancel_into=tag_bit(DASH_ATTACK),cue=SLASH}
+    d:=&f.sheets[DASH_STRIKE]
+    d.requires=status_bit(CHARGING)
+    d.input.wait=.Running
+    core.add(&f.paces,f.player,core.Own_Pace{rate=0.5});core.table_settle(&f.paces,&f.es)
+    started:=f.time.tick
+    f.down[1]=true
+    step(f)
+    testing.expect_value(t,user(f,f.player).ability,ref(CHARGE))
+    step(f,seconds(0.1))
+    f.down[1]=false
+    step(f)
+    testing.expect(t,buffered(user(f,f.player),DASH_STRIKE))
+    // At 0.6 s of the world the charge has lived 0.3 s of its own: no branch yet.
+    step(f,seconds(0.6)-seconds(0.1)-2)
+    u:=user(f,f.player)
+    testing.expect_value(t,u.ability,ref(CHARGE))
+    testing.expect(t,abs(u.own-0.5*f32(f.time.tick-1-u.start))<1e-3)
+    // The branch opens at 0.5 s of its own: 60 ticks of the world at half pace.
+    for user(f,f.player).ability==ref(CHARGE) && f.time.tick<started+u64(seconds(3)) {step(f)}
+    testing.expect_value(t,user(f,f.player).ability,ref(DASH_STRIKE))
+    testing.expect_value(t,user(f,f.player).start,started+u64(seconds(1)))
+    begins:=0
+    for e in f.log {if e.kind==.Window_Begin && e.ability==ref(CHARGE) && e.window==1 {begins+=1}}
+    testing.expect_value(t,begins,1)
+    // Its windows closed with it, the open one on its own clock too.
+    testing.expect_value(t,logged(f,.Window_Begin,f.player,CHARGE),logged(f,.Window_End,f.player,CHARGE))
+    // Pressed and let go while stunned (the charge cannot start): the dash requires the charge's
+    // status, so nothing starts.
+    step(f,seconds(1))
+    ability_effect(&f.requests,f.player,{statuses=status_bit(STUNNED),seconds=0.5})
+    step(f)
+    f.down[1]=true
+    step(f,2)
+    f.down[1]=false
+    step(f,seconds(0.2))
+    testing.expect_value(t,user(f,f.player).ability,core.Record(Ability){})
+    testing.expect_value(t,logged(f,.Started,f.player,DASH_STRIKE),1)
+    step(f,seconds(0.5))
+    // Held through the whole charge: its next dashes at its end, in the charging status the
+    // charge had on its last tick.
+    started=f.time.tick
+    f.down[1]=true
+    step(f)
+    for user(f,f.player).ability==ref(CHARGE) && f.time.tick<started+u64(seconds(3)) {step(f)}
+    testing.expect_value(t,user(f,f.player).ability,ref(DASH_STRIKE))
+    testing.expect_value(t,user(f,f.player).start,started+u64(seconds(2)))
+    f.down[1]=false
+    step(f,seconds(1))
+    // A request waits as its input would (wait running): asked for early, it starts at the branch.
+    // Secondary stays held, so only the request asks for the dash.
+    started=f.time.tick
+    f.down[1]=true
+    step(f,seconds(0.1))
+    ability_use(&f.requests,f.player,ref(DASH_STRIKE))
+    for user(f,f.player).ability==ref(CHARGE) && f.time.tick<started+u64(seconds(3)) {step(f)}
+    testing.expect_value(t,user(f,f.player).ability,ref(DASH_STRIKE))
+    testing.expect_value(t,user(f,f.player).start,started+u64(seconds(1)))
+    testing.expect_value(t,f.problems.count,0)
 }
 
 @(private="file")

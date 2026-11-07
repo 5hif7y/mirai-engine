@@ -68,8 +68,8 @@ same with the weights of its mesh and its animation.
 - Influences and deltas cover the vertices of all the levels of the mesh: the renderer deforms each
   level and the GPU keeps choosing the one it draws. The deltas go before the skin.
 - A mesh with targets and without skin is a one-joint pose.
-- The drawn weights interpolate those of the last two ticks like the pose; until the entity has its
-  own, those of the mesh. Only those that changed go to the renderer, with the palette or, if the
+- The drawn weights interpolate those of the last two ticks like the pose (a mesh just shown takes
+  those of the tick); until the entity has its own, those of the mesh. Only those that changed go to the renderer, with the palette or, if the
   budget skips it, over the one the renderer has.
 
 ## Verification

@@ -54,9 +54,14 @@ and the tick it started, and derives everything else from the tick against the s
 - **No state machine and no transition graph.** What may follow an ability is decided by its
   open cancel windows and by the kit's interrupts against the tags of the candidate; among valid
   candidates the highest priority wins. `next` only adds one candidate when an ability completes.
-- **The state is the start tick.** Phase, open windows, granted statuses and modifiers are
-  derived each tick from `tick - start` against the immutable sheet: ending or rolling back an
-  ability leaves nothing behind. One ability runs per user.
+- **The state is the start tick** (and `own`, the user's own time since then, for windows on the
+  `own` clock). Phase, open windows, granted statuses and modifiers are derived each tick from
+  them against the immutable sheet: ending or rolling back an ability leaves nothing behind. One
+  ability runs per user.
+- **Combo input rules are data.** When a follow-up's input counts (`input.after`) and whether it
+  waits for the branch of the running ability (`input.wait` `running`) are fields of its sheet; a
+  branch that follows a clip in slow motion is a window on the `own` clock. The game does not
+  watch inputs or integrate clip time to ask for the next technique.
 - **Sheets are game data outside the `World`.** Play, copies and rollback copy only the
   `Ability_User` rows and the queues; times are seconds in data and ticks at run time.
 - **One writer.** `abilities_step` is the only writer of `Ability_User`; the game, other plugins
@@ -71,6 +76,8 @@ and the tick it started, and derives everything else from the tick against the s
   does not import audio or effects.
 - Pace and gravity changes during an ability (slow motion while charging, low gravity) are not
   part of the plugin: the game sets `core.Own_Pace` from events, and gravity belongs to locomotion.
+  The plugin reads the pace for `own` windows; it does not read animation state (the end that
+  decides may not sample animation).
 - A sheet, kit, attribute entry or effect that is not valid is a problem of its user that says
   what to fix (`abilities.invalid`, `abilities.kit`, `abilities.attributes`, `abilities.effect`)
   and never runs; `abilities.check` returns the same text.
@@ -80,7 +87,7 @@ and the tick it started, and derives everything else from the tick against the s
 - Types: `mirai check plugins/abilities/runtime` and `plugins/abilities/editor` (with
   `-collection:plugins=plugins`).
 - Tests: `mirai test plugins/abilities/runtime` (`abilities_test.odin`: the blade kit combo,
-  the charged dash with charges, a copy halfway that runs the same future, a cancel that leaves
+  the input delay and the wait for the branch, a window on the own clock, the charged dash with charges, a copy halfway that runs the same future, a cancel that leaves
   nothing, replicas, lasting effects with stacks, cleanse and immunity, invalid sheets and
   requests, and a stable tick without allocations).
 - Methods: `mirai generate demo`, `mirai build editor demo --dev` and, in a session on a copy,

@@ -284,15 +284,16 @@ program_resolve :: proc(state:^Playing,animation:Animation,app:^host.App,blends:
     }
     output=&runtime.output
     revision:u64
-    reset:bool
+    reset,swapped:bool
     source:base.Asset_Id
     reused:=false;compiled_stamp:u64
     if kind==MATCH_KIND {
         content:=match_content(graphs,app,animation.asset);if content==nil {return nil,true,false}
         source=animation.library if animation.library!={} else content.profile.info.animation
         revision=content.revision;reset=runtime.asset!=animation.asset || runtime.revision!=revision || runtime.library!=source || !runtime.ready
+        swapped=reset && runtime.ready && runtime.asset==animation.asset && runtime.revision==revision
         if reset && !program_output_prepare(output,1,1) {runtime.error=.Out_Of_Memory;return nil,true,false}
-        if reset {runtime.match=MATCH_PLAYING_DEFAULT}
+        if reset {runtime.match=match_swapped(runtime.match) if swapped else MATCH_PLAYING_DEFAULT}
         ok=match_output(state,output,content,prepared if prepared!=nil else host.content_animation(app,source),source,dt,goals,plays,facing,app,events,playback,problems)
     } else {
         content:=graph_content(graphs,app,animation.asset);if content==nil {return nil,true,false}
@@ -315,7 +316,9 @@ program_resolve :: proc(state:^Playing,animation:Animation,app:^host.App,blends:
     }
     if reset {
         mem.zero_slice(runtime.players[:]);mem.zero_slice(runtime.leader_keys[:])
-        runtime.fade=0;runtime.epoch=0;runtime.capture=false;runtime.inertia={}
+        runtime.epoch=0
+        // A swapped library enters its clip through the capture match_output asked for.
+        if !swapped {runtime.fade=0;runtime.capture=false;runtime.inertia={}}
     }
     if !ok {return nil,true,false}
     output.asset=source

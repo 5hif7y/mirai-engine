@@ -90,10 +90,10 @@ material_reset_button :: proc(s:^Session,p:Material_Color) {
     defer edit_close(s,opened)
     if !p.tint {
         next:=a.override
-        at:=override_find(&next,p.slot,p.name)
-        source:=override_find(&inherited,p.slot,p.name)
+        at:=erender.material_override_find(&next,p.slot,p.name)
+        source:=erender.material_override_find(&inherited,p.slot,p.name)
         if source>=0 {override_store(s,p.entity,p.slot,p.name,inherited.values[source])} else if at>=0 {
-            override_value_drop(&next,p.slot,p.name)
+            erender.material_override_value_drop(&next,p.slot,p.name)
             override_put(s,p.entity,next,"Revert material value")
         }
     }

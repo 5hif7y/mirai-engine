@@ -37,6 +37,7 @@ Error_Code :: enum u8 {
     Limit,       // more than an asset can hold
     Tool,        // an external tool failed or is missing
     Write,       // an asset could not be written
+    Outside,     // an earlier output of the source lies outside the folder and the import may not write it there (Earlier_Outside.Refuse)
 }
 
 // message lives in context.temp_allocator of the caller.
@@ -55,6 +56,7 @@ Import_Options :: struct {
     // model, the texture of an image or the sound of a sound file. Zero finds
     // it by the source (earlier.odin).
     into:base.Asset_Id,
+    outside:Earlier_Outside, // what becomes of an earlier output of the source that lies outside the folder written to
     rebuild:bool,         // writes every asset, also one whose file already is the one the import would write
     texture_cache:string, // folder of textures built before, kept by image and settings (textures.cache_read); "": none
     // A texture is built Fast unless the texture cache keeps it as Final
@@ -69,6 +71,15 @@ Import_Options :: struct {
     // job system, or the job that imports), which runs its builds in
     // parallel on that system, and records zones in its profile.
     worker:jobs.Worker_Ref,
+}
+
+// What an import does with an output an earlier import of its source wrote
+// outside the folder this one writes to (moved there, or written there
+// because the search reached it through root).
+Earlier_Outside :: enum u8 {
+    In_Place, // writes it again where it is, with its id: what the editor does
+    Refuse,   // fails before writing anything, naming the file (unless into names the import): what mirai import does by default
+    Copy,     // looks for earlier imports only under the folder: what is found elsewhere is left alone, and a new import gets new ids
 }
 
 // A zone of the import that base.profile_end ends.

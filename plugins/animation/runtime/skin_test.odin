@@ -114,8 +114,11 @@ skeletal_instances_use_independent_dense_poses_and_eighth_influence :: proc(t:^t
         testing.expect(t,rhi.buffer_read_slice(device,renderer.scene.vertex_buffer,u64(record.posed_word)*4,result[:]))
         for v,j in vertices {testing.expect_value(t,result[j].position,v.position+[3]f32{0,f32(i)+0.5,0})}
     }
+    // A tick that changes the poses, which the frames between it and the next interpolate.
+    playback.frame+=1
     for root,i in roots {
         pose:=constraint_playing(&playback,root)
+        pose.changed=playback.frame
         pose.local[0].rotation=mm.quat_axis_angle({0,0,1},0.3)
         pose.local[0].scale={1.3,0.8,-1.1}
         pose.previous[0]=pose.local[0]
@@ -146,6 +149,24 @@ skeletal_instances_use_independent_dense_poses_and_eighth_influence :: proc(t:^t
     tick(&app,&cache,&state,&playback,&meshes,&skins,&parents,&worlds,&tints,&overrides,&hidden,&elsewhere,&highlights,&offsets,&problems,{playing=true},{alpha=0.5})
     testing.expect_value(t,state.instances.values[0].palette[0],gpu.Mat4{})
     testing.expect(t,state.instances.values[1].palette[0]!=gpu.Mat4{})
+    testing.expect_value(t,problems.count,0)
+    // Shown again in a tick whose pose changed, it is drawn with that pose even at alpha 0: the one
+    // before is of a tick it was hidden in, as the rest pose of a weapon whose action starts as it shows.
+    core.add(&hidden,draws[0],{});core.table_settle(&hidden,&entities)
+    tick(&app,&cache,&state,&playback,&meshes,&skins,&parents,&worlds,&tints,&overrides,&hidden,&elsewhere,&highlights,&offsets,&problems,{playing=true},{alpha=0.5})
+    testing.expect(t,core.entity_map_get(&state.instances,draws[0])==nil)
+    shown:=constraint_playing(&playback,roots[0]);shown.previous[2]=shown.local[2];shown.local[2].position.y+=1;shown.changed=playback.frame
+    core.remove(&hidden,draws[0]);core.table_settle(&hidden,&entities)
+    for alpha in ([2]f32{0,0.5}) {
+        tick(&app,&cache,&state,&playback,&meshes,&skins,&parents,&worlds,&tints,&overrides,&hidden,&elsewhere,&highlights,&offsets,&problems,{playing=true},{alpha=alpha})
+        instance:=core.entity_map_get(&state.instances,draws[0])
+        if !testing.expect(t,instance!=nil && instance.copied) {return}
+        gpu.scene_set(renderer,host.app_instances(&app),nil,{},gpu.Environment{sky={1,1,1}})
+        if !testing.expect(t,gpu.renderer_frame(renderer,{camera={position={1,2,8},forward={0,-1,-8},up={0,1,0},fov_y=50,near=0.1,far=100}}),renderer.error) {return}
+        result:[3]gpu.Gpu_Posed_Vertex
+        testing.expect(t,rhi.buffer_read_slice(device,renderer.scene.vertex_buffer,u64(renderer.scene.meshes[instance.mesh].posed_word)*4,result[:]))
+        for vertex,j in vertices {testing.expectf(t,linalg.length(result[j].position-(vertex.position+[3]f32{0,2.5,0}))<1e-5,"alpha %v: %v",alpha,result[j].position)}
+    }
     testing.expect_value(t,problems.count,0)
     core.remove(&meshes,draws[0]);core.table_settle(&meshes,&entities)
     tick(&app,&cache,&state,&playback,&meshes,&skins,&parents,&worlds,&tints,&overrides,&hidden,&elsewhere,&highlights,&offsets,&problems)

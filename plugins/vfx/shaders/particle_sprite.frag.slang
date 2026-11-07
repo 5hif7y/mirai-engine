@@ -1,6 +1,7 @@
 #include "native.slang"
 //! per surface program
-// The color of a sprite: its material, the color of the particle and the
+// The color of a sprite, and of a mesh particle whose material blends
+// (particle_mesh_blend.vert): its material, the color of the particle and the
 // light it receives, faded where it meets the scene behind it or the camera.
 // A material with a Surface program runs it at the point, facing the camera,
 // with uv0 in this frame of the flipbook, uv1 in the next, the color of the
@@ -79,10 +80,13 @@ Stage_Output main(Stage_Input input, float4 pixel_position : SV_Position) {
         alpha = values.alpha;
         tint = float4(1.0);
     } else {
-        // Without a texture a sprite is a puff, and a ribbon fades to its edges.
+        // Without a texture a sprite is a puff, a ribbon fades to its edges and a mesh is whole.
         float2 tile = frac(input.in_uv.xy * float2(e.flipbook.xy)) * 2.0 - 1.0;
-        float4 texel = float4(1.0, 1.0, 1.0, e.kinds.y == PARTICLE_RENDER_RIBBON ? 1.0 - abs(tile.x) : particle_puff(tile, input.in_seed));
-        if (material_has(m.textures[MATERIAL_MAP_BASE_COLOR])) {
+        float4 texel = float4(1.0, 1.0, 1.0, e.kinds.y == PARTICLE_RENDER_RIBBON ? 1.0 - abs(tile.x) : e.kinds.y == PARTICLE_RENDER_MESH ? 1.0 : particle_puff(tile, input.in_seed));
+        if (material_has(m.textures[MATERIAL_MAP_BASE_COLOR]) && e.kinds.y == PARTICLE_RENDER_MESH) {
+            // A mesh reads its texture through the map of its material, at the uv of its vertices.
+            texel = material_texel(m.textures[MATERIAL_MAP_BASE_COLOR], material_map_uv(m, MATERIAL_MAP_BASE_COLOR, input.in_uv.xy, input.in_uv.zw), frame.texturing.x);
+        } else if (material_has(m.textures[MATERIAL_MAP_BASE_COLOR])) {
             texel = lerp(material_texel(m.textures[MATERIAL_MAP_BASE_COLOR], input.in_uv.xy, frame.texturing.x), material_texel(m.textures[MATERIAL_MAP_BASE_COLOR], input.in_uv.zw, frame.texturing.x), input.in_blend_depth.x);
         }
         base_color = m.base_color * texel.rgb;

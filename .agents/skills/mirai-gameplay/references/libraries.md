@@ -327,7 +327,10 @@ Components that describe the scene and `render_sync`, which carries it to the re
   `coat_roughness`, `coat_color`, `coat_ior`, `fuzz`, `fuzz_color`, `fuzz_roughness`, `anisotropy`,
   `anisotropy_rotation`, `unlit`, `emission_mode`) or of a non-texture parameter of the program;
   textures by the name of a map of `MATERIAL_MAP_NAMES` or of a texture of the program; and, with
-  `own_overlays`, its overlays instead of those of the first slot's material.
+  `own_overlays`, its overlays instead of those of the first slot's material. It is `shared`:
+  several game functions animate values of one entity, each setting and dropping only its own names
+  with `material_override_value_set` and `material_override_value_drop` instead of writing the
+  whole override over what another gave.
 - **`Highlight`**: the editor's selection outline; it replaces the entity's `Outline`.
 - **`Outline`**: the game's outline, with one of the 15 styles of `Outline_Styles`, a project
   setting (the same in all its scenes) with the color, the fill and what is seen behind another

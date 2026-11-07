@@ -1,6 +1,9 @@
 package editor
 
 import "core:log"
+import "core:os"
+import "core:strings"
+import build "mirai:cook/build"
 import "mirai:core"
 import scene "mirai:engine/scene"
 import "mirai:host"
@@ -25,6 +28,12 @@ Library_Reload :: enum u8 {
 @(private)
 library_reload :: proc(s:^Session) -> Library_Reload {
     if library_busy(s) {return .Wait}
+    // The engine was built again after this editor started (build.engine_unlock): the library
+    // was compiled against the new one, which only a new editor runs.
+    if engine_rebuilt(s) {
+        log.infof("the engine was built again since the editor started: it restarts on the new one")
+        return .Restart
+    }
     tool_preview_cancel(s)
     path:=project.project_library(s.project_root,"editor")
     s.library_generation+=1
@@ -49,6 +58,23 @@ library_reload :: proc(s:^Session) -> Library_Reload {
     log.infof("code reloaded from %s",path)
     notify(s,"Code reloaded")
     return .Reloaded
+}
+
+// The folder of the binaries this editor runs, with forward slashes.
+engine_folder_here :: proc() -> string {
+    folder,_:=os.get_executable_directory(context.temp_allocator)
+    folder,_=strings.replace_all(folder,"\\","/",context.temp_allocator)
+    return folder
+}
+
+// The stamp beside the binaries this editor runs, as it is now.
+engine_stamp_here :: proc(allocator:=context.allocator) -> string {
+    return build.engine_stamp_of(engine_folder_here(),allocator)
+}
+
+// Whether the binaries beside this editor are no longer those it started from.
+engine_rebuilt :: proc(s:^Session) -> bool {
+    return s.engine_stamp!="" && engine_stamp_here(context.temp_allocator)!=s.engine_stamp
 }
 
 // What keeps the worlds from migrating now: a call of the API that runs

@@ -325,6 +325,19 @@ match_searched_candidates :: proc "contextless" (db:^lib.Match_Database,searched
 }
 MATCH_PLAYING_DEFAULT :: Match_Playing{range=-1,rate=1,since=max(f32)}
 
+// The matching of a rig whose Animation.library swaps the clips of its .match (a weapon's set): it
+// keeps the body it follows, its root lag and its mode, and the name of the clip it played, so the
+// next tick searches the new clips at once and enters the one it picks through an inertial
+// transition from the pose of the old one, as a jump does, instead of starting over from rest.
+@(private)
+match_swapped :: proc "contextless" (kept:Match_Playing) -> Match_Playing {
+    m:=MATCH_PLAYING_DEFAULT
+    m.clip,m.mode,m.loop=kept.clip,kept.mode,kept.loop
+    m.trail,m.body,m.lag,m.lag_velocity,m.told=kept.trail,kept.body,kept.lag,kept.lag_velocity,kept.told
+    m.searches,m.jumps=kept.searches,kept.jumps
+    return m
+}
+
 @(private)
 match_database_key :: proc(library:^host.Content_Animation,state:^Playing,source:base.Asset_Id) -> [7]u64 {
     shape:=state.skeleton
@@ -648,6 +661,9 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
             }
         }
     }
+    // After a swap of library with nothing of its mode to search, the clip it played may not be in
+    // the new one: it starts over from the first.
+    if m.range<0 && m.phase!=.Play && m.clip!=0 && lib.clip_find(&library.lib,m.clip)==0 {m.clip=0}
     if m.clip==0 {
         if len(content.profile.clips)==0 {return false}
         first:=content.profile.clips[0]

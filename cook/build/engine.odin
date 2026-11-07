@@ -289,6 +289,10 @@ engine_build :: proc(desc:Engine_Desc,allocator:=context.allocator) -> (result:E
         result.status=.Up_To_Date
         return
     }
+    // What runs these binaries goes on with them; the build writes in their place (engine_unlock.odin).
+    if file,unlocked:=engine_unlock(paths.folder);!unlocked {
+        return engine_fail(.Write_Failed,"binaries of the engine",fmt.tprintf("%s runs and could not be moved aside: close what runs it",file))
+    }
     cache:=engine_cache_entry(root,plan.key,mode)
     if !desc.force && engine_cache_restore(cache,paths) {
         result.status,result.restored=.Built,true

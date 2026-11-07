@@ -76,10 +76,18 @@ Ability_Trigger :: enum u8 {
     Down,     // every tick it is held
 }
 
+// How long an input that fired waits for a moment its ability can start.
+Ability_Wait :: enum u8 {
+    Buffer,  // the buffer seconds of the kit
+    Running, // also while the ability that ran when it fired goes on: it starts at the cancel window of that one, however far (a combo's next technique queued before the branch)
+}
+
 Ability_Input :: struct {
     action:inp.Action, // of the seat that drives the entity
     on:Ability_Trigger,
     hold:f32 `mirai:"min=0,unit=s"`,
+    after:f32 `mirai:"min=0,unit=s"`, // while another ability runs, the input counts only from this many seconds into it; earlier it is ignored, so the release of the press that started that one does not fire this one
+    wait:Ability_Wait,
 }
 
 Ability_Condition :: struct {
@@ -136,10 +144,17 @@ Ability_Move :: struct {
     mix:phys.Move_Mix,
 }
 
+// What the seconds of a window count.
+Ability_Clock :: enum u8 {
+    World, // the fixed step of the world
+    Own,   // the user's own time (core.Own_Pace), as its animation counts it: a window that follows a clip played in slow motion
+}
+
 // A span of the timeline of an ability, in seconds from its start; it is open while
 // from <= time < to. A window with to at 0 is not used.
 Ability_Window :: struct {
     from,to:f32 `mirai:"min=0,unit=s"`,
+    clock:Ability_Clock, // Own: from and to are seconds of the user's own time, and the window may close after the duration (the ability's end closes it)
     cancel_into:Ability_Tags,   // abilities with one of these tags may start over this one
     statuses:Ability_Statuses,  // the user is in them
     modify:Ability_Modifier,    // of the user
@@ -164,7 +179,7 @@ Ability :: struct {
     action:[ABILITY_NAME]u8 `mirai:"text"`, // an action of the user's Animation (a layer over locomotion)
     clip:[ABILITY_NAME]u8 `mirai:"text"`,   // a clip of its .match played over the whole body (match_play)
     windows:[ABILITY_WINDOWS]Ability_Window,
-    next:core.Record(Ability), // asked for when it completes
+    next:core.Record(Ability), // asked for when it completes, in the statuses its windows gave on its last tick
 }
 ABILITY_DEFAULT :: Ability{input={on=.Pressed},duration=0.5}
 
@@ -184,7 +199,8 @@ Ability_Attribute_Entry :: struct {
 }
 
 Ability_Hit :: struct {target:core.Entity,window:u8}
-Ability_Buffered :: struct {ability:core.Record(Ability),tick:u64}
+// An input that waits; running: also while the ability that started at tick run goes on.
+Ability_Buffered :: struct {ability:core.Record(Ability),tick:u64,run:u64,running:bool}
 Ability_Cooldown :: struct {ability:core.Record(Ability),until:u64}
 // An effect that lasts; its modifier and its amount count once per stack.
 Ability_Timer :: struct {
@@ -205,6 +221,7 @@ Ability_User :: struct {
     attributes:[ATTRIBUTE_ENTRIES]Ability_Attribute_Entry,
     ability:core.Record(Ability) `mirai:"readonly"`, // the one running; none: idle
     start:u64 `mirai:"readonly,hidden"`,             // tick it started at
+    own:f32 `mirai:"readonly,hidden"`,               // ticks of the user's own time (core.Own_Pace) since it started
     hits:[USER_HITS]Ability_Hit `mirai:"readonly,hidden"`, // of the one running
     hit_count:u8 `mirai:"readonly,hidden"`,
     buffer:[USER_BUFFER]Ability_Buffered `mirai:"readonly,hidden"`,
@@ -256,8 +273,8 @@ Ability_Event :: struct {
 @(storage,events)
 Ability_Events :: struct {queue:core.Queue(Ability_Event)}
 
-// Asks entity to start ability as if its input fired: it waits the buffer of its kit for a
-// moment it is valid. False when the queue is full or the request names nothing.
+// Asks entity to start ability as if its input fired: it waits for a moment it is valid as its
+// input.wait says (the kit's buffer, or also while the running ability goes on). False when the queue is full or the request names nothing.
 ability_use :: proc(requests:^Ability_Requests,entity:core.Entity,ability:core.Record(Ability)) -> bool {
     if ability=={} {return false}
     return request_push(requests,{kind=.Use,entity=entity,ability=ability})
@@ -296,6 +313,10 @@ ability_value :: proc "contextless" (user:Ability_User,attribute:Ability_Attribu
     }
     return
 }
+
+// Where a running ability is in its timeline: ticks of the world and of the user's own time since
+// it started.
+Ability_Time :: struct {local:i64,own:f32}
 
 ability_has :: #force_inline proc "contextless" (user:Ability_User,status:Ability_Status) -> bool {
     return u64(status)<64 && user.statuses&Ability_Statuses(u64(1)<<u64(status))!=0

@@ -129,8 +129,10 @@ automatic plugin `animation_physics` feeds the locomotion of each `Character`.
 - The project's `.anim` keeps exact keys, which the editor edits; the editor and the game play
   them compressed into samples, and a shipped game carries only those samples
   ([storage](../mirai-std/references/anim-storage.md)). A compression is kept in the project
-  cache and a first one runs in a job: until it ends the entity does not animate (a rig holds its
-  rest pose) and nothing is reported ([content](../mirai-core/references/host.md#content)).
+  cache and a first one runs in a job; a scene load and Play wait for those of the `.anim` their
+  world can play, so only an entity outside them (an edit, a preview) does not animate meanwhile
+  (a rig holds its rest pose) and nothing is reported
+  ([content](../mirai-core/references/host.md#content)).
 - Skinning runs on the GPU; morphs are deformed in the same pass.
 - What the runtime cannot do is a problem of the entity (`core.report` with an `animation.*` code
   and how to fix it), never a counter ([problems](references/animation.md#problems)). The functions

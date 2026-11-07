@@ -9,6 +9,7 @@ import "core:time"
 import "mirai:asset"
 import "mirai:core"
 import "mirai:host"
+import anim "mirai:std/anim"
 import "mirai:std/base"
 import "mirai:std/jobs"
 import mm "mirai:std/math"
@@ -117,6 +118,7 @@ loading_open :: proc(t:^testing.T,p:^Loading_Project,name:string,threads:int) ->
 
 @(private)
 loading_close :: proc(p:^Loading_Project) {
+    host.app_content_destroy(&p.app)
     host.app_world_free(&p.app,p.world)
     host.app_assets_releases_stop(&p.app)
     if jobs.worker_count(&p.app.jobs)>0 {jobs.system_destroy(&p.app.jobs)}
@@ -243,6 +245,44 @@ a_load_reads_in_jobs_and_a_large_asset_goes_in_a_frame_alone :: proc(t:^testing.
     _,error=load_end(job,host.app_world_ref(&p.app,p.world))
     testing.expect_value(t,error,Error.None)
     testing.expect_value(t,core.count(core.read(&p.world.models)),2)
+}
+
+// A load ends once the .anim its World can play are loaded, also one it names through a prefab
+// (a spawner's): while the first load of one compresses in a job, it waits, frame after frame,
+// and a load to its end waits for the compression. Nothing it plays holds a rest pose meanwhile.
+@(test)
+a_load_waits_for_the_animations_its_world_can_play :: proc(t:^testing.T) {
+    p:Loading_Project
+    if !loading_open(t,&p,"animations",2) {return}
+    defer loading_close(&p)
+    p.app.animation_cache=""
+    CLIPS :: base.Asset_Id{0xa111,1}
+    PREFAB :: base.Asset_Id{0xa111,2}
+    LEVEL :: base.Asset_Id{0xa111,3}
+    keys:[31]anim.Keyframe
+    for &key,k in keys {key={time=f32(k)/30,value={0,f32(k)*.01,0,0}}}
+    tracks:=[1]asset.Animation_Track_Desc{{target="hips",property=.Position,keys=keys[:]}}
+    clips:=[1]asset.Animation_Clip_Desc{{name="walk",tracks=tracks[:]}}
+    testing.expect_value(t,asset.animation_save(fmt.tprintf("%s/walk.anim",p.folder),&p.types,{id=CLIPS,clips=clips[:]}),asset.Error.None)
+    loading_scene(t,&p,PREFAB,{CLIPS},kind=asset.KIND_PREFAB)
+    loading_scene(t,&p,LEVEL,{PREFAB})
+    host.assets_scan(&p.assets)
+
+    job,error:=load_begin(&p.app,LEVEL)
+    if !testing.expect_value(t,error,Error.None) {return}
+    defer load_free(job)
+    for job.phase==.Reading {
+        if !testing.expect(t,!load_step(job),"it waits for the .anim") {return}
+        thread.yield()
+    }
+    if !testing.expect(t,len(job.animations)==1 && job.animations[0]==CLIPS,"the .anim of the prefab it names") {return}
+    // A compression a job ended is taken at the start of a frame, which these steps never begin.
+    for _ in 0..<4 {
+        testing.expect(t,host.content_animation_pending(&p.app,CLIPS))
+        if !testing.expect(t,!load_step(job),"it waits while the .anim compresses") {return}
+    }
+    testing.expect(t,load_step(job,all=true) && job.error==.None)
+    testing.expect(t,host.content_animation(&p.app,CLIPS)!=nil && !host.content_animation_pending(&p.app,CLIPS),"loaded when the load ends")
 }
 
 // Three loads at once share the bytes of every frame: each takes its part in

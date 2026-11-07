@@ -128,6 +128,7 @@ Options :: struct {
     restore:string,  // a scene file the restart left: loaded instead of scene, which stays the path of the document
     documents:string,
     gpu_lost:string, // what stopped the GPU of the editor whose restart this is
+    built:bool,      // a Build of the editor whose restart this is succeeded: its library is the one loaded
     view:string,     // the camera: "x,y,z,yaw,pitch,distance"
     select:string,   // Ids of the entities selected, in hexadecimal, separated by commas
     dirty:bool,      // the restored scene had unsaved changes
@@ -182,6 +183,7 @@ Session :: struct {
     requests:Requests,
     project_root:string, // absolute, with forward slashes
     engine_root:string,  // empty when unknown: Build cannot run
+    program:string,      // the executable it started from, as named then, with forward slashes: a build that moves the running binaries aside (build.engine_unlock) leaves the new ones there
     engine_stamp:string, // of the binaries it started from (build.engine_stamp_of): a build of the engine afterwards changes the one beside them
     assets_root:string,
     has_project:bool,    // the folder has a project.mirai
@@ -434,7 +436,9 @@ open :: proc(info:^core.World_Info,args:[]string) -> (s:^Session,code:int) {
     }
     s.project_root=strings.clone(root)
     s.engine_root=strings.clone(engine)
-    s.engine_stamp=engine_stamp_here()
+    program,_:=os.get_executable_path(context.temp_allocator)
+    s.program,_=strings.replace_all(program,"\\","/")
+    s.engine_stamp=engine_stamp_here(s)
     s.assets_root=strings.clone(assets)
     s.has_project=has_project
     if has_project {s.build.sources=code_fingerprint(root)}
@@ -442,6 +446,8 @@ open :: proc(info:^core.World_Info,args:[]string) -> (s:^Session,code:int) {
     s.frames=options.frames
     s.capture=strings.clone(options.capture)
     s.gpu_lost_before=strings.clone(options.gpu_lost)
+    // build.status of the editor that restarted on a Build says it ended, as the one before would have.
+    if options.built {s.build.phase=.Built}
     for arg in options_passed(args) {append(&s.args,strings.clone(arg))}
     preferences_open(s,options)
     events_open(s)
@@ -761,7 +767,7 @@ requests_run :: proc(s:^Session) {
     if .Asset_Discard in requests {asset_document_close_now(s,s.asset_request)}
     asset_documents_prune(s)
     if .Quit_Check in requests {documents_quit_next(s)}
-    if .Restart in requests {restart(s)}
+    if .Restart in requests {restart(s,{"--built"})}
     if .Quit in requests {s.quit=true}
 }
 
@@ -994,8 +1000,8 @@ quit_request :: proc(s:^Session) {
 // for the new one alone. False when this one goes on.
 @(private)
 restart :: proc(s:^Session,extra:[]string=nil) -> bool {
-    exe,exe_error:=os.get_executable_path(context.temp_allocator)
-    if exe_error!=nil {
+    exe:=s.program
+    if exe=="" {
         notify(s,"The editor program could not be found")
         return false
     }
@@ -1015,11 +1021,13 @@ restart :: proc(s:^Session,extra:[]string=nil) -> bool {
     append(&command,exe,"--project",s.project_root,"--documents",file)
     for arg in s.args {append(&command,arg)}
     append(&command,..extra)
-    if _,error:=subprocess.start({command=command[:],stdin=os.stdin,stdout=os.stdout,stderr=os.stderr});error!=nil {
+    process,error:=subprocess.start({command=command[:],stdin=os.stdin,stdout=os.stdout,stderr=os.stderr})
+    if error!=nil {
         log.errorf("%s could not be started: %v",exe,error)
         notify(s,"The built editor could not be started")
         return false
     }
+    session_record_follow(s,process.pid)
     log.infof("restarting with %s",exe)
     s.quit=true
     return true
@@ -1132,10 +1140,10 @@ session_destroy :: proc(s:^Session) {
     s.copied=nil
     console_destroy(s.console)
     settings_engine_free(s)
-    delete(s.project_root);delete(s.engine_root);delete(s.engine_stamp);delete(s.assets_root);delete(s.capture);delete(s.gpu_lost_before)
+    delete(s.project_root);delete(s.engine_root);delete(s.program);delete(s.engine_stamp);delete(s.assets_root);delete(s.capture);delete(s.gpu_lost_before)
     for arg in s.args {delete(arg)}
     delete(s.args)
-    s.project_root,s.engine_root,s.assets_root,s.capture,s.gpu_lost_before,s.args="","","","","",{}
+    s.project_root,s.engine_root,s.program,s.assets_root,s.capture,s.gpu_lost_before,s.args="","","","","","",{}
 }
 
 @(private)
@@ -1159,6 +1167,7 @@ options_read :: proc(args:[]string) -> (o:Options,ok:bool) {
         case "--restore":    o.restore=value(args,&i) or_return
         case "--documents":  o.documents=value(args,&i) or_return
         case "--gpu-lost":   o.gpu_lost=value(args,&i) or_return
+        case "--built":      o.built=true
         case "--view":       o.view=value(args,&i) or_return
         case "--select":     o.select=value(args,&i) or_return
         case "--dirty":      o.dirty=true

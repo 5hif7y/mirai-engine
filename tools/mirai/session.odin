@@ -16,15 +16,8 @@ import "mirai:std/subprocess"
 
 SESSION_USAGE :: "session start|restart|stop|status|sync [project] [paths of sync] [--dev|--release] [--no-build] [--copy] [--discard] [--orphans] [--timeout S] [editor arguments]"
 
-// <proyecto>/.mirai/session.json: the editor mirai session opened last in the
-// project, with the mode of its binaries and its arguments, which restart
-// repeats. An editor that it and the port file name was opened by mirai session.
-SESSION_FILE :: "session.json"
-Session_Record :: struct {
-    pid:int,
-    mode:string, // "dev" or "release"
-    args:[]string,
-}
+SESSION_FILE :: api.SESSION_FILE
+Session_Record :: api.Session_Record
 
 // mirai session: an editor of a project, headless and in manual mode, that
 // stays open between commands for mirai rpc, capture and mcp to drive.

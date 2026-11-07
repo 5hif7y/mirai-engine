@@ -233,7 +233,8 @@ rpc_print :: proc(result:string,select:[]Json_Path) -> int {
 
 // Calls every request.every_ms until the field of the condition meets it,
 // for at most --timeout in all, and prints the result that met it. An editor
-// that does not answer is waited for: Build restarts it.
+// that does not answer, or that ends while it answers, is waited for: Build
+// restarts it, and the call is made again anyway.
 @(private="file")
 rpc_wait :: proc(connection:Connection,request:Rpc_Request,params:string) -> int {
     start:=time.tick_now()
@@ -255,7 +256,7 @@ rpc_wait :: proc(connection:Connection,request:Rpc_Request,params:string) -> int
             if mismatch!="" {return rpc_fail({api.INVALID_PARAMS,fmt.tprintf("--wait-until %s: %s",request.until.text,mismatch),""})}
             if met {return rpc_print(result,request.select[:])}
             last,last_error=value,{}
-        case err.code==api.UNREACHABLE || err.code==api.TIMEOUT:
+        case err.code==api.UNREACHABLE || err.code==api.TIMEOUT || err.code==api.CLOSED:
             last_error=err
         case:
             return rpc_fail(rpc_hint(connection,request.method,err))

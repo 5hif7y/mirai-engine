@@ -410,8 +410,8 @@ projects_poll :: proc(s:^Session) {
 // Starts the editor on the project built. False when it could not.
 projects_start :: proc(s:^Session) -> bool {
     p:=s.projects
-    exe,exe_error:=os.get_executable_path(context.temp_allocator)
-    if exe_error!=nil {
+    exe:=s.program
+    if exe=="" {
         notify(s,"The editor program could not be found")
         return false
     }

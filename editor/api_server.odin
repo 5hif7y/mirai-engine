@@ -142,7 +142,7 @@ api_port_file_path :: proc(s:^Session) -> string {
 @(private)
 api_port_file_write :: proc(s:^Session,port:int) {
     if !s.has_project {return}
-    engine:=engine_folder_here()
+    engine:=engine_folder_here(s)
     data,error:=json.marshal(api.Port_File{port,os.get_pid(),s.project_root,engine,s.engine_stamp,build.target_stamp_of(s.project_root,.Editor,context.temp_allocator),s.headless},{pretty=true},context.temp_allocator)
     if error!=nil {return}
     path:=api_port_file_path(s)
@@ -239,6 +239,12 @@ api_idle :: proc(s:^Session) -> bool {
     if st==nil || !st.manual || st.stepping {return false}
     api_poll(s)
     build_poll(s)
+    // No frame runs the requests here: the restart a Build asks for would wait for engine.step.
+    if .Restart in s.requests {
+        s.requests-={.Restart}
+        restart(s,{"--built"})
+        return true
+    }
     import_poll(s)
     git_poll(s)
     projects_poll(s)

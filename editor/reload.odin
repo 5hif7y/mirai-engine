@@ -1,13 +1,16 @@
 package editor
 
+import "core:encoding/json"
 import "core:log"
 import "core:os"
 import "core:strings"
 import build "mirai:cook/build"
 import "mirai:core"
+import "mirai:editor/api"
 import scene "mirai:engine/scene"
 import "mirai:host"
 import "mirai:project"
+import "mirai:std/serial"
 
 // A Build replaces the library of the project while the editor runs. When
 // the new one lays its worlds out as the loaded one, its procedures take over
@@ -60,21 +63,44 @@ library_reload :: proc(s:^Session) -> Library_Reload {
     return .Reloaded
 }
 
-// The folder of the binaries this editor runs, with forward slashes.
-engine_folder_here :: proc() -> string {
-    folder,_:=os.get_executable_directory(context.temp_allocator)
-    folder,_=strings.replace_all(folder,"\\","/",context.temp_allocator)
-    return folder
+// The folder this editor started from, with forward slashes: where the
+// binaries of a build of its engine are, also once a build moved the ones it
+// runs aside (build.engine_unlock), which some systems then name as its
+// executable.
+engine_folder_here :: proc(s:^Session) -> string {
+    return s.program[:max(strings.last_index_byte(s.program,'/'),0)]
 }
 
-// The stamp beside the binaries this editor runs, as it is now.
-engine_stamp_here :: proc(allocator:=context.allocator) -> string {
-    return build.engine_stamp_of(engine_folder_here(),allocator)
+// The program of the engine named beside this editor: the player, the importer.
+engine_program_here :: proc(s:^Session,name:string) -> string {
+    file:=strings.concatenate({name,".exe" when ODIN_OS==.Windows else ""},context.temp_allocator)
+    return project.path(engine_folder_here(s),file,allocator=context.temp_allocator)
+}
+
+// The stamp beside the binaries this editor started from, as it is now.
+engine_stamp_here :: proc(s:^Session,allocator:=context.allocator) -> string {
+    return build.engine_stamp_of(engine_folder_here(s),allocator)
 }
 
 // Whether the binaries beside this editor are no longer those it started from.
 engine_rebuilt :: proc(s:^Session) -> bool {
-    return s.engine_stamp!="" && engine_stamp_here(context.temp_allocator)!=s.engine_stamp
+    return s.engine_stamp!="" && engine_stamp_here(s,context.temp_allocator)!=s.engine_stamp
+}
+
+// The record mirai session keeps of the editor it opened (api.SESSION_FILE)
+// follows this one to the editor it starts in its place, so that the session
+// stays the project's after a restart.
+@(private)
+session_record_follow :: proc(s:^Session,pid:int) {
+    if !s.has_project {return}
+    path:=project.path(s.project_root,".mirai",api.SESSION_FILE,allocator=context.temp_allocator)
+    data,error:=os.read_entire_file(path,context.temp_allocator)
+    record:api.Session_Record
+    if error!=nil || json.unmarshal(data,&record,allocator=context.temp_allocator)!=nil || record.pid!=os.get_pid() {return}
+    record.pid=pid
+    if written,marshal_error:=json.marshal(record,{pretty=true},context.temp_allocator);marshal_error==nil {
+        _=serial.file_write_atomic(path,written)
+    }
 }
 
 // What keeps the worlds from migrating now: a call of the API that runs

@@ -78,9 +78,8 @@ player_processes_reserve :: proc(s:^Session,first,count:int) {
 // could not; then none is left open.
 player_processes_open :: proc(s:^Session,commands:[][]string,focus:bool) -> string {
     p:=s.processes
-    exe,exe_error:=os.get_executable_path(context.temp_allocator)
-    player:=project.path(filepath.dir(exe),"mirai-player"+(".exe" when ODIN_OS==.Windows else ""),allocator=context.temp_allocator)
-    if exe_error!=nil || !os.is_file(player) {return "The player program is missing"}
+    player:=engine_program_here(s,"mirai-player")
+    if !os.is_file(player) {return "The player program is missing"}
     p.embedded=s.app.device!=nil && rhi.device_shares_textures(s.app.device) && s.gui.ctx!=nil
     display,tiled:=platform.display_usable(s.app.platform)
     for args,k in commands[:min(len(commands),p.count)] {

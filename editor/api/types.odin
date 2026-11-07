@@ -46,12 +46,24 @@ Port_File :: struct {
     manual:bool,   // headless, driven by the API frame by frame; false for an editor with a window
 }
 
+// <project>/.mirai/session.json: the editor mirai session opened last in the
+// project, with the mode of its binaries and its arguments, which restart
+// repeats. An editor that it and the port file name was opened by mirai
+// session; one that restarts by itself names there the one it starts.
+SESSION_FILE :: "session.json"
+Session_Record :: struct {
+    pid:int,
+    mode:string, // "dev" or "release"
+    args:[]string,
+}
+
 PARSE_ERROR       :: -32700
 INVALID_REQUEST   :: -32600
 METHOD_NOT_FOUND  :: -32601
 INVALID_PARAMS    :: -32602
 INTERNAL_ERROR    :: -32603
 SERVER_ERROR      :: -32000 // a handler failed without a code of its own
+CLOSED            :: -32096 // client side: the editor closed the connection without a byte of answer: it ended or restarted, perhaps after running the call
 TIMEOUT           :: -32097 // client side: no answer in time
 BAD_RESPONSE      :: -32098 // client side: the answer is not a JSON-RPC response
 UNREACHABLE       :: -32099 // client side: nobody listens

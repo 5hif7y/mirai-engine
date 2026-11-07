@@ -42,7 +42,7 @@ add :: proc(root,engine_root,url,ref:string,allocator:=context.allocator,catalog
     staging,staging_ok:=staging_folder(root)
     if !staging_ok {return fail(allocator,"%s could not be made",staging)}
     defer os.remove_all(staging)
-    if _,failure:=git("","clone","--quiet",url,staging);failure!="" {return fail(allocator,"%s could not be cloned: %s",url,failure)}
+    if _,failure:=git("","clone","--quiet","--recurse-submodules",url,staging);failure!="" {return fail(allocator,"%s could not be cloned: %s",url,failure)}
     if ref:=strings.trim_space(ref);ref!="" {
         if _,failure:=git(staging,"checkout","--quiet","--detach",ref);failure!="" {return fail(allocator,"%s has no %s: %s",url,ref,failure)}
     }
@@ -50,6 +50,7 @@ add :: proc(root,engine_root,url,ref:string,allocator:=context.allocator,catalog
     if failure!="" {return fail(allocator,"%s",failure)}
     // At a commit, as sync and update leave it, not on a branch that falls behind.
     git(staging,"checkout","--quiet","--detach",commit)
+    if failure=submodules_update(staging);failure!="" {return fail(allocator,"The submodules of %s could not be checked out: %s",url,failure)}
     plugin,problem:=plugin_check(staging,"")
     if problem!="" {return fail(allocator,"%s is not a plugin Mirai can install: %s",url,problem)}
     name:=base.text_get(plugin.name[:])
@@ -147,16 +148,18 @@ update :: proc(root,engine_root,name,ref:string,allocator:=context.allocator) ->
     log,_:=git(folder,"log","--oneline","--no-decorate",fmt.tprintf("%s..%s",old,commit))
     stat,_:=git(folder,"diff","--stat",old,commit)
     if _,failure=git(folder,"checkout","--quiet","--detach",commit);failure!="" {return fail(allocator,"%s",failure)}
-    plugin,problem:=plugin_check(folder,name)
-    if problem=="" && plugin.name!=source.name {problem=fmt.tprintf("its plugin.mirai now names it %s",base.text_get(plugin.name[:]))}
+    plugin:project.Plugin_Manifest
+    problem:string
+    if failure=submodules_update(folder);failure!="" {problem=fmt.tprintf("its submodules could not be checked out: %s",failure)}
+    else if plugin,problem=plugin_check(folder,name);problem=="" && plugin.name!=source.name {problem=fmt.tprintf("its plugin.mirai now names it %s",base.text_get(plugin.name[:]))}
     if problem!="" {
-        git(folder,"checkout","--quiet","--detach",old)
+        checkout_back(folder,old)
         return fail(allocator,"%s was left at %s: %s at %s %s",name,old[:12],url,commit[:12],problem)
     }
     before:=manifest
     base.text_set(source.commit[:],commit)
     if message:=manifest_commit(root,engine_root,&manifest,&before);message!="" {
-        git(folder,"checkout","--quiet","--detach",old)
+        checkout_back(folder,old)
         return fail(allocator,"%s",message)
     }
     result.ok=true
@@ -236,6 +239,10 @@ sync :: proc(root:string,allocator:=context.allocator) -> (changed:int,message:s
             if _,failure:=git(folder,"cat-file","-e",strings.concatenate({commit,"^{commit}"},context.temp_allocator));failure!="" {git(folder,"fetch","--quiet","--tags","origin")}
             if _,failure:=git(folder,"checkout","--quiet","--detach",commit);failure!="" {
                 append(&problems,fmt.tprintf("%s could not be checked out at %s: %s",name,commit[:12],failure))
+                continue
+            }
+            if failure:=submodules_update(folder);failure!="" {
+                append(&problems,fmt.tprintf("The submodules of %s could not be checked out at %s: %s",name,commit[:12],failure))
                 continue
             }
         }
@@ -351,9 +358,26 @@ checkout_ensure :: proc(root:string,source:^project.Source) -> string {
     defer os.remove_all(staging)
     if _,failure:=git("","clone","--quiet","--no-checkout",url,staging);failure!="" {return fmt.tprintf("%s could not be cloned: %s",url,failure)}
     if _,failure:=git(staging,"checkout","--quiet","--detach",commit);failure!="" {return fmt.tprintf("%s has no commit %s: %s",url,commit,failure)}
+    if failure:=submodules_update(staging);failure!="" {return fmt.tprintf("The submodules of %s could not be checked out: %s",url,failure)}
     if error:=os.make_directory_all(project.path(root,"plugins",allocator=context.temp_allocator));error!=nil && error!=.Exist {return "The plugins folder of the project could not be made"}
     if error:=os.rename(staging,folder);error!=nil {return fmt.tprintf("%s could not be moved to %s: %v",staging,folder,error)}
     return ""
+}
+
+// Brings the submodules of a checkout to the commits its HEAD records: a
+// plugin may hold its companions as submodules, which a checkout alone
+// leaves empty or at the commit of before.
+@(private)
+submodules_update :: proc(folder:string) -> (failure:string) {
+    _,failure=git(folder,"submodule","update","--init","--recursive","--quiet")
+    return
+}
+
+// Takes a checkout back to old, its submodules too, after a step that failed.
+@(private)
+checkout_back :: proc(folder,old:string) {
+    git(folder,"checkout","--quiet","--detach",old)
+    submodules_update(folder)
 }
 
 // Writes the manifest when the project still opens with it; else leaves

@@ -226,3 +226,74 @@ a_plugin_from_git_brings_its_companions_and_takes_them_away :: proc(t:^testing.T
     testing.expect(t,!broken.ok && strings.contains(broken.message,"hello_bridge"),broken.message)
     testing.expect(t,!os.exists(project.path(root,"plugins/hello",allocator=context.temp_allocator)))
 }
+
+@(test)
+a_plugin_from_git_brings_the_companions_it_holds_as_submodules :: proc(t:^testing.T) {
+    if _,failure:=git("","--version");failure!="" {return}
+    // git takes submodules from a folder of this machine only when told to.
+    os.set_env("GIT_CONFIG_COUNT","1")
+    os.set_env("GIT_CONFIG_KEY_0","protocol.file.allow")
+    os.set_env("GIT_CONFIG_VALUE_0","always")
+    defer {
+        os.unset_env("GIT_CONFIG_COUNT")
+        os.unset_env("GIT_CONFIG_KEY_0")
+        os.unset_env("GIT_CONFIG_VALUE_0")
+    }
+    folder:=test_folder(t)
+    defer os.remove_all(folder)
+    root:=project.path(folder,"game",allocator=context.temp_allocator)
+    test_project(t,root)
+    companion:=project.path(folder,"hello_bridge",allocator=context.temp_allocator)
+    write(t,companion,project.PLUGIN_FILE,`{"name": "hello_bridge", "version": "1.0.0", "dependencies": ["hello"], "parts": [], "automatic": true}`)
+    for args in ([][]string{{"init","--quiet","-b","main"},{"add","-A"},{"-c","user.name=Test","-c","user.email=test@example.com","commit","--quiet","-m","One"}}) {
+        _,failure:=git(companion,..args)
+        testing.expect(t,failure=="",failure)
+    }
+    repository:=project.path(folder,"hello",allocator=context.temp_allocator)
+    url:=test_repository(t,repository,"hello")
+    commit_all :: proc(t:^testing.T,folder:string) -> string {
+        _,failure:=git(folder,"-c","user.name=Test","-c","user.email=test@example.com","commit","--quiet","-am","Companion")
+        testing.expect(t,failure=="",failure)
+        commit,_:=git(folder,"rev-parse","HEAD")
+        return commit
+    }
+    _,failure:=git(repository,"submodule","add","--quiet",strings.concatenate({"file://",companion},context.temp_allocator),"plugins/hello_bridge")
+    testing.expect(t,failure=="",failure)
+    first:=commit_all(t,repository)
+    bridge:=project.path(root,"plugins/hello/plugins/hello_bridge",allocator=context.temp_allocator)
+    readme:=project.path(bridge,"README.md",allocator=context.temp_allocator)
+
+    added:=add(root,"",url,"",context.temp_allocator)
+    testing.expect(t,added.ok,added.message)
+    testing.expect(t,os.is_file(project.path(bridge,project.PLUGIN_FILE,allocator=context.temp_allocator)))
+    p,error:=project.open(root,"",context.temp_allocator)
+    testing.expect_value(t,error.code,project.Error_Code.None)
+    index,found:=project.plugin_find(p.plugins,"hello_bridge")
+    testing.expect(t,found && slice.contains(p.active,index))
+    project.close(&p)
+
+    // A new commit of the companion that the plugin records moves it on update, and back.
+    test_commit(t,companion,"README.md","bridge\n")
+    _,failure=git(repository,"submodule","update","--quiet","--remote")
+    testing.expect(t,failure=="",failure)
+    second:=commit_all(t,repository)
+    updated:=update(root,"","hello","",context.temp_allocator)
+    testing.expect(t,updated.ok,updated.message)
+    testing.expect(t,os.is_file(readme))
+    back:=update(root,"","hello",first,context.temp_allocator)
+    testing.expect(t,back.ok,back.message)
+    testing.expect(t,!os.exists(readme))
+
+    // A clone of the project brings it with sync.
+    testing.expect(t,update(root,"","hello",second,context.temp_allocator).ok)
+    testing.expect(t,os.remove_all(project.path(root,"plugins/hello",allocator=context.temp_allocator))==nil)
+    changed,message:=sync(root,context.temp_allocator)
+    testing.expect_value(t,changed,1)
+    testing.expect_value(t,message,"")
+    testing.expect(t,os.is_file(readme))
+
+    // A submodule at the commit it records is no change of its own.
+    removed:=remove(root,"","hello",context.temp_allocator)
+    testing.expect(t,removed.ok,removed.message)
+    testing.expect(t,!os.exists(project.path(root,"plugins/hello",allocator=context.temp_allocator)))
+}

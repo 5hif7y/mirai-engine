@@ -76,7 +76,10 @@ at the commit that `sources` of `project.mirai` names. A repository is a plugin;
 go with it (its automatic bridges with other plugins) are its **companions**, in
 `plugins/<companion>/` inside its folder, a single level: discovery adds them after the plugin,
 they are imported from its folder (`project:plugins/<plugin>/plugins/<companion>/...`) and are
-installed, updated and removed with it, with no source of their own. A plugin that depends on
+installed, updated and removed with it, with no source of their own. A companion may be a git
+submodule of the plugin's repository, so it keeps a repository of its own: installing, updating
+and `sync` check out the submodules at the commits the plugin's commit records, and a submodule at
+that commit is not a change of its own. A plugin that depends on
 another imports it as `plugins:<n>/...` if it is an engine plugin and as
 `project:plugins/<n>/...` if it is a project plugin. `cook/install` handles it; the CLI is
 `mirai plugin` and in the editor, the Plugins category of the settings and the new project

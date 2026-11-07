@@ -32,7 +32,7 @@ action_test_add_state :: proc(runtime:^Action_Runtime,value:Action_State) {
 @(test)
 action_profiles_roundtrip_and_reject_invalid_section_links_and_root_layer_policies :: proc(t:^testing.T) {
     profile:=action_test_profile();defer action_profile_free(&profile)
-    for &action in profile.actions {action.mesh_space=true}
+    for &action in profile.actions {action.mesh_space=true;action.clock=.World}
     types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
     doc:asset.Document;defer asset.document_destroy(&doc)
     testing.expect_value(t,action_profile_document(&doc,&types,{3,4},profile),asset.Error.None)
@@ -41,7 +41,7 @@ action_profiles_roundtrip_and_reject_invalid_section_links_and_root_layer_polici
     file:asset.Asset;defer asset.asset_close(&file)
     testing.expect_value(t,asset.asset_open(&file,serial.writer_bytes(&writer)),asset.Error.None)
     view,error:=action_profile_view(&file,&types);testing.expect_value(t,error,asset.Error.None)
-    testing.expect_value(t,view.sections[1],profile.sections[1]);testing.expect_value(t,view.windows[0],profile.windows[0]);testing.expect(t,view.actions[0].mesh_space)
+    testing.expect_value(t,view.sections[1],profile.sections[1]);testing.expect_value(t,view.windows[0],profile.windows[0]);testing.expect(t,view.actions[0].mesh_space && view.actions[0].clock==.World)
     profile.sections[0].next=99;testing.expect(t,!action_profile_check(profile));profile.sections[0].next=1
     profile.sections[1].action=1;testing.expect(t,!action_profile_check(profile));profile.sections[1].action=0
     profile.actions[1].reference=.1;testing.expect(t,!action_profile_check(profile));profile.actions[1].reference=0
@@ -354,4 +354,28 @@ action_playing_answers_while_an_action_plays_and_animation_stop_frees_a_layer_th
     // Cancelled, it fades out and no longer plays.
     testing.expect(t,action_cancel(&requests,entity,"attack") && actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,&problems))
     _,_,playing=action_playing({&actions},entity,"attack");testing.expect(t,!playing && actions.states[0].layers[0].finishing)
+}
+
+@(test)
+a_world_action_plays_at_its_speed_while_its_entity_is_slowed :: proc(t:^testing.T) {
+    for clock in Action_Clock {
+        entities:core.Entities;core.entities_init(&entities);defer core.entities_destroy(&entities);entity:=core.create(&entities)
+        descriptions:core.Table(Animation);defer core.table_destroy(&descriptions)
+        description:=ANIMATION_DEFAULT;description.asset={1,2};description.actions={3,4};description.loop=false;core.add(&descriptions,entity,description);core.table_settle(&descriptions,&entities)
+        content:host.Content_Animation;state:=layer_fixture(t,&content);defer lib.library_destroy(&content.lib);defer playing_free(&state);state.entity=entity;state.asset=description.asset
+        cache:=Actions_Assets{allocator=context.allocator};defer actions_assets_free(&cache)
+        append(&cache.contents,Action_Content{id=description.actions,checked=1,revision=1,profile=action_test_profile(),valid=true})
+        cache.contents[0].profile.actions[0].clock=clock
+        host_assets:host.Assets;app:=host.App{assets=&host_assets,allocator=context.allocator}
+        playback:Playback;defer playback_free(&playback);events:Animation_Events;defer delete(events.items)
+        requests:Action_Requests;defer delete(requests.queue.items);actions:Action_Runtime;defer actions_runtime_free(&actions)
+        testing.expect(t,action_fire(&requests,entity,"attack"))
+        testing.expect(t,actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,nil))
+        // A tick of 0.2 s of the world while the entity runs at half pace: 0.1 s of its own time.
+        actions_sample(&actions,&state,&description,.1,nil,&content,&playback,&events,pace=.5)
+        want:=f32(.2) if clock==.World else .1
+        testing.expectf(t,abs(actions.states[0].layers[0].time-want)<1e-5,"%v: the action is at %v s of its clip, want %v",clock,actions.states[0].layers[0].time,want)
+        layers_advance(&playback,&state,&content,description,&events,.1,nil);actions_layer_finish(&actions,&state)
+        testing.expectf(t,abs(state.layers[0].fader.current.time-want)<1e-5,"%v: the pose is at %v s of its clip, want %v",clock,state.layers[0].fader.current.time,want)
+    }
 }

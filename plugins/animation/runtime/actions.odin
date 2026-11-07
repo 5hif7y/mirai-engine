@@ -19,6 +19,11 @@ Action_Cancel_Policy :: enum u8 {Allow,Finish_Section,Deny}
 Action_Request_Kind :: enum u8 {Fire,Cancel,Section}
 Action_Event_Kind :: enum u8 {Started,Completed,Interrupted,Section,Window_Begin,Window_End}
 Action_Info :: struct {animation:base.Asset_Id}
+// What the time of an action counts.
+Action_Clock :: enum u8 {
+    Own,   // its entity's own time (core.Own_Pace), as the rest of its animation: slowed with it
+    World, // the time of the world: it plays at its speed while its entity is slowed or sped up, as a clip whose play rate makes up for the dilation
+}
 Action_Definition :: struct {
     name,clip:[64]u8 `mirai:"text"`,
     layer:u8 `mirai:"optional,min=1,max=3"`,
@@ -33,6 +38,7 @@ Action_Definition :: struct {
     cancel:Action_Cancel_Policy `mirai:"optional"`,
     animation:base.Asset_Id `mirai:"optional"`, // of the clip; empty is the profile's
     mesh_space:bool `mirai:"optional"`,         // Override: the rotations of its branch blend in the space of the rig, as Animation_Layer.mesh_space
+    clock:Action_Clock `mirai:"optional"`,
 }
 ACTION_DEFINITION_DEFAULT :: Action_Definition{layer=1,weight=1,speed=1,fade_in=.1,fade_out=.1}
 Action_Policy_Error :: enum u8 {None,UnsupportedPolicy,ReservedLayer}
@@ -50,7 +56,7 @@ Action_Profile :: struct {info:Action_Info,actions:[]Action_Definition,sections:
 action_profile_check :: proc(profile:Action_Profile) -> bool {
     if profile.info.animation=={} || len(profile.actions)==0 || len(profile.actions)>ACTION_CAPACITY || len(profile.sections)>ACTION_ROWS || len(profile.windows)>ACTION_ROWS {return false}
     for &value,i in profile.actions {
-        if !blend_text_valid(value.name[:],false) || !blend_text_valid(value.clip[:],false) || value.layer==0 || value.layer>ANIMATION_LAYERS || value.mode>max(Layer_Mode) || value.curves>max(Curve_Blend) || value.root_motion>max(Root_Motion_Policy) || value.cancel>max(Action_Cancel_Policy) || !profile_bone(value.over) || !profile_weight(value.weight) || !finite(value.speed) || value.speed<=0 {return false}
+        if !blend_text_valid(value.name[:],false) || !blend_text_valid(value.clip[:],false) || value.layer==0 || value.layer>ANIMATION_LAYERS || value.mode>max(Layer_Mode) || value.curves>max(Curve_Blend) || value.root_motion>max(Root_Motion_Policy) || value.cancel>max(Action_Cancel_Policy) || !profile_bone(value.over) || !profile_weight(value.weight) || !finite(value.speed) || value.speed<=0 || value.clock>max(Action_Clock) {return false}
         if value.root_motion!=.None && (value.over!={} || value.mode!=.Override) {return false}
         for number in ([?]f32{value.reference,value.fade_in,value.fade_out}) {if !finite(number) || number<0 {return false}}
         for previous in profile.actions[:i] {if previous.name==value.name || previous.layer==value.layer && !action_channel_equal(previous,value) {return false}}
@@ -360,7 +366,8 @@ actions_prepare :: proc(runtime:^Action_Runtime,requests:^Action_Requests,assets
     return true
 }
 
-actions_sample :: proc(runtime:^Action_Runtime,state:^Playing,description:^Animation,dt:f32,problems:^core.Problems,content:^host.Content_Animation=nil,playback:^Playback=nil,events:^Animation_Events=nil,distance:^Animation_Distance_Request=nil) {
+// dt is the entity's own time; pace its seconds per second of the world, which a World action divides out.
+actions_sample :: proc(runtime:^Action_Runtime,state:^Playing,description:^Animation,dt:f32,problems:^core.Problems,content:^host.Content_Animation=nil,playback:^Playback=nil,events:^Animation_Events=nil,distance:^Animation_Distance_Request=nil,pace:f32=1) {
     if runtime==nil || state==nil || description==nil || !finite(dt) || dt<0 {return}
     state.action_root_mask=0
     active:=action_state(runtime,state.entity);if active==nil {return}
@@ -387,6 +394,9 @@ actions_sample :: proc(runtime:^Action_Runtime,state:^Playing,description:^Anima
             description.layers[i]=asked;continue
         }
         definition:=profile.actions[slot.action]
+        speed:=definition.speed
+        if definition.clock==.World && finite(pace) && pace>0 {speed/=pace}
+        slot.speed=speed
         cause:string
         slot.delta,slot.outgoing_delta=ROOT_DELTA_DEFAULT,ROOT_DELTA_DEFAULT;slot.has_root=false;slot.continuous=true;slot.root_weight=0
         over,_:=bone_ref_hash(definition.over)
@@ -425,10 +435,10 @@ actions_sample :: proc(runtime:^Action_Runtime,state:^Playing,description:^Anima
             slot.has_root=false;action_end(runtime,active,&slot,true,problems);asked.clip=0;asked.weight=0;asked.fade=definition.fade_out;description.layers[i]=asked;continue
         }
         if slot.has_root {state.action_roots[i]=slot.root;state.action_root_mask|=u8(1)<<u8(i)}
-        if slot.starting || layer.clip!=asked.clip {lib.fader_play(&layer.fader,handle,definition.speed,definition.fade_in if layer.clip!=0 else 0);layer.clip=asked.clip;slot.starting=false}
+        if slot.starting || layer.clip!=asked.clip {lib.fader_play(&layer.fader,handle,speed,definition.fade_in if layer.clip!=0 else 0);layer.clip=asked.clip;slot.starting=false}
         current:=&layer.fader.current
         if slot.seeking {current.time=slot.time;current.fresh=true;current.done=false;slot.seeking=false}
-        current.speed=definition.speed
+        current.speed=speed
         slot.player=current^;slot.from=slot.time
         controlled:=distance!=nil && distance.entity==state.entity && source_clip_name(content.id,distance.animation,distance.clip)==asked.clip
         seek:=controlled && distance.seek
@@ -458,7 +468,7 @@ actions_sample :: proc(runtime:^Action_Runtime,state:^Playing,description:^Anima
                 slot.time=target;slot.from,slot.to=target,target;slot.continuous=false;slot.window_mask={}
                 for window,w in profile.windows {if int(window.action)==int(slot.action) && target>=window.start && target<window.end {slot.window_mask[w/64]|=u64(1)<<u32(w%64)}}
                 current.time,current.fresh,current.done=target,false,false;remaining=0
-            } else {remaining=(target-slot.time)/definition.speed}
+            } else {remaining=(target-slot.time)/speed}
         }
         target:=definition.weight
         step:=dt/definition.fade_in if definition.fade_in>0 else 1
@@ -480,8 +490,8 @@ actions_sample :: proc(runtime:^Action_Runtime,state:^Playing,description:^Anima
         for pass in 0..<ACTION_PASSES {
             if seek || rejected {break}
             end:=profile.sections[slot.section].end if slot.section>=0 else duration
-            step:=min(remaining,max(end-slot.time,0)/definition.speed)
-            from:=slot.time;current.time=from;current.speed=definition.speed;current.done=false
+            step:=min(remaining,max(end-slot.time,0)/speed)
+            from:=slot.time;current.time=from;current.speed=speed;current.done=false
             batch:[EVENT_BATCH]lib.Event;written,dropped:=lib.player_advance(&content.lib,current,step,batch[:])
             for &event in batch[:written] {event.fraction=mm.saturate((event_elapsed+event.fraction*step)/event_span) if event_span>0 else 0}
             if playback!=nil && events!=nil {emit_events(playback,events,state.entity,content,batch[:written],dropped,problems,event_weight,u32(i+1),0,description^)}

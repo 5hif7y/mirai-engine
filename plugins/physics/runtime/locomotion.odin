@@ -69,6 +69,7 @@ Layered_Move :: struct {
 Walk :: struct {
     max_speed:f32 `mirai:"min=0,unit=m/s"`,
     sprint_speed:f32 `mirai:"min=0,unit=m/s"`,     // while the sprint action is held; at most max_speed: it does not sprint
+    sprint_default:bool,                           // it sprints without the sprint action, which then only asks for the tactical sprint of a Tactical_Sprint
     backward_slowdown:f32 `mirai:"min=0,max=1"`,   // share of the speed lost moving straight back from where it looks
     acceleration:f32 `mirai:"min=0,unit=m/s2"`,
     braking:f32 `mirai:"min=0,unit=m/s2"`,
@@ -271,13 +272,13 @@ move_wish :: proc "contextless" (move_input:input.Move_Input,frame:mm.Quat) -> [
 SPRINT_FORWARD :: f32(0.5)
 
 // The top speed of walking for this input: sprint_speed (times boost, that of
-// a tactical sprint) while sprinting forward (within 60° of the look) when it
-// is faster, less backward_slowdown by how straight back from the look the
+// a tactical sprint) while sprinting forward (within 60° of the look, with the
+// sprint action or sprint_default) when it is faster, less backward_slowdown by how straight back from the look the
 // move points (-Z of the move is forward); crouched, crouch_speed, which
 // sprint does not change.
 walk_speed :: proc "contextless" (walk:Walk,move_input:input.Move_Input,sprinting:bool,crouched:=false,boost:f32=1) -> f32 {
     speed:=crouch_speed(walk) if crouched else walk.max_speed
-    if !crouched && sprint_forward(move_input,sprinting) && walk.sprint_speed*boost>speed {speed=walk.sprint_speed*boost}
+    if !crouched && sprint_forward(move_input,sprinting || walk.sprint_default) && walk.sprint_speed*boost>speed {speed=walk.sprint_speed*boost}
     l:=linalg.length(move_input.move.xz)
     if l>0 && walk.backward_slowdown>0 {
         speed*=1-clamp(walk.backward_slowdown,0,1)*max(move_input.move.z/l,0)
@@ -434,7 +435,7 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
         boost,jump_boost:f32=1,1
         if tacticals {
             running:=loco.mode!=MODE_SLIDING && !(ground.standing && (loco.crouch_on || ground.cramped))
-            tactical_update(loco,tactical,sprint_forward(move_input,sprint_held) && walk.sprint_speed>0,running,ground.standing,dt)
+            tactical_update(loco,tactical,sprint_forward(move_input,sprint_held) && walk.sprint_speed>0,running,ground.standing,dt,sprint_held)
             boost,jump_boost=tactical_boost(loco^,tactical)
         } else {loco.sprint_active=false}
         // At min_speed or faster on the ground, toward a ledge jump.

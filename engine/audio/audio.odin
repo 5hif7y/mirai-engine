@@ -667,6 +667,25 @@ play_source :: proc(app:^host.App,time:core.Time,source:Audio_Source) -> Voice {
     return voice_start(app,time,source.sound,desc)
 }
 
+// Plays a source once at a point of the world as it is set: its sound, bus,
+// volume, pitch, loop, send and the curve it falls by (attenuation,
+// min_distance, max_distance, rolloff), heard from the listener whatever its
+// spatial says. source_place moves it, as a loop that follows something.
+play_source_at :: proc(app:^host.App,time:core.Time,source:Audio_Source,position:[3]f32) -> Voice {
+    desc:=mixer.VOICE_DEFAULT
+    desc.bus,desc.volume,desc.pitch,desc.loop,desc.reverb=mixer.Bus(source.bus),source.volume,source.pitch,source.loop,source.reverb
+    desc.spatial,desc.position,desc.attenuation=true,position,attenuation_of(source)
+    return voice_start(app,time,source.sound,desc)
+}
+
+// Moves a voice that play_source_at or play_asset_at started to another point
+// of the world.
+source_place :: proc(app:^host.App,voice:Voice,position:[3]f32) {
+    m:=app.mixer
+    if m==nil || !mixer.voice_valid(m,voice) {return}
+    mixer.voice_set_position(m,voice,position)
+}
+
 // Gives a voice play_source started the volume, pitch, pan, loop and send of
 // a source that changed while it plays; a set keeps the sound it chose.
 source_tune :: proc(app:^host.App,voice:Voice,source:Audio_Source) {

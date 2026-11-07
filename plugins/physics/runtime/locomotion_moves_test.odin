@@ -257,8 +257,8 @@ crouch_toggles_and_a_press_in_the_air_slides_on_landing :: proc(t:^testing.T) {
 @(private="file") SPRINT :: input.Action_Mask(1)<<u64(TEST_SPRINT)
 
 // Sprint held forward starts a tactical sprint: its top speed ramps to speed_multiplier times
-// sprint_speed and it spends cost_per_second. Let go for less than grace it goes on at the same
-// ramp. Without energy it sprints plainly and does not start again until energy comes back,
+// sprint_speed and it spends cost_per_second. With sprint held, a move off forward for less than
+// grace goes on at the same ramp; letting go of sprint ends it at once. Without energy it sprints plainly and does not start again until energy comes back,
 // recharge_delay after it was last spent, at recharge per second.
 @(test)
 a_tactical_sprint_ramps_up_spends_its_energy_and_recharges_after_its_delay :: proc(t:^testing.T) {
@@ -276,12 +276,17 @@ a_tactical_sprint_ramps_up_spends_its_energy_and_recharges_after_its_delay :: pr
     moves_tick(&f,{0,0,-1},54,SPRINT)
     testing.expectf(t,abs(flat_speed(&f)-top)<0.1,"at speed_multiplier after its ramp: %v",flat_speed(&f))
     testing.expectf(t,abs(f.loco.sprint_spent-tactical.cost_per_second)<0.5,"a second spends cost_per_second: %v",f.loco.sprint_spent)
-    moves_tick(&f,{0,0,-1},15)
-    testing.expect(t,f.loco.sprint_active,"let go for less than grace it goes on")
+    moves_tick(&f,{1,0,0},15,SPRINT)
+    testing.expect(t,f.loco.sprint_active,"off forward for less than grace it goes on")
+    ramp:=f.loco.sprint_time
+    moves_tick(&f,{0,0,-1},40,SPRINT)
+    testing.expectf(t,f.loco.sprint_time>ramp && abs(flat_speed(&f)-top)<0.1,"its ramp kept, back at top speed: %v",flat_speed(&f))
+    moves_tick(&f,{1,0,0},31,SPRINT)
+    testing.expect(t,!f.loco.sprint_active,"off forward past grace it ends")
     moves_tick(&f,{0,0,-1},10,SPRINT)
-    testing.expectf(t,abs(flat_speed(&f)-top)<0.1,"back at once at the end of its ramp: %v",flat_speed(&f))
-    moves_tick(&f,{0,0,-1},31)
-    testing.expect(t,!f.loco.sprint_active,"let go past grace it ends")
+    testing.expect(t,f.loco.sprint_active)
+    moves_tick(&f,{0,0,-1},1)
+    testing.expect(t,!f.loco.sprint_active,"letting go of sprint ends it at once")
     // Out of energy it sprints as its Walk says, and energy waits recharge_delay.
     moves_tick(&f,{0,0,-1},1,SPRINT)
     testing.expect(t,f.loco.sprint_active)
@@ -407,4 +412,27 @@ a_jump_held_rises_at_its_speed_for_jump_rise :: proc(t:^testing.T) {
     testing.expectf(t,abs(held-want)<0.08,"held it rises %v, want %v",held,want)
     without:=peak(t,60,0)
     testing.expectf(t,abs(without-WALK_DEFAULT.jump_height)<0.05,"without jump_rise holding does nothing: %v",without)
+}
+
+// With sprint_default it sprints forward without the sprint action, so a crouch while running slides;
+// the action then asks for the tactical sprint.
+@(test)
+sprint_by_default_runs_at_sprint_speed_and_a_crouch_slides :: proc(t:^testing.T) {
+    f:Moves_Test
+    testing.expect(t,moves_init(&f,{0,0,40}))
+    defer sim.world_destroy(&f.w)
+    f.walk.sprint_speed,f.walk.sprint_default,f.walk.crouch_toggle=5.5,true,true
+    f.slide=SLIDE_DEFAULT
+    f.tactical=TACTICAL_SPRINT_DEFAULT
+    moves_tick(&f,{},20)
+    moves_tick(&f,{0,0,-1},60)
+    v:=sim.character_velocity(&f.w,f.ch)
+    testing.expectf(t,abs(-v.z-5.5)<0.1,"it runs at sprint_speed without the action: %v",v)
+    testing.expect(t,!f.loco.sprint_active,"no tactical sprint without the action")
+    moves_tick(&f,{0,0,-1},1,CROUCH)
+    moves_tick(&f,{0,0,-1},2)
+    testing.expectf(t,f.loco.mode==MODE_SLIDING,"a crouch while running slides: mode %v",f.loco.mode)
+    moves_tick(&f,{0,0,-1},120)
+    moves_tick(&f,{0,0,-1},30,SPRINT)
+    testing.expect(t,f.loco.sprint_active,"the sprint action asks for the tactical sprint")
 }

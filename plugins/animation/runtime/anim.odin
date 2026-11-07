@@ -271,7 +271,8 @@ animation_tick :: proc(
         e:=playback.rigs[row].entity if skeletal else core.entity_at(animations,row-rig_count)
         if !skeletal && rig_find(playback,e)>=0 {continue}
         // An entity with a pace of its own advances by its own time.
-        dt:=tick_dt*core.pace_of(clock,paces,e) if time.playing else tick_dt
+        pace:=core.pace_of(clock,paces,e) if time.playing else 1
+        dt:=tick_dt*pace
         if !core.has(core.read(transforms),e) {continue}
         animation,animated:=core.get(animations,e)
         if !animated {animation=ANIMATION_DEFAULT;animation.playing=false}
@@ -395,7 +396,7 @@ animation_tick :: proc(
                     state.has_base_root=root.translation || root.rotation
                 }
             }
-            if actions!=nil {actions_sample(actions,state,&animation,dt,problems,content,playback,events,action_distance)}
+            if actions!=nil {actions_sample(actions,state,&animation,dt,problems,content,playback,events,action_distance,pace)}
             layers_advance(playback,state,content,animation,events,dt,problems)
             if actions!=nil {actions_layer_finish(actions,state)}
             if programmed {pose_layers(playback,state,&content.lib,animation,problems,core.read(transforms));sample_layer_curves(state,content,animation)} else {pose_sample(playback,state,&content.lib,animation,core.read(transforms),problems,content);sample_curves(state,content,animation.weight,animation)}

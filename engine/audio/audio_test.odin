@@ -445,6 +445,34 @@ a_source_heard_alone_plays_as_it_is_set_and_follows_its_changes :: proc(t:^testi
 }
 
 @(test)
+a_source_heard_at_a_place_falls_by_its_curve_and_follows_where_it_is_moved :: proc(t:^testing.T) {
+    f:Fixture
+    if !fixture_init(t,&f,"placed") {return}
+    defer fixture_destroy(&f)
+    m:=f.app.mixer
+    mixer.listener_set(m,{0,0,0},1)
+    source:=AUDIO_SOURCE_DEFAULT
+    source.sound,source.loop,source.attenuation,source.min_distance,source.max_distance=HUM,true,.Linear,1,20
+    // The loudest sample of a few frames of the game.
+    peak :: proc(m:^mixer.Mixer) -> f32 {
+        out:=make([]f32,960*2,context.temp_allocator)
+        loudest:f32
+        for _ in 0..<6 {
+            mixer.mixer_render(m,out)
+            mixer.mixer_update(m)
+        }
+        for sample in out {loudest=max(loudest,abs(sample))}
+        return loudest
+    }
+    voice:=play_source_at(&f.app,{},source,{0,0,-30})
+    if !testing.expect(t,voice!={},"it plays") {return}
+    testing.expect(t,peak(m)<1e-4,"beyond its max_distance its linear curve leaves it silent")
+    source_place(&f.app,voice,{0,0,-1})
+    testing.expect(t,peak(m)>0.05,"moved within its min_distance it is heard whole")
+    testing.expect(t,playing(&f.app,voice),"a loop goes on")
+}
+
+@(test)
 the_output_follows_the_setting_and_one_the_system_does_not_list_plays_the_default :: proc(t:^testing.T) {
     m,error:=mixer.mixer_create({})
     if !testing.expect_value(t,error,mixer.Error.None) {return}

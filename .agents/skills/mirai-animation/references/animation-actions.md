@@ -12,6 +12,10 @@ blends a local copy of its description.
 - Each action names clip (of another `.anim` with `animation`, [multiple
   sources](animation.md#multiple-sources)), layer, `over` branch, Override/Additive mode, curve
   policy, root, weight, positive speed, fades, priority and cancellation.
+- `clock` is `Own` (default: the entity's own time, slowed or sped up with its `core.Own_Pace`)
+  or `World`: the action plays at its speed in world time while its entity is dilated, as a clip
+  whose play rate makes up for a slow motion (a charge that plays at full speed while its
+  character is slowed). Windows of an ability that follow it count `World` time too.
 - Action names are unique and those of sections and windows, within their action.
 - Actions that share a layer must have the same `over`, `mode`, `reference`, `curves`,
   `mesh_space` and `root_motion`, so that the outgoing fade keeps the policy of its channel.

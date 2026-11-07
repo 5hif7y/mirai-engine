@@ -373,8 +373,9 @@ writes.
   the support it finds, so leaving an edge already moves as in the air even if locomotion saw it
   supported.
   - Walking (with `Walk`): velocity over the ground plane relative to it, with acceleration or
-    braking. Holding the `sprint` action raises the top speed to `sprint_speed` while the move
-    points within 60° of where it looks, and moving back loses `backward_slowdown` of it; both
+    braking. Holding the `sprint` action (or always, with `Walk.sprint_default`, Fortnite's
+    "Sprint by Default"; the action then only asks for a `Tactical_Sprint`) raises the top speed
+    to `sprint_speed` while the move points within 60° of where it looks, and moving back loses `backward_slowdown` of it; both
     apply in the air as well.
   - Jumping: the edge of the `jump` action among the buttons of the `Move_Input`, supported or
     during the coyote time after leaving an edge, gives the `launch` that reaches `Walk.jump_height`
@@ -388,7 +389,8 @@ writes.
     multiplier acts only on the ground. Energy is spent per second (not in the air with
     `pause_falling`), per jump and per slide start, and comes back `recharge_delay` after it was
     last spent. It ends without energy, going down in the air past `fall_grace` (`Character.fall_time`: a jump still rising does not count), crouched, sliding or out of
-    walking and falling, or after `grace` without sprinting; back within `grace` it keeps its ramp.
+    walking and falling, as soon as sprint is let go, or after `grace` with sprint held and the move off
+    forward; back within `grace` it keeps its ramp.
     Without energy it sprints as `Walk` says.
   - Ledge jump (with `Ledge_Jump`): standing at `min_speed` for `min_time`, `locomotion_step`
     checks the ground ahead before the move (`ledge_drop_ahead`, own rule): a sphere almost as

@@ -278,8 +278,9 @@ character_set_filter :: proc(w:^World,h:Character_Handle,filter:Filter) {
     shape_set_filter(w,ch.shape,filter)
 }
 // Changes the height of the capsule with the feet where they are: to crouch and to stand up again.
-// Growing first checks the taller capsule against the world with the filter of the character and fails,
-// changing nothing, when something is in its way (a ceiling). False also for a capsule that does not fit.
+// Growing first checks the taller capsule, CHARACTER_SKIN thinner so a wall it leans on is not in the
+// way, against the world with the filter of the character and fails, changing nothing, when something
+// is in its way (a ceiling). False also for a capsule that does not fit.
 character_set_height :: proc(w:^World,h:Character_Handle,height:f32) -> bool {
     ch,_:=character_get(w,h)
     if ch==nil || !(height>=2*ch.desc.radius+ch.desc.step_height) {return false}
@@ -293,7 +294,8 @@ character_set_height :: proc(w:^World,h:Character_Handle,height:f32) -> bool {
     if height>ch.desc.height {
         filter:=Query_Filter{filter=d.filter,ignore_body=ch.body}
         blocking:[1]Shape_Handle
-        if overlap_shape(w,capsule,{body.position+q_rotate(body.rotation,center),body.rotation},blocking[:],filter)>0 {return false}
+        thin:=Capsule{max(capsule.radius-CHARACTER_SKIN,0.5*capsule.radius),capsule.half_height}
+        if overlap_shape(w,thin,{body.position+q_rotate(body.rotation,center),body.rotation},blocking[:],filter)>0 {return false}
     }
     ch.desc.height=height
     shape.size.y=capsule.half_height

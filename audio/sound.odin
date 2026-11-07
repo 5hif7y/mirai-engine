@@ -3,10 +3,12 @@ package mirai_audio
 import "base:runtime"
 import "mirai:std/base"
 
-// Sounds: PCM held by the mixer as interleaved f32, mono or stereo, at the
-// sample rate they were recorded at. A streamed sound keeps its encoded file
-// instead and decodes a little ahead of what plays. A file is a WAV, an Ogg
-// Vorbis or the lossless coding of lossless.odin.
+// Sounds: mono or stereo, at the sample rate they were recorded at. A sound
+// of 16 bits (lossless, or a WAV of 8 or 16 bits) is kept as its encoded
+// bytes and every voice decodes it as it plays (feed.odin); any other is
+// decoded whole, to interleaved f32, when it is created. A streamed sound
+// keeps the file of its caller and decodes it as it plays. A file is a WAV,
+// an Ogg Vorbis or the lossless coding of lossless.odin.
 
 Sound :: distinct base.Handle
 
@@ -25,10 +27,12 @@ Sound_Slot :: struct {
     generation:u32,
     state:Sound_State,
     release_sent:bool,
-    samples:[]f32, // owned
-    frames:u32,
+    samples:[]f32,  // owned: a sound decoded whole
+    encoded:[]u8,   // owned: a sound kept encoded
+    source:Decoder, // how a voice decodes a sound kept encoded; it points into encoded
+    frames:u32,     // 0 for a stream of unknown length
     channels,rate:u32,
-    stream:i32, // index of its stream; -1 for a sound in memory
+    feed:i32,       // the feed of a streamed sound; -1 for any other
 }
 
 @(private)
@@ -46,12 +50,32 @@ sound_slot_take :: proc(m:^Mixer) -> (index:int,error:Error) {
     }
     return -1,.Capacity_Exhausted
 }
+// What the mixer holds for the sound: its samples, its encoded bytes, the decoder of a stream.
+@(private)
+sound_slot_bytes :: proc(m:^Mixer,slot:^Sound_Slot) -> int {
+    bytes:=len(slot.samples)*size_of(f32)+len(slot.encoded)
+    if slot.feed>=0 {
+        d:=&m.feeds[slot.feed].decoder
+        bytes+=len(d.memory)+len(d.planes)*size_of(i32)
+    }
+    return bytes
+}
 @(private)
 sound_slot_free :: proc(m:^Mixer,slot:^Sound_Slot) {
-    if slot.stream>=0 {stream_close(m,&m.streams[slot.stream])}
+    m.counters.sound_bytes-=sound_slot_bytes(m,slot)
+    if slot.feed>=0 {stream_close(m,&m.feeds[slot.feed])}
     delete(slot.samples,m.allocator)
-    slot^={generation=slot.generation+1,stream=-1}
+    delete(slot.encoded,m.allocator)
+    slot^={generation=slot.generation+1,feed=-1}
     m.counters.sounds-=1
+}
+// Some feed still decodes the sound, or may: its memory stays.
+@(private)
+sound_feeds_busy :: proc(m:^Mixer,index:u32) -> bool {
+    for &f in m.feeds {
+        if f.sound==index && feed_phase(&f)!=.Free {return true}
+    }
+    return false
 }
 
 // Copies interleaved frames into a new sound. channels is 1 or 2.
@@ -61,7 +85,7 @@ sound_create :: proc(m:^Mixer,samples:[]f32,channels,sample_rate:int) -> (sound:
     copied,failed:=make([]f32,len(samples),m.allocator)
     if failed!=nil {return 0,.Out_Of_Memory}
     copy(copied,samples)
-    return sound_slot_fill(m,index,copied,channels,sample_rate,-1),.None
+    return sound_slot_pcm(m,index,copied,channels,sample_rate),.None
 }
 // A new sound of interleaved 16 bit frames, turned to f32 as they are copied.
 sound_create_pcm16 :: proc(m:^Mixer,samples:[]i16,channels,sample_rate:int) -> (sound:Sound,error:Error) {
@@ -70,25 +94,57 @@ sound_create_pcm16 :: proc(m:^Mixer,samples:[]i16,channels,sample_rate:int) -> (
     converted,failed:=make([]f32,len(samples),m.allocator)
     if failed!=nil {return 0,.Out_Of_Memory}
     for sample,i in samples {converted[i]=f32(sample)*(1.0/32768)}
-    return sound_slot_fill(m,index,converted,channels,sample_rate,-1),.None
+    return sound_slot_pcm(m,index,converted,channels,sample_rate),.None
 }
-// Decodes a whole file into a new sound.
+// A new sound from a whole file. A lossless file whose blocks fit the feeds
+// of the mixer, and a WAV of 8 or 16 bits, are copied as they are and decoded
+// by each voice; any other is decoded now. A lossless file whose block table
+// points outside of it, as a cut one does, is refused; a damaged block
+// inside plays as silence.
 sound_load :: proc(m:^Mixer,file:[]u8) -> (sound:Sound,error:Error) {
     index:=sound_slot_take(m) or_return
-    pcm:=decode(file,m.allocator) or_return
-    return sound_slot_fill(m,index,pcm.samples,pcm.channels,pcm.sample_rate,-1),.None
+    source:Decoder
+    kept:[]u8
+    if len(file)>=4 && string(file[:4])==LOSSLESS_MAGIC {
+        l:=lossless_parse(file) or_return
+        if !lossless_table_valid(&l) {return 0,.Invalid_Data}
+        if l.block_frames*2<=m.feed_frames {
+            source={kind=.Lossless,channels=l.channels,sample_rate=l.sample_rate,frames=l.frames}
+            kept=file
+        }
+    } else if len(file)>=12 && string(file[:4])=="RIFF" && string(file[8:12])=="WAVE" {
+        wav:=wav_parse(file) or_return
+        if wav.format==.S16 || wav.format==.U8 {
+            source={kind=.Wav,channels=wav.channels,sample_rate=wav.sample_rate,frames=wav.frames,wav=wav}
+            kept=wav.data
+        }
+    }
+    if source.kind==.None {
+        pcm:=decode(file,m.allocator) or_return
+        return sound_slot_pcm(m,index,pcm.samples,pcm.channels,pcm.sample_rate),.None
+    }
+    encoded,failed:=make([]u8,len(kept),m.allocator)
+    if failed!=nil {return 0,.Out_Of_Memory}
+    copy(encoded,kept)
+    // The decoder reads the copy.
+    if source.kind==.Lossless {source.lossless,_=lossless_parse(encoded)} else {source.wav.data=encoded}
+    return sound_slot_fill(m,index,{encoded=encoded,source=source,frames=u32(source.frames),channels=u32(source.channels),rate=u32(source.sample_rate),feed=-1}),.None
 }
 @(private)
-sound_slot_fill :: proc(m:^Mixer,index:int,samples:[]f32,channels,sample_rate:int,stream:i32) -> Sound {
+sound_slot_pcm :: proc(m:^Mixer,index:int,samples:[]f32,channels,sample_rate:int) -> Sound {
+    return sound_slot_fill(m,index,{samples=samples,frames=u32(len(samples)/channels),channels=u32(channels),rate=u32(sample_rate),feed=-1})
+}
+@(private)
+sound_slot_fill :: proc(m:^Mixer,index:int,fill:Sound_Slot) -> Sound {
     slot:=&m.sounds[index]
-    slot.state=.Ready;slot.release_sent=false
-    slot.samples=samples
-    slot.frames=u32(len(samples)/channels)
-    slot.channels=u32(channels);slot.rate=u32(sample_rate)
-    slot.stream=stream
+    generation:=slot.generation
+    slot^=fill
+    slot.generation=generation
+    slot.state=.Ready
     m.sound_released[index]=0
     m.counters.sounds+=1
-    return Sound(base.handle_make(u32(index),slot.generation))
+    m.counters.sound_bytes+=sound_slot_bytes(m,slot)
+    return Sound(base.handle_make(u32(index),generation))
 }
 
 // The handle dies now and the voices that play the sound end; its memory is
@@ -103,9 +159,7 @@ sound_valid :: proc(m:^Mixer,sound:Sound) -> bool {return sound_slot(m,sound)!=n
 // Length in frames at its own sample rate; 0 for a stream of unknown length.
 sound_frames :: proc(m:^Mixer,sound:Sound) -> int {
     slot:=sound_slot(m,sound)
-    if slot==nil {return 0}
-    if slot.stream>=0 {return m.streams[slot.stream].decoder.frames}
-    return int(slot.frames)
+    return int(slot.frames) if slot!=nil else 0
 }
 sound_sample_rate :: proc(m:^Mixer,sound:Sound) -> int {
     slot:=sound_slot(m,sound)

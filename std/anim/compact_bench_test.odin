@@ -36,15 +36,15 @@ bench_animation_resident_sampling :: proc(t:^testing.T) {
     when #config(ANIM_COMPACT_BENCH,false) {
         stats,error:=library_compress(&library)
         testing.expect_value(t,error,Compress_Error.None)
-        log.infof("animation compression: %d sampled, %d constant, %d raw tracks, %d -> %d bytes, error %.6f",stats.sampled_tracks,stats.constant_tracks,stats.raw_tracks,stats.raw_bytes,stats.resident_bytes,stats.error)
+        log.infof("animation compression: %d sampled, %d constant, %d default, %d raw tracks, %d -> %d bytes, error %.6f",stats.sampled_tracks,stats.constant_tracks,stats.default_tracks,stats.raw_tracks,stats.raw_bytes,stats.resident_bytes,stats.error)
     }
-    stored:=clip_tracks(&library,clip)
     best:=max(time.Duration);sink:f32
     for _ in 0..<5 {
         start:=time.tick_now()
-        for repeat in 0..<REPEATS {position:=f32(repeat%113)/112*2;for track in stored {sink+=clip_evaluate(&library,track,position).x}}
+        values:[TRACKS]math.Vec4
+        for repeat in 0..<REPEATS {position:=f32(repeat%113)/112*2;clip_sample(&library,clip,position,values[:]);for value in values {sink+=value.x}}
         best=min(best,time.tick_since(start))
     }
-    log.infof("animation resident %d tracks %d keys, %d sample bytes: %d bytes, %.2f ns/track (check %v)",TRACKS,library.key_count,library.sample_count,library_resident_bytes(&library),f64(time.duration_nanoseconds(best))/(REPEATS*TRACKS),sink)
+    log.infof("animation resident %d tracks %d keys, %d stream bytes: %d bytes, %.2f ns/track (check %v)",TRACKS,library.key_count,library.stream_bytes,library_resident_bytes(&library),f64(time.duration_nanoseconds(best))/(REPEATS*TRACKS),sink)
 }
 }

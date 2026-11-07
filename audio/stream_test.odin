@@ -43,7 +43,7 @@ stream_plays_exactly_what_its_file_holds :: proc(t:^testing.T) {
         if !test_near(t,out[i*2],want,0) || !test_near(t,out[i*2+1],-want,0) {break}
     }
     testing.expect(t,!voice_valid(m,voice))
-    testing.expect_value(t,mixer_stats(m).stream_underruns,u64(0))
+    testing.expect_value(t,mixer_stats(m).underruns,u64(0))
     // Played again, it starts from the beginning.
     desc:=VOICE_DEFAULT
     desc.volume=0.5
@@ -106,7 +106,7 @@ starved_stream_goes_quiet_and_resumes_where_it_was :: proc(t:^testing.T) {
     }
     testing.expect_value(t,heard,1024)
     testing.expect_value(t,out[2999*2],f32(0))
-    testing.expect(t,mixer_stats(m).stream_underruns>0)
+    testing.expect(t,mixer_stats(m).underruns>0)
     testing.expect(t,voice_valid(m,voice))
     // It comes back with the very next frame of the sound.
     mixer_update(m)
@@ -146,7 +146,7 @@ resampled_ogg_stream_sounds_like_the_same_file_played_from_memory :: proc(t:^tes
     testing.expect(t,got[87000*2]!=0 || got[87001*2]!=0)
     testing.expect_value(t,got[87400*2],f32(0))
     testing.expect(t,!voice_valid(memory,a) && !voice_valid(streamed,b))
-    testing.expect_value(t,mixer_stats(streamed).stream_underruns,u64(0))
+    testing.expect_value(t,mixer_stats(streamed).underruns,u64(0))
 }
 
 @(test)
@@ -187,11 +187,11 @@ streams_are_limited_and_their_place_is_freed_with_the_sound :: proc(t:^testing.T
 @(private="file")
 Render_Thread :: struct {m:^Mixer,stop:bool,chunks:int,peak:f32}
 
-// The two threads a mixer is made for, each doing its part as fast as it
-// can: afterwards no voice or sound is lost and nothing was left playing.
+// The threads a mixer is made for, each doing its part as fast as it can:
+// afterwards no voice, feed or sound is lost and nothing was left playing.
 @(test)
 audio_thread_and_game_thread_share_a_mixer_without_locks :: proc(t:^testing.T) {
-    m:=test_mixer(t,{voice_capacity=16,stream_frames=2048})
+    m:=test_mixer(t,{voice_capacity=16,stream_frames=2048,decoder_thread=true})
     defer mixer_destroy(m)
     state:=Render_Thread{m=m}
     render :: proc(state:^Render_Thread) {
@@ -207,7 +207,11 @@ audio_thread_and_game_thread_share_a_mixer_without_locks :: proc(t:^testing.T) {
     sounds:[4]Sound
     sounds[0]=test_mono(t,m,2000,test_small,44100)
     sounds[1]=test_stereo(t,m,3000,test_small)
-    sounds[2]=test_mono(t,m,40,test_small)
+    // Kept encoded: every voice of it decodes on the decoder thread.
+    samples:=make([]i16,3000*2,context.temp_allocator)
+    for &sample,i in samples {sample=i16(i%101-50)}
+    encoded,_:=lossless_encode(samples,2,22050,context.temp_allocator)
+    sounds[2],_=sound_load(m,encoded)
     stream,_:=sound_stream(m,ramp_wav(9000))
     bus,_:=bus_create(m)
     voices:[64]Voice
@@ -250,16 +254,17 @@ audio_thread_and_game_thread_share_a_mixer_without_locks :: proc(t:^testing.T) {
         before:=sync.atomic_load(&state.chunks)
         for sync.atomic_load(&state.chunks)<before+3 {thread.yield()}
         mixer_update(m)
-        if m.free_count==len(m.shadows) {break}
+        if m.free_count==len(m.shadows) && m.free_feed_count==m.pool_feeds && feed_phase(&m.feeds[m.pool_feeds])==.Free {break}
     }
     sync.atomic_store(&state.stop,true)
     thread.join(worker)
     testing.expect_value(t,m.free_count,len(m.shadows))
+    testing.expect_value(t,m.free_feed_count,m.pool_feeds)
     testing.expect_value(t,mixer_stats(m).voices_active,0)
     testing.expect(t,mixer_stats(m).frames_rendered>0 && state.chunks>0)
     testing.expect(t,state.peak<4,"The mix went far above what the voices could add up to")
     testing.expect(t,!math.is_nan(state.peak))
     // No voice plays the stream any more, and every sound slot but the live ones is free.
-    testing.expect_value(t,m.streams[0].voice,i32(-1))
+    testing.expect_value(t,feed_phase(&m.feeds[m.pool_feeds]),Feed_Phase.Free)
     testing.expect_value(t,mixer_stats(m).sounds,5)
 }

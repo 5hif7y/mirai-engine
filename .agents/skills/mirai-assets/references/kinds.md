@@ -166,7 +166,7 @@ is what the source gave in the last import and `material`, what the material is.
 
 `asset/animation.odin`. An `.anim` stores `std/anim` clips with their written names, their tracks,
 keys and markers. The project's keeps every track as keys, which the editor edits; the cooked one
-of a shipped game keeps what `anim.library_compress` samples as samples
+of a shipped game keeps the stream `anim.library_compress` makes of each clip
 ([storage](../../mirai-std/references/anim-storage.md)).
 
 - A track's `target` is the textual identity of what it moves (empty for whoever plays the clip).
@@ -184,7 +184,7 @@ of a shipped game keeps what `anim.library_compress` samples as samples
   their names and each marker's `id` is its row. If the view is invalid or not all clips fit, it
   returns 0 without touching the library. `animation_compress` then prepares it as the runtime plays
   it, on the skeletons a `Skeleton_Open` opens (`skeleton_open_registry`, or the host's assets) and
-  the hierarchy of `animation_parents`; a cooked view is already sampled.
+  the hierarchy of `animation_parents`; a cooked view already holds its streams.
 - `animation_cooked_document` writes the cooked `.anim` from that library; `animation_descs`
   refuses a cooked view: it is not edited.
 - `.pose`, `.blend`, `.agraph` and authoring by API (clips, tracks, keys, markers, skeletons) belong
@@ -196,8 +196,9 @@ of a shipped game keeps what `anim.library_compress` samples as samples
 
 `asset/sound.odin`. A `.sound` stores `Lossless` (16 bit samples coded without loss by
 `audio.lossless_encode`, in the bulk table `lossless`, read from the file without a copy) or `File`
-(a WAV or Ogg Vorbis as is in the bulk table `file`). Either is decoded whole on loading or, with
-the `Stream` flag, while it plays ([audio](../../mirai-platform/references/audio.md#sounds)). The
+(a WAV or Ogg Vorbis as is in the bulk table `file`). Without the `Stream` flag the mixer keeps it
+in memory (lossless stays encoded and each voice decodes it); with it, it is decoded while it plays
+([audio](../../mirai-platform/references/audio.md#sounds)). The
 lossless table is stored without LZ: the residual coding leaves it nothing to gain. What the
 importer stores: [imports guide](../../mirai-imports/references/imports.md#sounds).
 

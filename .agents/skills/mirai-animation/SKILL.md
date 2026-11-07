@@ -132,7 +132,7 @@ automatic plugin `animation_physics` feeds the locomotion of each `Character`.
   `asset.registry_read` by path), never the file by its path on disk, and notice a change by the
   registry revision; this way the preview and Play see what is unsaved.
 - The project's `.anim` keeps exact keys, which the editor edits; the editor and the game play
-  them compressed into samples, and a shipped game carries only those samples
+  them compressed into a stream per clip, and a shipped game carries only those streams
   ([storage](../mirai-std/references/anim-storage.md)). A compression is kept in the project
   cache and a first one runs in a job: until it ends the entity does not animate (a rig holds its
   rest pose) and nothing is reported ([content](../mirai-core/references/host.md#content)).

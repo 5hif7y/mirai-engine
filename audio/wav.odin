@@ -88,6 +88,25 @@ wav_convert :: proc "contextless" (wav:^Wav,first:int,out:[]f32) -> int {
             for k in 0..<8 {bits|=u64(b[k])<<(u32(k)*8)}
             out[i]=f32(transmute(f64)bits)
         }
+        // A sample that is not a number, or beyond what f32 holds, would stay in every filter it reaches.
+        if !(abs(out[i])<=max(f32)) {out[i]=0}
+    }
+    return count
+}
+
+// Frames [first,first+len(out)/channels) of a WAV of 8 or 16 bits, to 16
+// bits, and how many there were.
+@(private)
+wav_convert_i16 :: proc "contextless" (wav:^Wav,first:int,out:[]i16) -> int {
+    count:=min(len(out)/wav.channels,wav.frames-first)
+    if count<=0 {return 0}
+    n:=count*wav.channels
+    if wav.format==.S16 {
+        source:=wav.data[first*wav.channels*2:][:n*2]
+        for i in 0..<n {out[i]=i16(u16(source[i*2])|u16(source[i*2+1])<<8)}
+    } else {
+        source:=wav.data[first*wav.channels:][:n]
+        for i in 0..<n {out[i]=(i16(source[i])-128)<<8}
     }
     return count
 }

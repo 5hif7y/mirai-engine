@@ -168,7 +168,7 @@ animation_compression_of_the_demo :: proc(t:^testing.T) {
         raw_ns,s1:=bench_sample(&exact,len(view.clips),200)
         cooked_ns,s2:=bench_sample(&played,len(view.clips),200)
         resident_raw,resident_cooked:=anim.library_resident_bytes(&exact),anim.library_resident_bytes(&played)
-        fmt.printfln("tracks: %d sampled, %d constant, %d raw; samples %d bytes, keys %d",stats.sampled_tracks,stats.constant_tracks,stats.raw_tracks,compressed.sample_count,compressed.key_count)
+        fmt.printfln("tracks: %d sampled, %d constant, %d default, %d raw; streams %d bytes, keys %d",stats.sampled_tracks,stats.constant_tracks,stats.default_tracks,stats.raw_tracks,compressed.stream_bytes,compressed.key_count)
         fmt.printfln("| %s | %d | %d | %d | %d | %.4f (compressor %.4f) | %.1f | %.1f | %.2f | %.2f |%v",name,len(bytes),len(serial.writer_bytes(&w)),resident_raw,resident_cooked,worst*1000,stats.error*1000,raw_ns,cooked_ns,time.duration_milliseconds(editor_load),time.duration_milliseconds(cooked_load),"" if s1+s2!=0.5 else " ")
         totals+={len(bytes),len(serial.writer_bytes(&w)),resident_raw,resident_cooked}
     }

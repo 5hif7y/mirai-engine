@@ -479,11 +479,22 @@ write_model :: proc(w:^Writer,model:^Imported_Model) -> bool {
         w.report.skeleton_ids[i]=part.id
         import_data:=import_info(source,skeleton.name,i,model.source_size,model.source_hash,0,model.version)
         existed:=os.exists(part.path)
+        // The file it replaces: what a person set on it stays (body parts, sockets of their own).
+        previous_file:asset.Asset
+        previous:^asset.Skeleton_View
+        previous_view:asset.Skeleton_View
+        loaded:bool
+        if existed && asset.asset_load(&previous_file,part.path,context.temp_allocator)==.None {
+            loaded=true
+            if view,error:=asset.skeleton_view(&previous_file,&w.types);error==.None {previous_view=view;previous=&previous_view}
+        }
+        defer if loaded {asset.asset_close(&previous_file)}
         body:asset.Skeleton_Body
         body_parts:[len(anim.Body_Part)]asset.Skeleton_Body_Part
-        count,map_:=skeleton_body(w,part.path,existed,skeleton.bones,&body,&body_parts)
+        count,map_:=skeleton_body(previous,skeleton.bones,&body,&body_parts)
         sockets:=skeleton_sockets(model,skeleton)
         if count>0 {skeleton_grips(w,model,i,map_,&sockets)}
+        skeleton_sockets_kept(previous,skeleton.bones,&sockets)
         if error:=asset.skeleton_save(part.path,&w.types,{id=part.id,owner=part.owner,bones=skeleton.bones,sockets=sockets[:],body=&body if count>0 else nil,body_parts=body_parts[:count],source=&import_data});error!=.None {return save_failed(w,error,part.path)}
         record(w,part.id,asset.KIND_SKELETON,skeleton.name,part.path,source,existed,fmt.tprintf("%d bones",len(skeleton.bones)))
     }
@@ -698,21 +709,32 @@ skeleton_grips :: proc(w:^Writer,model:^Imported_Model,skeleton:int,map_:anim.Bo
     }
 }
 
+// The sockets of the file an import replaces that it does not make again (one a person or an agent
+// added, such as where a weapon hangs), on a bone it still has. Those it makes (named by the
+// source, bone.*, grips) are made again from the source.
+@(private="file")
+skeleton_sockets_kept :: proc(previous:^asset.Skeleton_View,bones:[]asset.Skeleton_Bone,sockets:^[dynamic]asset.Skeleton_Socket) {
+    if previous==nil {return}
+    made:=len(sockets)
+    for &socket in previous.sockets {
+        name:=base.text_get(socket.name[:])
+        if strings.has_prefix(name,"bone.") {continue}
+        again:=false
+        for &other in sockets[:made] {if other.name==socket.name {again=true;break}}
+        if again {continue}
+        for &bone in bones {if bone.path==socket.bone {append(sockets,socket);break}}
+    }
+}
+
 // The body of an imported skeleton: found on its bones, keeping the parts a
 // person set in the file it replaces when their bones are still there.
 // Returns how many parts it wrote, 0 for a skeleton without a body, and the map they come from.
 @(private="file")
-skeleton_body :: proc(w:^Writer,path:string,existed:bool,bones:[]asset.Skeleton_Bone,body:^asset.Skeleton_Body,parts:^[len(anim.Body_Part)]asset.Skeleton_Body_Part) -> (count:int,map_:anim.Body_Map) {
+skeleton_body :: proc(previous_file:^asset.Skeleton_View,bones:[]asset.Skeleton_Bone,body:^asset.Skeleton_Body,parts:^[len(anim.Body_Part)]asset.Skeleton_Body_Part) -> (count:int,map_:anim.Body_Map) {
     previous:=anim.body_map_empty()
-    if existed {
-        file:asset.Asset
-        if asset.asset_load(&file,path,context.temp_allocator)==.None {
-            defer asset.asset_close(&file)
-            if view,error:=asset.skeleton_view(&file,&w.types);error==.None {
-                previous=asset.skeleton_body_map(bones,view.body,view.body_parts)
-                for part in anim.Body_Part {if part not_in previous.manual {previous.bones[part],previous.confidence[part]=-1,0}}
-            }
-        }
+    if previous_file!=nil {
+        previous=asset.skeleton_body_map(bones,previous_file.body,previous_file.body_parts)
+        for part in anim.Body_Part {if part not_in previous.manual {previous.bones[part],previous.confidence[part]=-1,0}}
     }
     found:bool
     map_,found=asset.skeleton_body_detect(bones,previous)

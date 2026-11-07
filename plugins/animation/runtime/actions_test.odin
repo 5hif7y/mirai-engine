@@ -32,6 +32,7 @@ action_test_add_state :: proc(runtime:^Action_Runtime,value:Action_State) {
 @(test)
 action_profiles_roundtrip_and_reject_invalid_section_links_and_root_layer_policies :: proc(t:^testing.T) {
     profile:=action_test_profile();defer action_profile_free(&profile)
+    for &action in profile.actions {action.mesh_space=true}
     types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
     doc:asset.Document;defer asset.document_destroy(&doc)
     testing.expect_value(t,action_profile_document(&doc,&types,{3,4},profile),asset.Error.None)
@@ -40,7 +41,7 @@ action_profiles_roundtrip_and_reject_invalid_section_links_and_root_layer_polici
     file:asset.Asset;defer asset.asset_close(&file)
     testing.expect_value(t,asset.asset_open(&file,serial.writer_bytes(&writer)),asset.Error.None)
     view,error:=action_profile_view(&file,&types);testing.expect_value(t,error,asset.Error.None)
-    testing.expect_value(t,view.sections[1],profile.sections[1]);testing.expect_value(t,view.windows[0],profile.windows[0])
+    testing.expect_value(t,view.sections[1],profile.sections[1]);testing.expect_value(t,view.windows[0],profile.windows[0]);testing.expect(t,view.actions[0].mesh_space)
     profile.sections[0].next=99;testing.expect(t,!action_profile_check(profile));profile.sections[0].next=1
     profile.sections[1].action=1;testing.expect(t,!action_profile_check(profile));profile.sections[1].action=0
     profile.actions[1].reference=.1;testing.expect(t,!action_profile_check(profile));profile.actions[1].reference=0
@@ -58,6 +59,7 @@ actions_segment_sections_and_windows_copy_state_and_obey_cancellation_without_st
     content.lib.clips[0].marker_count=2;content.markers=make([]u64,2);defer delete(content.markers);content.markers[0],content.markers[1]=base.name_hash("windup"),base.name_hash("recover")
     cache:=Actions_Assets{allocator=context.allocator};defer actions_assets_free(&cache)
     append(&cache.contents,Action_Content{id=description.actions,checked=1,revision=1,profile=action_test_profile(),valid=true})
+    for &action in cache.contents[0].profile.actions {action.mesh_space=true}
     host_assets:host.Assets;app:=host.App{assets=&host_assets,allocator=context.allocator}
     playback:Playback;defer playback_free(&playback);events:Animation_Events;defer delete(events.items)
     requests:Action_Requests;defer delete(requests.queue.items);actions:Action_Runtime;defer actions_runtime_free(&actions)
@@ -69,7 +71,9 @@ actions_segment_sections_and_windows_copy_state_and_obey_cancellation_without_st
     testing.expect(t,!prepared && len(requests.queue.items)==1 && requests.queue.items[0]==initial_request && len(actions.states)==0 && len(actions.events.items)==0)
     testing.expect(t,actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,nil))
     testing.expect(t,len(requests.queue.items)==0 && actions.states[0].layers[0].active && actions.events.items[0].kind==.Started)
-    actions_sample(&actions,&state,&description,.4,nil,&content,&playback,&events);layers_advance(&playback,&state,&content,description,&events,.4,nil);actions_layer_finish(&actions,&state)
+    actions_sample(&actions,&state,&description,.4,nil,&content,&playback,&events)
+    testing.expect(t,description.layers[0].mesh_space,"an action of mesh_space blends its layer in the space of the rig")
+    layers_advance(&playback,&state,&content,description,&events,.4,nil);actions_layer_finish(&actions,&state)
     testing.expect(t,abs(state.layers[0].fader.current.time-1.15)<1e-5)
     testing.expect(t,len(events.items)==2 && abs(events.items[0].fraction-.25)<1e-5 && abs(events.items[1].fraction-.875)<1e-5)
     kinds:=[?]Action_Event_Kind{.Started,.Section,.Window_Begin,.Window_End,.Section}

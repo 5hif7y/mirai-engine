@@ -84,7 +84,7 @@ Api_Play_Audio_Stats :: struct {
 }
 Api_Play_Audio_Mixer :: struct {
     voices_active,sounds:int,
-    voices_played,voices_stolen,voices_rejected,commands_dropped,stream_underruns,streams_busy:u64,
+    voices_played,voices_stolen,voices_rejected,commands_dropped,underruns,streams_busy,feeds_busy:u64,
 }
 Api_Play_Audio_Voice :: struct {
     entity:core.Entity `mirai:"label=The one with the Audio_Source"`,
@@ -431,8 +431,9 @@ play_audio_write :: proc(s:^Session,out:^serial.Writer,voices:^eaudio.Voices,w:c
         api.write_uint(out,"voices_stolen",counters.voices_stolen)
         api.write_uint(out,"voices_rejected",counters.voices_rejected)
         api.write_uint(out,"commands_dropped",counters.commands_dropped)
-        api.write_uint(out,"stream_underruns",counters.stream_underruns)
+        api.write_uint(out,"underruns",counters.underruns)
         api.write_uint(out,"streams_busy",counters.streams_busy)
+        api.write_uint(out,"feeds_busy",counters.feeds_busy)
         serial.write_u8(out,'}')
     }
     serial.write_u8(out,'}')

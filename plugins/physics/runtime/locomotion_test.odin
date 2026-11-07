@@ -16,6 +16,7 @@ Loco_Test :: struct {
     walk:Walk,
     fly:Fly,
     swim:Maybe(Swim),
+    slide:Maybe(Slide),
 }
 
 @(private="file")
@@ -46,13 +47,15 @@ loco_test_box :: proc(f:^Loco_Test,half,position:[3]f32,rotation:=mm.QUAT_IDENTI
 @(private) TEST_WALK_BASE :: input.Action(len(input.Look_Action))
 @(private) TEST_MOVE :: TEST_WALK_BASE+input.Action(Walk_Action.Move)
 @(private) TEST_JUMP :: TEST_WALK_BASE+input.Action(Walk_Action.Jump)
+@(private) TEST_SPRINT :: TEST_WALK_BASE+input.Action(Walk_Action.Sprint)
+@(private) TEST_CROUCH :: TEST_WALK_BASE+input.Action(Walk_Action.Crouch)
 
 @(private="file")
 loco_test_tick :: proc(f:^Loco_Test,move:[3]f32,ticks:=1,buttons:=input.Action_Mask(0),yaw:f32=0,pitch:f32=0) {
     for _ in 0..<ticks {
         found:=character_state_of(sim.character_state(&f.w,f.ch))
         given:=input.Move_Input{move=move,look_yaw=yaw,look_pitch=pitch,buttons=buttons}
-        m:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,found,1,given,TEST_JUMP,sim.character_velocity(&f.w,f.ch),f.w.gravity,1.0/60)
+        m:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,f.slide,found,1,given,TEST_JUMP,TEST_SPRINT,TEST_CROUCH,sim.character_velocity(&f.w,f.ch),f.w.gravity,1.0/60)
         sim.character_set_move(&f.w,f.ch,m)
         sim.world_step(&f.w,1.0/60)
     }
@@ -81,6 +84,44 @@ walking_reaches_the_speed_of_the_locomotion_and_brakes :: proc(t:^testing.T) {
     testing.expectf(t,near(v.x,-5,0.02) && abs(v.z)<0.02,"turned velocity %v",v)
     loco_test_tick(&f,{},20)
     testing.expect(t,abs(sim.character_velocity(&f.w,f.ch).x)<0.01)
+}
+
+// Holding sprint walks forward at sprint_speed, not sideways or back; moving back loses
+// backward_slowdown of the speed; a sprint slower than max_speed, a zero slowdown or a sideways
+// move change nothing.
+@(test)
+walking_sprints_and_slows_backward :: proc(t:^testing.T) {
+    Case :: struct {sprint_speed,slowdown:f32,move:[3]f32,sprinting:bool,speed:f32}
+    cases:=[]Case{
+        {sprint_speed=8,move={0,0,-1},sprinting=true,speed=8},
+        {sprint_speed=8,move={0,0,-1},speed=5},
+        {sprint_speed=3,move={0,0,-1},sprinting=true,speed=5},
+        {sprint_speed=8,move={1,0,-1},sprinting=true,speed=8},
+        {sprint_speed=8,move={1,0,0},sprinting=true,speed=5},
+        {sprint_speed=8,slowdown=0.2,move={0,0,1},sprinting=true,speed=4},
+        {slowdown=0.2,move={0,0,1},speed=4},
+        {slowdown=0.2,move={1,0,0},speed=5},
+        {slowdown=0.2,move={0,0,0.5},speed=4},
+        {slowdown=2,move={0,0,1},speed=0},
+        {slowdown=cmath.nan_f32(),move={0,0,1},speed=5},
+    }
+    for c in cases {
+        walk:=WALK_DEFAULT
+        walk.sprint_speed,walk.backward_slowdown=c.sprint_speed,c.slowdown
+        got:=walk_speed(walk,{move=c.move},c.sprinting)
+        testing.expectf(t,near(got,c.speed,1e-5),"%v gives %v",c,got)
+    }
+    f:Loco_Test
+    testing.expect(t,loco_test_init(&f,{0,0,0}))
+    defer sim.world_destroy(&f.w)
+    f.walk.sprint_speed=8
+    loco_test_tick(&f,{},30)
+    loco_test_tick(&f,{0,0,-1},90,buttons=input.action_bit(TEST_SPRINT))
+    v:=sim.character_velocity(&f.w,f.ch)
+    testing.expectf(t,near(v.z,-8,0.05),"sprint velocity %v",v)
+    loco_test_tick(&f,{0,0,-1},60)
+    v=sim.character_velocity(&f.w,f.ch)
+    testing.expectf(t,near(v.z,-5,0.05),"after letting sprint go %v",v)
 }
 
 // The look faces -Z like a camera; the body faces it with +Z, the front of a glTF model.
@@ -289,14 +330,15 @@ a_mode_needs_its_component :: proc(t:^testing.T) {
     set_mode(&requests,flier,MODE_FLYING)
     physics:Physics_State
     problems:core.Problems
-    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&locals),core.read(&parents),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
+    no_slides:core.Table(Slide);no_mantles:core.Table(Mantle)
+    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&no_slides),core.read(&no_mantles),core.read(&found),core.read(&motions),core.read(&locals),core.read(&parents),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
     walking,_:=core.get(core.read(&characters),walker)
     flying,_:=core.get(core.read(&characters),flier)
     testing.expect(t,walking.mode!=MODE_FLYING,"without a Fly it does not fly")
     testing.expect_value(t,flying.mode,MODE_FLYING)
     testing.expect(t,core.problem_find(&problems,walker,"locomotion.mode_component")!=nil)
     set_mode(&requests,walker,MODE_FLYING)
-    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&found),core.read(&motions),core.read(&locals),core.read(&parents),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
+    locomotion_step(&characters,&moves,&inputs,core.read(&walks),core.read(&flights),core.read(&swims),core.read(&no_slides),core.read(&no_mantles),core.read(&found),core.read(&motions),core.read(&locals),core.read(&parents),core.read(&remotes),core.ref(&physics),{},{base=TEST_WALK_BASE},&requests,{playing=true,dt=1.0/60},core.CLOCK_DEFAULT,&problems)
     walking,_=core.get(core.read(&characters),walker)
     testing.expect(t,walking.mode!=MODE_FLYING,"asking for flying without a Fly is refused")
     core.table_settle(&inputs,&es);core.table_settle(&moves,&es)
@@ -304,6 +346,51 @@ a_mode_needs_its_component :: proc(t:^testing.T) {
     looking,_:=core.get(core.read(&inputs),walker)
     // Its body faces +Z, its look -Z: the look is half a turn from where the Transform turns the body.
     testing.expectf(t,abs(looking.look_yaw-mm.angle_wrap(2.5-cmath.PI))<1e-4,"it looks where its Transform turns its body, not %v",looking.look_yaw)
+}
+
+// The game scales the gravity of a Character for a while through the locomotion, its only writer:
+// the scale holds until asked again, and one that is not finite is a problem that changes nothing.
+@(test)
+a_requested_gravity_scale_holds_until_asked_again :: proc(t:^testing.T) {
+    es:core.Entities
+    core.entities_init(&es)
+    defer core.entities_destroy(&es)
+    moves:core.Table(Character_Move);inputs:core.Table(input.Move_Input)
+    walks:core.Table(Walk);flights:core.Table(Fly);swims:core.Table(Swim);characters:core.Table(Character);found:core.Table(Character_State)
+    motions:core.Table(core.Motion);locals:core.Table(core.Transform);parents:core.Table(core.Parent);remotes:core.Table(core.Remote)
+    core.table_init(&moves,"Character_Move");core.table_init(&inputs,"Move_Input")
+    core.table_init(&walks,"Walk");core.table_init(&flights,"Fly");core.table_init(&swims,"Swim");core.table_init(&characters,"Character");core.table_init(&found,"Character_State")
+    core.table_init(&motions,"Motion");core.table_init(&locals,"Transform");core.table_init(&parents,"Parent");core.table_init(&remotes,"Remote")
+    defer {
+        core.table_destroy(&moves);core.table_destroy(&inputs);core.table_destroy(&walks);core.table_destroy(&flights);core.table_destroy(&swims);core.table_destroy(&characters)
+        core.table_destroy(&found);core.table_destroy(&motions);core.table_destroy(&locals);core.table_destroy(&parents);core.table_destroy(&remotes)
+    }
+    walker:=core.create(&es)
+    core.add(&characters,walker,character_default())
+    core.add(&walks,walker,WALK_DEFAULT)
+    core.table_settle(&walks,&es);core.table_settle(&characters,&es)
+    requests:Locomotion_Requests
+    defer delete(requests.queue.items)
+    physics:Physics_State
+    problems:core.Problems
+    run :: proc(characters:^core.Table(Character),moves:^core.Table(Character_Move),inputs:^core.Table(input.Move_Input),walks:^core.Table(Walk),flights:^core.Table(Fly),swims:^core.Table(Swim),found:^core.Table(Character_State),motions:^core.Table(core.Motion),locals:^core.Table(core.Transform),parents:^core.Table(core.Parent),remotes:^core.Table(core.Remote),physics:^Physics_State,requests:^Locomotion_Requests,problems:^core.Problems) {
+        no_slides:core.Table(Slide);no_mantles:core.Table(Mantle)
+        locomotion_step(characters,moves,inputs,core.read(walks),core.read(flights),core.read(swims),core.read(&no_slides),core.read(&no_mantles),core.read(found),core.read(motions),core.read(locals),core.read(parents),core.read(remotes),core.ref(physics),{},{base=TEST_WALK_BASE},requests,{playing=false,dt=1.0/60},core.CLOCK_DEFAULT,problems)
+    }
+    scale_of :: proc(characters:^core.Table(Character),e:core.Entity) -> f32 {c,_:=core.get(core.read(characters),e);return c.gravity_scale}
+    testing.expect_value(t,scale_of(&characters,walker),f32(1))
+    set_gravity_scale(&requests,walker,0.4)
+    run(&characters,&moves,&inputs,&walks,&flights,&swims,&found,&motions,&locals,&parents,&remotes,&physics,&requests,&problems)
+    testing.expect_value(t,scale_of(&characters,walker),f32(0.4))
+    run(&characters,&moves,&inputs,&walks,&flights,&swims,&found,&motions,&locals,&parents,&remotes,&physics,&requests,&problems)
+    testing.expect_value(t,scale_of(&characters,walker),f32(0.4))
+    set_gravity_scale(&requests,walker,f32(cmath.inf_f32(1)))
+    run(&characters,&moves,&inputs,&walks,&flights,&swims,&found,&motions,&locals,&parents,&remotes,&physics,&requests,&problems)
+    testing.expect_value(t,scale_of(&characters,walker),f32(0.4))
+    testing.expect(t,core.problem_find(&problems,walker,"locomotion.request")!=nil)
+    set_gravity_scale(&requests,walker,1)
+    run(&characters,&moves,&inputs,&walks,&flights,&swims,&found,&motions,&locals,&parents,&remotes,&physics,&requests,&problems)
+    testing.expect_value(t,scale_of(&characters,walker),f32(1))
 }
 
 // Walks in from the shallows, swims on the surface with its head out, dives,
@@ -368,7 +455,7 @@ without_gravity_a_swimmer_on_the_surface_does_not_climb :: proc(t:^testing.T) {
     found:sim.Character_State
     found.fluid,found.head_depth,found.depth={.In_Fluid},-0.25,1.55
     given:=input.Move_Input{buttons=input.action_bit(TEST_JUMP)}
-    move:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,character_state_of(found),1,given,TEST_JUMP,{},{},1.0/60)
+    move:=locomotion_move(&f.loco,f.walk,f.fly,f.swim,f.slide,character_state_of(found),1,given,TEST_JUMP,TEST_SPRINT,TEST_CROUCH,{},{},1.0/60)
     testing.expect_value(t,f.loco.mode,MODE_SWIMMING)
     testing.expect_value(t,f.loco.move_count,0)
     testing.expect(t,.Float in move.flags)

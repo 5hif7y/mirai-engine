@@ -219,3 +219,19 @@ look_at_smooth_turns_toward_the_target_at_any_frame_rate :: proc(t:^testing.T) {
     same:=look_at_smooth(a,from,from,{0,1,0},5,1) // no direction to face
     testing.expect(t,same==a)
 }
+
+// Along up the pivot closes with up_half_life and across with half_life; up_half_life 0 or equal
+// to half_life is follow_update.
+@(test)
+follow_split_closes_up_and_across_at_their_own_half_lives :: proc(t:^testing.T) {
+    up:=math.Vec3{0,1,0}
+    f:Follow
+    for _ in 0..<6 {follow_update_split(&f,{1,1,0},0.2,0.01,up,1.0/60)}
+    testing.expectf(t,f.position.y>0.99 && f.position.x<0.5,"after 0.1 s %v",f.position)
+    a,b:Follow
+    for _ in 0..<10 {
+        follow_update_split(&a,{2,3,-1},0.1,0,up,1.0/60)
+        follow_update(&b,{2,3,-1},0.1,1.0/60)
+    }
+    testing.expectf(t,linalg.length(a.position-b.position)<1e-6,"%v and %v",a.position,b.position)
+}

@@ -69,6 +69,18 @@ lossless_parse :: proc "contextless" (file:[]u8) -> (l:Lossless,error:Error) {
     return l,.None
 }
 
+// Every block begins where the one before ends, or later, and ends inside the file.
+@(private)
+lossless_table_valid :: proc "contextless" (l:^Lossless) -> bool {
+    previous:=0
+    for block in 0..=l.blocks {
+        at:=int(wav_u32(l.offsets[block*4:]))
+        if at<previous || at>len(l.data) {return false}
+        previous=at
+    }
+    return true
+}
+
 // A whole file decoded, as the frames a WAV of the same samples gives.
 lossless_decode :: proc(file:[]u8,allocator:runtime.Allocator) -> (pcm:Pcm,error:Error) {
     l:=lossless_parse(file) or_return
@@ -101,6 +113,22 @@ lossless_convert :: proc "contextless" (planes:[]i32,block_frames,channels,first
     #no_bounds_check for i in 0..<count {
         out[i*2]=f32(left[i])*(1.0/32768)
         out[i*2+1]=f32(right[i])*(1.0/32768)
+    }
+}
+
+// Frames [first,first+count) of a decoded block to 16 bits, interleaved.
+@(private)
+lossless_convert_i16 :: proc "contextless" (planes:[]i32,block_frames,channels,first,count:int,out:[]i16) {
+    if count<=0 {return}
+    if channels==1 {
+        for i in 0..<count {out[i]=i16(planes[first+i])}
+        return
+    }
+    left,right:=planes[first:][:count],planes[block_frames+first:][:count]
+    out:=out[:count*2]
+    #no_bounds_check for i in 0..<count {
+        out[i*2]=i16(left[i])
+        out[i*2+1]=i16(right[i])
     }
 }
 

@@ -285,7 +285,7 @@ app_create :: proc(desc:App_Desc) -> (app:^App,error:App_Error) {
     }
     if desc.audio!=.None {
         audio_error:audio.Error
-        if app.mixer,audio_error=audio.mixer_create({allocator=allocator});audio_error!=.None {
+        if app.mixer,audio_error=audio.mixer_create({allocator=allocator,decoder_thread=desc.audio==.Device});audio_error!=.None {
             app_destroy(app)
             return nil,.Audio_Failed
         }

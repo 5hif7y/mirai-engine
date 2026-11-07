@@ -11,7 +11,7 @@ Voice_Source :: struct {
     frames:u32,
     channels:u32,   // 1 or 2
     rate:u32,
-    stream:i32,     // the stream that feeds it; -1 for a sound in memory
+    feed:i32,       // the feed it plays from; -1 for a sound decoded in memory
 }
 // What a play command carries, and afterwards the current parameters of the voice.
 Voice_Start :: struct {
@@ -22,7 +22,7 @@ Voice_Start :: struct {
     volume,pitch,pan:f32,
     loop,paused,spatial:bool,
     fade_in:u32,     // frames
-    offset:u32,      // frames into the sound
+    offset:u32,      // frames into the sound; for a feed, where its ring begins
     start_frame:u64, // mixer clock
     position,velocity:[3]f32,
     attenuation:Attenuation,
@@ -55,7 +55,7 @@ Mix_Voice :: struct {
 voice_begin :: proc "contextless" (m:^Mixer,v:^Mix_Voice,start:Voice_Start) {
     v^={start=start}
     v.phase=.Paused if start.paused else .Playing
-    v.cursor=u64(start.offset)<<32
+    v.cursor=u64(start.offset)<<32 if start.source.feed<0 else 0
     v.fade=1;v.fade_target=1
     if start.fade_in>0 {
         v.fade=0;v.fade_left=start.fade_in;v.fade_step=1/f32(start.fade_in)
@@ -76,6 +76,7 @@ lowpass_coefficient :: proc "contextless" (cutoff_hz,sample_rate:f32) -> f32 {
 voice_end :: proc "contextless" (m:^Mixer,index:u32) {
     v:=&m.voices[index]
     generation:=v.generation
+    feed_release(m,&v.start)
     v.phase=.Free
     if v.has_next {
         next:=v.next
@@ -90,7 +91,13 @@ voice_next_cancel :: proc "contextless" (m:^Mixer,index:u32) {
     v:=&m.voices[index]
     generation:=v.next.generation
     v.has_next=false
-    if v.phase==.Playing && m.clock>=v.start_frame {v.orphan=true;v.stopping=true} else {v.phase=.Free}
+    feed_release(m,&v.next)
+    if v.phase==.Playing && m.clock>=v.start_frame {
+        v.orphan=true;v.stopping=true
+    } else {
+        feed_release(m,&v.start)
+        v.phase=.Free
+    }
     sync.atomic_store_explicit(&m.finished[index],generation,.Release)
 }
 
@@ -181,7 +188,9 @@ voice_mix :: proc "contextless" (m:^Mixer,index:u32,n:int,clock:u64) {
             voice_mix_chunk(m,index,n,clock)
         }
         if v.has_next {
+            // The old sound had not started, or was paused: it leaves without a sound.
             next:=v.next
+            feed_release(m,&v.start)
             voice_begin(m,v,next)
         }
     }
@@ -209,8 +218,8 @@ voice_mix_chunk :: proc "contextless" (m:^Mixer,index:u32,n:int,clock:u64) {
     }
     span:=f32(n-offset)
     alive:=true
-    if v.source.stream>=0 {
-        alive=stream_voice_mix(m,v,out,offset,n,min(step,STREAM_STEP_MAX),target,span)
+    if v.source.feed>=0 {
+        alive=feed_voice_mix(m,v,out,offset,n,min(step,FEED_STEP_MAX),target,span)
     } else {
         alive,_=segments_mix(v,v.source.samples,u64(v.source.frames),v.loop,false,out,offset,n,max(step,1),target,span)
     }

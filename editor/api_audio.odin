@@ -69,7 +69,8 @@ Api_Audio_Bus :: struct {
 Api_Audio_Status :: struct {
     mixer:bool `mirai:"label=The editor has a mixer; without one nothing plays"`,
     voices_active,sounds:int,
-    voices_played,voices_stolen,voices_rejected,commands_dropped,stream_underruns,streams_busy:u64,
+    sound_bytes:int `mirai:"label=Memory the sounds hold: decoded samples, encoded bytes and the decoders of streams"`,
+    voices_played,voices_stolen,voices_rejected,commands_dropped,underruns,streams_busy,feeds_busy:u64,
     buses:[eaudio.AUDIO_BUS_CAPACITY]Api_Audio_Bus `mirai:"trim"`,
     heard:[API_PATH_BYTES]u8 `mirai:"text,label=The asset audio.play or the content browser plays while it plays"`,
 }
@@ -120,9 +121,9 @@ api_audio_status :: proc(s:^Session,call:^api.Call) {
     if m==nil {return}
     stats:=mixer.mixer_stats(m)
     r.mixer=true
-    r.voices_active,r.sounds=stats.voices_active,stats.sounds
+    r.voices_active,r.sounds,r.sound_bytes=stats.voices_active,stats.sounds,stats.sound_bytes
     r.voices_played,r.voices_stolen,r.voices_rejected=stats.voices_played,stats.voices_stolen,stats.voices_rejected
-    r.commands_dropped,r.stream_underruns,r.streams_busy=stats.commands_dropped,stats.stream_underruns,stats.streams_busy
+    r.commands_dropped,r.underruns,r.streams_busy,r.feeds_busy=stats.commands_dropped,stats.underruns,stats.streams_busy,stats.feeds_busy
     name :: proc(s:^Session,bus:mixer.Bus,out:[]u8) {
         if named,found:=core.name_of(s.info,eaudio.Audio_Bus,i64(bus));found {api_text_put(out,named)} else {api_text_put(out,fmt.tprintf("%d",int(bus)))}
     }

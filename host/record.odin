@@ -93,6 +93,8 @@ app_recording_mix :: proc(app:^App,rec:^World_Recording,out:[]f32) {
         for &sample in out {sample=0}
         return
     }
+    // Faster than real time: what plays from feeds is decoded here, not left to the decoder thread.
+    audio.mixer_decode(app.mixer)
     audio.mixer_render(app.mixer,out)
     audio.mixer_update(app.mixer)
     rec.mixed+=u64(len(out)/app.mixer.channels)

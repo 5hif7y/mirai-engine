@@ -320,7 +320,12 @@ is resolved every frame: it follows the body that is driven now.
 - Framing of `Follow` and `Orbit`: the pivot leads the target by what it travels over the ground in
   `look_ahead` seconds (up to `look_ahead_max`), and lets it move within a box (`dead_zone`, half
   of each side to the right, up and behind the camera) before following it. A large side leaves it
-  still on that axis, like the depth of a side view.
+  still on that axis, like the depth of a side view. Along the target's up the pivot can follow
+  with its own half-life (`up_half_life`): a jump or a step moves the camera sooner or later than
+  a walk.
+- An `Orbit` shifts where its arm starts with the pitch (`look_up_offset`, `look_down_offset`, in
+  the axes of the camera): the framing changes when looking up or down, and the probe of the arm
+  still keeps the camera out of walls.
 - `Camera_Input` is a per-frame queue that `camera_follow` (`late`) takes, and `Camera_Requests` a
   per-tick one that `camera_select` (`fixed`) takes: a view turn applies in the frame it arrives
   and an override is part of the simulation, so they do not mix.

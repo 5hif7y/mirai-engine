@@ -154,6 +154,17 @@ Character :: struct {
     layer_time:f32 `mirai:"transient,readonly,hidden"`, // part of a tick of its own time its layered moves have not spent
     move_count:u32 `mirai:"transient,readonly,hidden"`,
     moves:[LAYERED_MOVE_CAPACITY]Layered_Move `mirai:"transient,readonly,hidden"`,
+    crouched:bool `mirai:"transient,readonly,hidden"`,    // it asks for the crouch_height of its Walk: crouching or sliding
+    crouch_held:bool `mirai:"transient,readonly,hidden"`, // the crouch button was down in the last tick
+    crouch_lock:bool `mirai:"transient,readonly,hidden"`, // a slide ended with it standing up: crouch held does nothing until it is let go
+    air_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,       // since it last stood
+    slide_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,     // it has slid
+    slide_cooldown:f32 `mirai:"transient,readonly,hidden,unit=s"`, // left before crouch starts another slide
+    slide_course:[3]f32 `mirai:"transient,readonly,hidden"`,       // where it started sliding, across its up
+    slide_turn:f32 `mirai:"transient,readonly,hidden"`,            // radians its move turned the course from there, left about its up
+    mantle_from,mantle_to:[3]f32 `mirai:"transient,readonly,hidden,unit=m"`, // where its feet start and end a mantle, in the world
+    mantle_time:f32 `mirai:"transient,readonly,hidden,unit=s"`,     // of the mantle it climbs
+    mantle_height:f32 `mirai:"transient,readonly,unit=m"`,          // of the ledge of its last mantle over its feet: the animation of the climb chooses by it
 }
 
 PITCH_LIMIT_DEFAULT :: f32(85*mm.RAD_PER_DEG)
@@ -186,6 +197,10 @@ Move_Flags :: sim.Move_Flags
 @(component,shared,description="How the Character is driven: toward a velocity on the ground and another in the air, with a launch and the yaw it faces.")
 Character_Move :: struct {
     value:sim.Character_Move `mirai:"transient,readonly"`,
+    // m of the capsule from the feet to the top of the head it asks for: crouching. The step makes it
+    // that tall before it moves it, and shorter only when what is over it lets it grow back (cramped in
+    // its Character_State); 0, or taller than its Collider, is the height of its Collider.
+    height:f32 `mirai:"transient,readonly,unit=m"`,
 }
 
 // What the last step left of a character, besides its core.Motion: the ground
@@ -207,6 +222,8 @@ Character_State :: struct {
     head_depth:f32 `mirai:"transient,readonly,unit=m"`,       // of the top of the head under the surface; negative above it
     depth:f32 `mirai:"transient,readonly,hidden,unit=m"`,     // of fluid over the feet
     fluid_velocity:[3]f32 `mirai:"transient,readonly,hidden,unit=m/s"`, // the current around it
+    height:f32 `mirai:"transient,readonly,hidden,unit=m"`, // of its capsule now, from the feet to the top of the head
+    cramped:bool `mirai:"transient,readonly"`,             // shorter than the height its Character_Move asks: what is over it keeps it down
 }
 
 character_state_of :: proc "contextless" (found:sim.Character_State) -> Character_State {

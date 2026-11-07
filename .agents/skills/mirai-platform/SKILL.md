@@ -17,7 +17,7 @@ SDL; `platform/audio_device.odin` is the only thing that joins the two.
 - Context, frame and pacing, input and injection, window, display scale, custom chrome, dialogs,
   processes, crashes, file watching, paths, trash, audio device:
   [platform.md](references/platform.md).
-- Mixer, threads, sounds, decoders, streams, voices, buses, reverb, positional audio:
+- Mixer, threads, sounds, decoders, feeds and streams, voices, buses, reverb, positional audio:
   [audio.md](references/audio.md).
 - Code: one file per topic in `platform/` and `audio/`. What depends on the system goes in
   variants with build tags and the same signatures (`*_windows`, `*_posix`, `*_darwin`,
@@ -45,8 +45,11 @@ SDL; `platform/audio_device.odin` is the only thing that joins the two.
   clipboard and the title with a window.
 - `pressed` and `released` of `Input_Tick` hold for a single tick: `input_tick_take` delivers and
   clears them.
-- The mixer is used by two threads at most: `mixer_render` on one and everything else on another.
-  `mixer_render` is `"contextless"`: it can neither allocate nor take locks.
+- The mixer is used by two threads at most: `mixer_render` on one and everything else on another;
+  its own decoder thread, when it has one, only fills feeds. `mixer_render` is `"contextless"`: it
+  can neither allocate nor take locks, and it never decodes: it reads what a decoder left.
+- A sound loaded into the mixer stays encoded when it is lossless or a WAV of 16 bits or fewer;
+  each voice decodes it. Loading never decodes those.
 - An exhausted capacity returns an error or handle 0 and adds to the statistics
   (`platform.stats`, `watch_stats`, `audio.mixer_stats`); nothing grows.
 - Handles (`Process`, `Watch`, `audio.Sound`, `audio.Voice`) are generational `base.Handle`s: a
@@ -74,9 +77,15 @@ SDL; `platform/audio_device.odin` is the only thing that joins the two.
 - Vulkan surface, on request: `-define:PLATFORM_TEST_VULKAN=true` with `VK_DRIVER_FILES` pointing
   to the driver (lavapipe avoids the GPU).
 - Audio: the tests render to memory and compare samples; `audio/testdata/*.ogg` are tones
-  generated once and not regenerated.
+  generated once and not regenerated. Mixers of tests have no decoder thread, so the output is
+  exact; a test that uses one decodes with `mixer_decode` before each render.
+- Feeds: `lossless_voices_and_their_offsets_play_the_whole_decode`,
+  `encoded_sound_plays_like_its_decode_in_memory`,
+  `lossless_refuses_what_it_does_not_code_and_survives_damage` and
+  `audio_thread_and_game_thread_share_a_mixer_without_locks` (with the decoder thread).
 - Benchmarks, only if the change touches a measured path:
-  `mirai test audio benchmark_mixing_ten_milliseconds --release -define:AUDIO_BENCHMARK=true` and
+  `mirai test audio benchmark_mixing_ten_milliseconds --release -define:AUDIO_BENCHMARK=true`,
+  `benchmark_encoded_sounds_against_decoded_ones` (load, memory and decode per voice) and
   `mirai test platform benchmark_watch_pass --release -define:PLATFORM_BENCHMARK=true`.
 - Native dialogs, dragging and resizing the window with the mouse, maximizing and full screen are
   tested by a person.

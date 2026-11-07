@@ -57,7 +57,7 @@ paced_ticks :: proc(f:^Paced,clock:core.Clock,ticks:int,move:[3]f32,buttons:=inp
             found:=character_state_of(sim.character_state(&f.w,f.chars[i]))
             given:=input.Move_Input{move=move,buttons=buttons}
             pace:=core.pace_of(clock,core.read(&f.paces),f.entities[i])
-            m:=locomotion_move_paced(&f.locos[i],WALK_DEFAULT,{},nil,found,1,given,TEST_JUMP,sim.character_velocity(&f.w,f.chars[i]),f.w.gravity,1.0/PACED_RATE,pace)
+            m:=locomotion_move_paced(&f.locos[i],WALK_DEFAULT,{},nil,nil,found,1,given,TEST_JUMP,TEST_SPRINT,TEST_CROUCH,sim.character_velocity(&f.w,f.chars[i]),f.w.gravity,1.0/PACED_RATE,pace)
             sim.character_set_move(&f.w,f.chars[i],m)
         }
         sim.world_step(&f.w,1.0/PACED_RATE)

@@ -13,8 +13,10 @@ blends a local copy of its description.
   sources](animation.md#multiple-sources)), layer, `over` branch, Override/Additive mode, curve
   policy, root, weight, positive speed, fades, priority and cancellation.
 - Action names are unique and those of sections and windows, within their action.
-- Actions that share a layer must have the same `over`, `mode`, `reference`, `curves` and
-  `root_motion`, so that the outgoing fade keeps the policy of its channel.
+- Actions that share a layer must have the same `over`, `mode`, `reference`, `curves`,
+  `mesh_space` and `root_motion`, so that the outgoing fade keeps the policy of its channel.
+- A combo whose parts chain pose to pose is one clip cut in sections: the game jumps to the next
+  part with Section when the current one reaches its end section, so nothing crossfades.
 - `animation.action.set` (with `path` or `asset`) resolves names and derives quantities. The `next`
   of a section links another of the same clip, regardless of row order, and empty completes the
   action. Without sections the whole clip is played; with them it starts at the first of the action

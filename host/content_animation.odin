@@ -11,7 +11,7 @@ import "mirai:std/base"
 import "mirai:std/jobs"
 import "mirai:std/serial"
 
-// The .anim of a project keeps its keys; the runtime plays them compressed into samples
+// The .anim of a project keeps its keys; the runtime plays them compressed into streams
 // (asset.animation_compress). A compression is kept in App.animation_cache as the cooked
 // document a shipped game carries, named by the asset and by a hash of what it is made from:
 // the .anim, the skeletons its clips are measured on, the format and the compressor. A load
@@ -90,7 +90,7 @@ content_animation_replay_pending :: proc "contextless" (
     return replaying && entry.adopted>seen
 }
 
-// Starts loading the file of entry: false when it cannot be read. What is samples already (a
+// Starts loading the file of entry: false when it cannot be read. What already holds its streams (a
 // cooked .anim or a compression of the cache) is built at once, and so is a compression without
 // job threads; else a job compresses and content_animation_finish takes what it built.
 @(private)

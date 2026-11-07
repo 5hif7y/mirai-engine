@@ -41,10 +41,12 @@ compressions by it.
 - Per track 4 bits: its kind (`Default`, `Constant`, `Animated`, `Keys`) and its width. A track
   that holds still within the precision is `Constant` (its f32 value) or, when that value is
   `STREAM_DEFAULTS` of its property, `Default` (nothing); no track has a header of its own.
-- Animated tracks have their range over the clip and are cut into segments of 16 to 31 samples
-  with their range in 255ths of it; the samples of a segment are packed one after another, each
-  with every animated track, at the bits per component of each track in that segment: 0 (still in
-  the segment), 1 to `STREAM_MAX_BITS` or the f32. A stream of one segment has no segment ranges.
+- Animated tracks go in blocks, as ACL groups them: rotations, then positions and scales, then
+  curves, each block in the clip's order (the stream's `order`). Each has its range over the clip
+  and is cut into segments of 16 to 31 samples with its range in 255ths of it; the samples of a
+  segment are packed one after another, each with every animated track, at the bits per component
+  of each track in that segment: 0 (still in the segment), 1 to `STREAM_MAX_BITS` or the f32. A
+  stream of one segment has no segment ranges.
 - `stream_check` validates a stream against the tracks of its clip; `clip_add` takes streams
   (`Clip_Desc.stream`) only through it, and `asset.animation_check` through it too.
 
@@ -68,8 +70,10 @@ ACL's search, per segment:
 - `clip_evaluate` gives the same contract for keys and streams; a single sampled track reads its
   clip's stream up to it.
 - A pose reads a whole clip in one pass: `clip_reader` and `clip_reader_next` (which `pose_blend`
-  uses) or `clip_sample`. The reader decodes tracks in chunks and mixes their rotations four at a
-  time; it neither allocates nor reads outside the stream, whatever the library holds.
+  uses) or `clip_sample`. The reader gives each track with its place in the clip, not in the
+  clip's order: first those that hold still or keep keys, then each block of animated tracks in
+  chunks, rotations mixed four at a time. It neither allocates nor reads outside the stream,
+  whatever the library holds: its loop skips bounds checks only after checking every read itself.
 
 ## Errors and statistics
 

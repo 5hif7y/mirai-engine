@@ -14,14 +14,17 @@ Key_Encoding :: enum u8 {Raw,Sampled}
 //   Stream_Header
 //   codes      4 bits per track of the clip, from the lowest: its Stream_Kind and then its
 //              Stream_Width
-//   constants  per Constant track its components as f32
+//   constants  per Constant track, in the clip's order, its components as f32
+//   order      the Animated tracks as u16 places in the clip, in blocks: rotations, then positions
+//              and scales, then curves, each block in the clip's order; what follows goes in this
+//              order
 //   ranges     per Animated track the minimum of each component and, after those of every
 //              track, the extent of each, as f32
 //   segments   per segment its Stream_Segment
 //   per segment, from Stream_Segment.bits: a byte per Animated track with its bits per component
 //              (stream_bits_valid), two bytes per component of each with fewer than STREAM_RAW,
 //              and its samples one after another, each with the components of every Animated
-//              track in their order, packed from the lowest bit
+//              track, packed from the lowest bit
 //
 // A component with b bits in 1..STREAM_MAX_BITS is q/(2^b-1) of its segment's range, which starts
 // low/255 into the track's range and spans span/255 of it (its two bytes); with 0 bits it holds
@@ -34,7 +37,8 @@ Stream_Header :: struct #packed {
     count:u32, // samples
     rate,duration:f32,
     tracks,constants,animated,segments:u32,
-    ranges,table:u32, // where the ranges and the segments start
+    rotations,threes:u32, // Animated tracks in the first two blocks of the order
+    order,ranges,table:u32, // where the order, the ranges and the segments start
 }
 Stream_Segment :: struct #packed {
     start:u32,   // its first sample
@@ -50,6 +54,8 @@ STREAM_MAX_BITS :: 23
 // The bytes after the last stream: a component reads 8 bytes from the one it starts in.
 STREAM_PADDING :: 8
 STREAM_MAX_COUNT :: 1<<24
+// The tracks of a clip that a stream can hold: the order keeps their places in u16.
+STREAM_MAX_TRACKS :: 1<<16
 // What a Default track of each property holds.
 STREAM_DEFAULTS :: [Property]math.Vec4{.Position={},.Rotation={0,0,0,1},.Scale={1,1,1,0},.Float={},.Vector={}}
 stream_default :: #force_inline proc "contextless" (property:Property) -> math.Vec4 {
@@ -76,6 +82,15 @@ stream_width :: #force_inline proc "contextless" (property:Property) -> Stream_W
     }
     return .One
 }
+// The block of the order an Animated track of a property goes in.
+stream_block :: #force_inline proc "contextless" (property:Property) -> int {
+    switch property {
+    case .Rotation:return 0
+    case .Position,.Scale:return 1
+    case .Float,.Vector:return 2
+    }
+    return 2
+}
 stream_bits_valid :: #force_inline proc "contextless" (bits:int) -> bool {return bits==STREAM_RAW || bits>=0 && bits<=STREAM_MAX_BITS}
 
 @(private) STREAM_HEADER :: size_of(Stream_Header)
@@ -84,8 +99,9 @@ stream_bits_valid :: #force_inline proc "contextless" (bits:int) -> bool {return
 stream_load :: #force_inline proc "contextless" ($T:typeid,data:[]u8,at:int) -> T {
     return intrinsics.unaligned_load((^T)(raw_data(data[at:][:size_of(T)])))
 }
+// Every caller has checked i against the stream's tracks and the codes against its bytes.
 @(private)
-stream_code :: #force_inline proc "contextless" (data:[]u8,i:int) -> (kind:Stream_Kind,components:int) {
+stream_code :: #force_inline proc "contextless" (data:[]u8,i:int) -> (kind:Stream_Kind,components:int) #no_bounds_check {
     code:=data[STREAM_HEADER+i>>1]>>(uint(i&1)*4)
     width:=int((code>>2)&3)
     return Stream_Kind(code&3),1 if width==0 else width+2 if width<3 else 0
@@ -94,13 +110,20 @@ stream_code :: #force_inline proc "contextless" (data:[]u8,i:int) -> (kind:Strea
 stream_constants :: #force_inline proc "contextless" (h:Stream_Header) -> int {return STREAM_HEADER+(int(h.tracks)+1)/2}
 @(private)
 stream_animated_floats :: #force_inline proc "contextless" (h:Stream_Header) -> int {return (int(h.table)-int(h.ranges))/8}
+// The place in the clip of the Animated track at a place of the order, or -1 past the stream.
+@(private)
+stream_ordered :: #force_inline proc "contextless" (data:[]u8,h:Stream_Header,o:int) -> int {
+    at:=int(h.order)+2*o
+    if o<0 || at>len(data)-2 {return -1}
+    return int(intrinsics.unaligned_load((^u16)(uintptr(raw_data(data))+uintptr(at))))
+}
 
 // The bytes of a stream whose clip has `tracks` (rows with a property and an encoding, the
 // Sampled ones in the stream and the Raw ones Keys). ok is false unless the header, codes,
-// values, segments and bit rates are consistent and finite and it fits in `data` with `padding`
-// bytes after it.
+// order, values, segments and bit rates are consistent and finite and it fits in `data` with
+// `padding` bytes after it.
 stream_check :: proc "contextless" (data:[]u8,tracks:[]$T,padding:=STREAM_PADDING) -> (bytes:int,ok:bool) {
-    if len(data)<STREAM_HEADER || padding<0 {return}
+    if len(data)<STREAM_HEADER || padding<0 || len(tracks)>STREAM_MAX_TRACKS {return}
     h:=stream_load(Stream_Header,data,0)
     bytes=int(h.bytes)
     if bytes<STREAM_HEADER || bytes>len(data)-padding || h.count==0 || h.count>STREAM_MAX_COUNT || !anim_finite(h.duration) || h.duration<0 || int(h.tracks)!=len(tracks) || stream_constants(h)>bytes {return}
@@ -110,16 +133,28 @@ stream_check :: proc "contextless" (data:[]u8,tracks:[]$T,padding:=STREAM_PADDIN
         span:=h.rate*h.duration
         if !(h.duration>0) || !anim_finite(h.rate) || !(span>f32(h.count)-2) || span>f32(h.count-1)+1e-3 || h.animated==0 || h.segments==0 || h.segments>h.count {return}
     }
-    constants,animated,constant_floats,animated_floats:=0,0,0,0
+    constants,constant_floats,animated_floats:=0,0,0
+    blocks:[3]int
     for track,i in tracks {
         kind,components:=stream_code(data,i)
         if (kind==.Keys)!=(track.encoding==.Raw) || track.encoding>.Sampled || track.property>max(Property) {return}
         if kind!=.Keys && components!=stream_components(track.property) {return}
-        if kind==.Constant {constants+=1;constant_floats+=components} else if kind==.Animated {animated+=1;animated_floats+=components}
+        if kind==.Constant {constants+=1;constant_floats+=components} else if kind==.Animated {blocks[stream_block(track.property)]+=1;animated_floats+=components}
     }
-    if constants!=int(h.constants) || animated!=int(h.animated) || int(h.ranges)!=stream_constants(h)+4*constant_floats || int(h.table)!=int(h.ranges)+8*animated_floats {return}
+    if constants!=int(h.constants) || blocks[0]+blocks[1]+blocks[2]!=int(h.animated) || blocks[0]!=int(h.rotations) || blocks[1]!=int(h.threes) {return}
+    if int(h.order)!=stream_constants(h)+4*constant_floats || int(h.ranges)!=int(h.order)+2*int(h.animated) || int(h.table)!=int(h.ranges)+8*animated_floats {return}
     end:=int(h.table)+int(h.segments)*size_of(Stream_Segment)
     if end>bytes {return}
+    // The order: every Animated track once, in its block, each block in the clip's order.
+    previous,block:=-1,0
+    for o in 0..<int(h.animated) {
+        at:=stream_ordered(data,h,o)
+        for block<2 && o>=(int(h.rotations) if block==0 else int(h.rotations+h.threes)) {block+=1;previous=-1}
+        if at<=previous || at>=len(tracks) {return}
+        kind,_:=stream_code(data,at)
+        if kind!=.Animated || stream_block(tracks[at].property)!=block {return}
+        previous=at
+    }
     at:=stream_constants(h)
     for track,i in tracks {
         kind,components:=stream_code(data,i)
@@ -143,11 +178,10 @@ stream_check :: proc "contextless" (data:[]u8,tracks:[]$T,padding:=STREAM_PADDIN
         next:=stream_load(Stream_Segment,data,int(h.table)+(s+1)*size_of(Stream_Segment)).start if s+1<int(h.segments) else h.count
         if s==0 && segment.start!=0 || next<=segment.start || next>h.count || int(segment.bits)!=end || int(h.animated)>bytes-end {return}
         ranges:=end+int(h.animated)
-        stride,a:=0,0
-        for i in 0..<len(tracks) {
-            kind,components:=stream_code(data,i)
-            if kind!=.Animated {continue}
-            bits:=int(data[end+a]);a+=1
+        stride:=0
+        for o in 0..<int(h.animated) {
+            _,components:=stream_code(data,stream_ordered(data,h,o))
+            bits:=int(data[end+o])
             if !stream_bits_valid(bits) || bits==0 && !ranged {return}
             stride+=bits*components
             if bits==STREAM_RAW || !ranged {continue}
@@ -233,7 +267,7 @@ stream_mix :: #force_inline proc "contextless" (a,b:math.Vec4,amount:f32,propert
     return stream_rotation_mix(a,b,stream_terms(amount))
 }
 
-// The cosine of half the largest rotation between two samples that stream_mix follows by its series.
+// Cosine of half the largest rotation between two samples that stream_mix follows by its series.
 @(private) STREAM_SLERP_COS :: .9
 @(private)
 stream_slerp :: proc "contextless" (a,b:math.Vec4,d,amount:f32) -> math.Vec4 {
@@ -281,7 +315,7 @@ stream_cursor :: #force_inline proc "contextless" (data:[]u8,h:Stream_Header,sam
 
 // The next Animated track's components at one side of the interpolation, moving past them.
 @(private)
-stream_unpack :: #force_inline proc "contextless" (data:[]u8,c:^Stream_Cursor,a,components:int,minimum,extent:math.Vec4) -> (value:math.Vec4,ok:bool) {
+stream_unpack :: #force_inline proc "contextless" (data:[]u8,c:^Stream_Cursor,a,components:int,minimum,extent:math.Vec4) -> (value:math.Vec4,ok:bool) #no_bounds_check {
     at:=c.bits+a
     if at<0 || at>=len(data) {return}
     bits:=int(data[at])
@@ -312,7 +346,7 @@ stream_unpack :: #force_inline proc "contextless" (data:[]u8,c:^Stream_Cursor,a,
 }
 // stream_unpack of a track of three components, in scalars: the arithmetic of stream_dequantize.
 @(private)
-stream_unpack3 :: #force_inline proc "contextless" (data:[]u8,c:^Stream_Cursor,a:int,minimum,extent:math.Vec3) -> (v:math.Vec3,ok:bool) {
+stream_unpack3 :: #force_inline proc "contextless" (data:[]u8,c:^Stream_Cursor,a:int,minimum,extent:math.Vec3) -> (v:math.Vec3,ok:bool) #no_bounds_check {
     at:=c.bits+a
     if at<0 || at>=len(data) {return}
     bits:=uint(data[at])
@@ -352,23 +386,32 @@ stream_unpack3 :: #force_inline proc "contextless" (data:[]u8,c:^Stream_Cursor,a
 // Past the next Animated track at one side without reading it.
 @(private)
 stream_skip :: #force_inline proc "contextless" (data:[]u8,c:^Stream_Cursor,a,components:int) {
-    bits:=int(data[c.bits+a])
+    at:=c.bits+a
+    if at<0 || at>=len(data) {return}
+    bits:=int(data[at])
     c.offset+=bits*components
     if bits!=STREAM_RAW && c.ranged {c.ranges+=2*components}
 }
 
-// Reads the tracks of a clip at one time in one pass, one after another in the clip's order. It
-// decodes STREAM_CHUNK tracks ahead: their rotations four at a time.
+
+// Reads every track of a clip at one time in one pass: first those that hold still or keep their
+// keys, in the clip's order, then the Animated ones block after block, STREAM_CHUNK at a time with
+// their rotations four at a time. clip_reader_next gives each with its place in the clip.
 Clip_Reader :: struct {
     data:[]u8, // the clip's stream, nil when it has none
     h:Stream_Header,
     a,b:Stream_Cursor,
     amount,time:f32,
     terms:Stream_Terms,
-    constant_at,range_at,animated,next:int,
     tracks:[]Track, // the clip's
-    index,start:int, // the next track clip_reader_next gives and the first one in chunk
+    keys:[]Keyframe, // the library's
+    streams:[]u8,    // the library's, for a track another clip's stream holds
+    next:int,        // the next track of the clip or, once animated, the next place of the order
+    animated:bool,
+    constant_at,range_at:int,
+    count,at:int,    // what chunk holds and the next of it to give
     chunk:[STREAM_CHUNK]math.Vec4,
+    slots:[STREAM_CHUNK]int, // the place in the clip of each value of chunk
     failed:bool,
 }
 STREAM_CHUNK :: 32
@@ -377,11 +420,12 @@ STREAM_CHUNK :: 32
 @(private)
 stream_reader :: proc "contextless" (r:^Clip_Reader,data:[]u8,time:f32) {
     r.data,r.h,r.a,r.b,r.amount,r.time,r.terms={},{},{},{},0,time,{}
-    r.constant_at,r.range_at,r.animated,r.next,r.tracks,r.index,r.start,r.failed=0,0,0,0,nil,0,0,false
+    r.tracks,r.keys,r.streams,r.next,r.animated,r.constant_at,r.range_at,r.count,r.at,r.failed=nil,nil,nil,0,false,0,0,0,0,false
+    if data==nil {return}
     if len(data)<STREAM_HEADER {r.failed=true;return}
     h:=stream_load(Stream_Header,data,0)
     bytes:=int(h.bytes)
-    if bytes>len(data)-STREAM_PADDING || bytes<stream_constants(h) || int(h.ranges)<stream_constants(h) || int(h.table)<int(h.ranges) || int(h.table)+int(h.segments)*size_of(Stream_Segment)>bytes {r.failed=true;return}
+    if bytes>len(data)-STREAM_PADDING || bytes<stream_constants(h) || int(h.order)<stream_constants(h) || int(h.ranges)<int(h.order) || int(h.table)<int(h.ranges) || int(h.table)+int(h.segments)*size_of(Stream_Segment)>bytes || h.rotations>h.animated || h.threes>h.animated-h.rotations {r.failed=true;return}
     r.data,r.h=data,h
     r.constant_at,r.range_at=stream_constants(h),int(h.ranges)
     if h.animated>0 {
@@ -396,44 +440,6 @@ stream_reader :: proc "contextless" (r:^Clip_Reader,data:[]u8,time:f32) {
     }
 }
 
-// The value of the next track of the stream, of `property`, decoded alone.
-@(private)
-stream_next :: proc "contextless" (r:^Clip_Reader,property:Property) -> (value:math.Vec4) {
-    if r.failed || r.next>=int(r.h.tracks) {r.failed=true;return}
-    data:=r.data
-    kind,components:=stream_code(data,r.next)
-    r.next+=1
-    switch kind {
-    case .Keys:
-    case .Default:value=stream_default(property)
-    case .Constant:
-        if components!=stream_components(property) {r.failed=true;return}
-        value=stream_finish(stream_floats(data,r.constant_at,components),property)
-        r.constant_at+=4*components
-    case .Animated:
-        if components!=stream_components(property) {r.failed=true;return}
-        a:=r.animated
-        r.animated+=1
-        minimum,extent:=stream_floats(data,r.range_at,components),stream_floats(data,r.range_at+4*stream_animated_floats(r.h),components)
-        r.range_at+=4*components
-        if components==3 {
-            first,ok_a:=stream_unpack3(data,&r.a,a,minimum.xyz,extent.xyz)
-            second,ok_b:=stream_unpack3(data,&r.b,a,minimum.xyz,extent.xyz)
-            if !ok_a || !ok_b {r.failed=true;return {}}
-            if property!=.Rotation {
-                value.xyz=first+(second-first)*r.amount
-                return
-            }
-            return stream_rotation_mix(stream_quat({first.x,first.y,first.z,0}),stream_quat({second.x,second.y,second.z,0}),r.terms)
-        }
-        first,ok_a:=stream_unpack(data,&r.a,a,components,minimum,extent)
-        second,ok_b:=stream_unpack(data,&r.b,a,components,minimum,extent)
-        if !ok_a || !ok_b {r.failed=true;return {}}
-        value=stream_mix(stream_finish(first,property),stream_finish(second,property),r.amount,property)
-    }
-    return
-}
-
 // The stream of a clip with its padding, or nil when it has none or it lies outside the library.
 @(private)
 clip_stream :: #force_inline proc "contextless" (lib:^Library,clip:Clip_Data) -> []u8 {
@@ -441,95 +447,144 @@ clip_stream :: #force_inline proc "contextless" (lib:^Library,clip:Clip_Data) ->
     return lib.streams[clip.stream:][:int(clip.stream_bytes)+STREAM_PADDING]
 }
 
-// Starts a reader of every track of a clip at a time: clip_reader_next gives them in the clip's
-// order. A reader is declared without zeroing (`r:Clip_Reader=---`): this sets what it reads.
+// Starts a reader of every track of a clip at a time. A reader is declared without zeroing
+// (`r:Clip_Reader=---`): this sets what it reads.
 clip_reader :: proc "contextless" (r:^Clip_Reader,lib:^Library,clip:Clip,time:f32) {
     stream_reader(r,nil,time)
-    r.failed=false
-    if !clip_valid(lib,clip) {r.failed=true;return}
+    if !clip_valid(lib,clip) || lib.key_count<0 || lib.key_count>len(lib.keys) {r.failed=true;return}
     data:=lib.clips[clip-1]
-    if data.stream_bytes==0 {return}
-    stream:=clip_stream(lib,data)
-    tracks:=clip_tracks(lib,clip)
-    if stream==nil || int(data.first_track)>lib.track_count || int(data.track_count)>lib.track_count-int(data.first_track) {r.failed=true;return}
-    stream_reader(r,stream,time)
-    if int(r.h.tracks)!=len(tracks) {r.failed=true}
-    r.tracks=tracks
-}
-// The value of the next track of the clip, which must be `track`, as clip_evaluate gives it.
-clip_reader_next :: #force_inline proc "contextless" (r:^Clip_Reader,lib:^Library,track:Track) -> math.Vec4 {
-    if r.data==nil || track.encoding==.Raw {
-        r.index+=1
-        // A clip over part of another's tracks reads them from that clip's stream.
-        if track.encoding==.Sampled {return stream_evaluate(lib,track,r.time)}
-        return track_evaluate(track_keys(lib,track),track.property,r.time)
+    if int(data.first_track)>lib.track_count || int(data.track_count)>lib.track_count-int(data.first_track) {r.failed=true;return}
+    tracks:=lib.tracks[data.first_track:][:data.track_count]
+    if data.stream_bytes>0 {
+        stream:=clip_stream(lib,data)
+        if stream==nil {r.failed=true;return}
+        stream_reader(r,stream,time)
+        if int(r.h.tracks)!=len(tracks) {r.failed=true}
     }
-    for r.index>=r.next && !r.failed {stream_chunk(r)}
-    at:=r.index-r.start
-    r.index+=1
-    return r.chunk[at] if !r.failed && at>=0 && at<STREAM_CHUNK else {}
+    r.tracks,r.keys=tracks,lib.keys[:lib.key_count]
+    if lib.stream_bytes>=0 && lib.stream_bytes<=len(lib.streams) {r.streams=lib.streams}
+}
+// The next track of the clip: its place in the clip and its value, as clip_evaluate gives it.
+// ok is false once every track was given, or when the stream does not match the clip.
+clip_reader_next :: #force_inline proc "contextless" (r:^Clip_Reader) -> (track:int,value:math.Vec4,ok:bool) #no_bounds_check {
+    if r.at>=r.count {
+        if r.failed || !stream_fill(r) {return -1,{},false}
+    }
+    at:=r.at
+    if at<0 || at>=STREAM_CHUNK {r.failed=true;return -1,{},false}
+    r.at+=1
+    return r.slots[at],r.chunk[at],true
 }
 
-// Decodes the next STREAM_CHUNK tracks of the clip into r.chunk: what holds still and positions and
-// scales at once, rotations gathered and then mixed four at a time.
+// The value of a track that is no Animated one of the reader's stream: its keys, or the stream of
+// another clip that holds it.
 @(private)
-stream_chunk :: proc "contextless" (r:^Clip_Reader) {
+stream_held :: proc "contextless" (r:^Clip_Reader,track:Track) -> math.Vec4 {
+    if track.encoding==.Sampled {
+        lib:=Library{streams=r.streams,stream_bytes=max(len(r.streams)-STREAM_PADDING,0)}
+        return stream_evaluate(&lib,track,r.time)
+    }
+    keys:[]Keyframe
+    if int(track.first)<=len(r.keys) && int(track.count)<=len(r.keys)-int(track.first) {keys=r.keys[track.first:][:track.count]}
+    return track_evaluate(keys,track.property,r.time)
+}
+
+// Fills the chunk with the next values: tracks that hold still or keep keys, then the Animated
+// ones of one block. False when nothing is left.
+@(private)
+stream_fill :: proc "contextless" (r:^Clip_Reader) -> bool #no_bounds_check {
+    r.count,r.at=0,0
     data:=r.data
-    r.start=r.next
-    end:=min(r.next+STREAM_CHUNK,len(r.tracks))
-    if r.next>=end {r.failed=true;return}
-    a,b:=r.a,r.b
-    floats:=stream_animated_floats(r.h)
-    constant_at,range_at,animated_at,amount,start:=r.constant_at,r.range_at,r.animated,r.amount,r.start
     tracks:=r.tracks
-    chunk:=&r.chunk
-    // The rotations to mix: their samples at both sides and their place in the chunk.
-    ax,ay,az,bx,by,bz:[STREAM_CHUNK+3]f32=---,---,---,---,---,---
-    slots:[STREAM_CHUNK]int=---
-    rotations:=0
-    for i in r.next..<end {
-        track:=tracks[i]
-        kind,components:=stream_code(data,i)
-        value:math.Vec4
-        switch kind {
-        case .Keys:
-        case .Default:value=stream_default(track.property)
-        case .Constant:
-            value=stream_finish(stream_floats(data,constant_at,components),track.property)
-            constant_at+=4*components
-        case .Animated:
+    if !r.animated {
+        constant_at,next,count:=r.constant_at,r.next,0
+        chunk,slots:=&r.chunk,&r.slots
+        for next<len(tracks) && count<STREAM_CHUNK {
+            i:=next
+            next+=1
+            property:=tracks[i].property
+            value:math.Vec4
+            if data==nil {value=stream_held(r,tracks[i])} else {
+                kind,components:=stream_code(data,i)
+                switch kind {
+                case .Animated:continue
+                case .Keys:value=stream_held(r,tracks[i])
+                case .Default:value=stream_default(property)
+                case .Constant:
+                    value=stream_finish(stream_floats(data,constant_at,components),property)
+                    constant_at+=4*components
+                }
+            }
+            chunk[count],slots[count]=value,i
+            count+=1
+        }
+        r.constant_at,r.next,r.count=constant_at,next,count
+        if r.next<len(tracks) {return true}
+        r.animated,r.next=true,0
+        if r.count>0 {return true}
+    }
+    if data==nil || r.next>=int(r.h.animated) {return false}
+    h:=r.h
+    block_end:=int(h.rotations) if r.next<int(h.rotations) else int(h.rotations+h.threes) if r.next<int(h.rotations+h.threes) else int(h.animated)
+    first:=r.next
+    n:=min(STREAM_CHUNK,block_end-first)
+    a,b:=r.a,r.b
+    floats:=stream_animated_floats(h)
+    range_at,amount:=r.range_at,r.amount
+    if first<int(h.rotations) {
+        // Rotations: unpacked one by one, then finished and mixed four at a time.
+        ax,ay,az,bx,by,bz:[STREAM_CHUNK+3]f32=---,---,---,---,---,---
+        for k in 0..<n {
+            o:=first+k
+            i:=stream_ordered(data,h,o)
+            if i<0 || i>=len(tracks) {r.failed=true;return false}
+            minimum,extent:=stream_floats(data,range_at,3),stream_floats(data,range_at+4*floats,3)
+            range_at+=12
+            p,ok_a:=stream_unpack3(data,&a,o,minimum.xyz,extent.xyz)
+            q,ok_b:=stream_unpack3(data,&b,o,minimum.xyz,extent.xyz)
+            if !ok_a || !ok_b {r.failed=true;return false}
+            ax[k],ay[k],az[k],bx[k],by[k],bz[k]=p.x,p.y,p.z,q.x,q.y,q.z
+            r.slots[k]=i
+        }
+        for k in n..<n+3 {ax[k],ay[k],az[k],bx[k],by[k],bz[k]=0,0,0,0,0,0}
+        stream_mix_rotations(r.chunk[:],ax[:],ay[:],az[:],bx[:],by[:],bz[:],n,r.terms)
+    } else if first<int(h.rotations+h.threes) {
+        for k in 0..<n {
+            o:=first+k
+            i:=stream_ordered(data,h,o)
+            if i<0 || i>=len(tracks) {r.failed=true;return false}
+            minimum,extent:=stream_floats(data,range_at,3),stream_floats(data,range_at+4*floats,3)
+            range_at+=12
+            p,ok_a:=stream_unpack3(data,&a,o,minimum.xyz,extent.xyz)
+            q,ok_b:=stream_unpack3(data,&b,o,minimum.xyz,extent.xyz)
+            if !ok_a || !ok_b {r.failed=true;return false}
+            v:=p+(q-p)*amount
+            r.chunk[k],r.slots[k]=math.Vec4{v.x,v.y,v.z,0},i
+        }
+    } else {
+        for k in 0..<n {
+            o:=first+k
+            i:=stream_ordered(data,h,o)
+            if i<0 || i>=len(tracks) {r.failed=true;return false}
+            property:=tracks[i].property
+            _,components:=stream_code(data,i)
             minimum,extent:=stream_floats(data,range_at,components),stream_floats(data,range_at+4*floats,components)
             range_at+=4*components
-            animated:=animated_at
-            animated_at+=1
-            if components==3 {
-                first,ok_a:=stream_unpack3(data,&a,animated,minimum.xyz,extent.xyz)
-                second,ok_b:=stream_unpack3(data,&b,animated,minimum.xyz,extent.xyz)
-                if !ok_a || !ok_b {r.failed=true;return}
-                if track.property==.Rotation {
-                    ax[rotations],ay[rotations],az[rotations]=first.x,first.y,first.z
-                    bx[rotations],by[rotations],bz[rotations]=second.x,second.y,second.z
-                    slots[rotations]=i-start
-                    rotations+=1
-                    continue
-                }
-                value.xyz=first+(second-first)*amount
-            } else {
-                first,ok_a:=stream_unpack(data,&a,animated,components,minimum,extent)
-                second,ok_b:=stream_unpack(data,&b,animated,components,minimum,extent)
-                if !ok_a || !ok_b {r.failed=true;return}
-                value=stream_mix(stream_finish(first,track.property),stream_finish(second,track.property),amount,track.property)
-            }
+            p,ok_a:=stream_unpack(data,&a,o,components,minimum,extent)
+            q,ok_b:=stream_unpack(data,&b,o,components,minimum,extent)
+            if !ok_a || !ok_b {r.failed=true;return false}
+            r.chunk[k],r.slots[k]=stream_mix(stream_finish(p,property),stream_finish(q,property),amount,property),i
         }
-        chunk[i-start]=value
     }
-    r.a,r.b=a,b
-    r.next,r.constant_at,r.range_at,r.animated=end,constant_at,range_at,animated_at
-    for k in rotations..<rotations+3 {ax[k],ay[k],az[k],bx[k],by[k],bz[k]=0,0,0,0,0,0}
-    // The arithmetic of stream_quat and stream_rotation_mix, lane by lane.
+    r.a,r.b,r.range_at,r.next,r.count=a,b,range_at,first+n,n
+    return true
+}
+
+// The arithmetic of stream_quat and stream_rotation_mix, four rotations at a time, into out.
+@(private)
+stream_mix_rotations :: proc "contextless" (out:[]math.Vec4,ax,ay,az,bx,by,bz:[]f32,n:int,terms:Stream_Terms) #no_bounds_check {
     F :: Stream_F4
-    terms:=r.terms
-    for g:=0;g<rotations;g+=4 {
+    for g:=0;g<n;g+=4 {
         x0,y0,z0:=F{ax[g],ax[g+1],ax[g+2],ax[g+3]},F{ay[g],ay[g+1],ay[g+2],ay[g+3]},F{az[g],az[g+1],az[g+2],az[g+3]}
         x1,y1,z1:=F{bx[g],bx[g+1],bx[g+2],bx[g+3]},F{by[g],by[g+1],by[g+2],by[g+3]},F{bz[g],bz[g+1],bz[g+2],bz[g+3]}
         w0:=simd.sqrt(simd.max(F(1)-x0*x0-y0*y0-z0*z0,F(0)))
@@ -547,21 +602,24 @@ stream_chunk :: proc "contextless" (r:^Clip_Reader) {
         inverse:=F(1)/simd.sqrt(simd.select(positive,length,F(1)))
         qx,qy,qz,qw=simd.select(positive,qx*inverse,F(0)),simd.select(positive,qy*inverse,F(0)),simd.select(positive,qz*inverse,F(0)),simd.select(positive,qw*inverse,F(1))
         lx,ly,lz,lw,ld:=simd.to_array(qx),simd.to_array(qy),simd.to_array(qz),simd.to_array(qw),simd.to_array(d)
-        for lane in 0..<min(4,rotations-g) {
+        for lane in 0..<min(4,n-g) {
             k:=g+lane
-            r.chunk[slots[k]]=ld[lane]<STREAM_SLERP_COS ? stream_rotation_mix(stream_quat({ax[k],ay[k],az[k],0}),stream_quat({bx[k],by[k],bz[k],0}),terms) : math.Vec4{lx[lane],ly[lane],lz[lane],lw[lane]}
+            out[k]=ld[lane]<STREAM_SLERP_COS ? stream_rotation_mix(stream_quat({ax[k],ay[k],az[k],0}),stream_quat({bx[k],by[k],bz[k],0}),terms) : math.Vec4{lx[lane],ly[lane],lz[lane],lw[lane]}
         }
     }
 }
 
-// Every track of a clip at a time into out, in the clip's order. False when out is shorter than
-// the clip's tracks or its stream does not match them.
-clip_sample :: proc "contextless" (lib:^Library,clip:Clip,time:f32,out:[]math.Vec4) -> bool {
-    tracks:=clip_tracks(lib,clip)
-    if len(out)<len(tracks) || !clip_valid(lib,clip) {return false}
+// Every track of a clip at a time into out, by its place in the clip. False when out is shorter
+// than the clip's tracks or its stream does not match them.
+clip_sample :: proc "contextless" (lib:^Library,clip:Clip,time:f32,out:[]math.Vec4) -> bool #no_bounds_check {
+    if !clip_valid(lib,clip) || len(out)<len(clip_tracks(lib,clip)) {return false}
     r:Clip_Reader=---
     clip_reader(&r,lib,clip,time)
-    for track,i in tracks {out[i]=clip_reader_next(&r,lib,track)}
+    for {
+        i,value,ok:=clip_reader_next(&r)
+        if !ok {break}
+        if i>=0 && i<len(out) {out[i]=value}
+    }
     return !r.failed
 }
 
@@ -575,23 +633,34 @@ stream_evaluate :: proc "contextless" (lib:^Library,track:Track,time:f32) -> mat
     data=data[:int(h.bytes)+STREAM_PADDING]
     target:=int(track.count)
     kind,components:=stream_code(data,target)
-    if kind==.Default {return stream_default(track.property)}
-    if kind==.Keys || components!=stream_components(track.property) {return {}}
-    // The others' properties only set how wide they are, which their codes say.
+    if components!=stream_components(track.property) {return {}}
+    switch kind {
+    case .Keys:return {}
+    case .Default:return stream_default(track.property)
+    case .Constant:
+        at:=stream_constants(h)
+        for i in 0..<target {if kind_i,components_i:=stream_code(data,i);kind_i==.Constant {at+=4*components_i}}
+        return stream_finish(stream_floats(data,at,components),track.property)
+    case .Animated:
+    }
     r:Clip_Reader=---
     stream_reader(&r,data,time)
     if r.failed {return {}}
-    for i in 0..<target {
-        kind_i,components_i:=stream_code(data,i)
-        switch kind_i {
-        case .Constant:r.constant_at+=4*components_i
-        case .Animated:
-            if h.animated>0 {stream_skip(data,&r.a,r.animated,components_i);stream_skip(data,&r.b,r.animated,components_i)}
-            r.range_at+=4*components_i;r.animated+=1
-        case .Default,.Keys:
-        }
+    // Past the Animated tracks before it in the order: their widths and bit rates.
+    o:=0
+    for o<int(h.animated) && stream_ordered(data,h,o)!=target {
+        at:=stream_ordered(data,h,o)
+        if at<0 || at>=int(h.tracks) {return {}}
+        _,components_o:=stream_code(data,at)
+        stream_skip(data,&r.a,o,components_o);stream_skip(data,&r.b,o,components_o)
+        r.range_at+=4*components_o
+        o+=1
     }
-    r.next=target
-    value:=stream_next(&r,track.property)
-    return {} if r.failed else value
+    if o>=int(h.animated) {return {}}
+    floats:=stream_animated_floats(h)
+    minimum,extent:=stream_floats(data,r.range_at,components),stream_floats(data,r.range_at+4*floats,components)
+    p,ok_a:=stream_unpack(data,&r.a,o,components,minimum,extent)
+    q,ok_b:=stream_unpack(data,&r.b,o,components,minimum,extent)
+    if !ok_a || !ok_b {return {}}
+    return stream_mix(stream_finish(p,track.property),stream_finish(q,track.property),r.amount,track.property)
 }

@@ -112,8 +112,11 @@ pose_blend :: proc(pose:^Pose,lib:^Library,p:Player,scale:f32=1,lock:Pose_Lock={
     ok=true
     reader:Clip_Reader=---
     clip_reader(&reader,lib,p.clip,time)
-    for track in clip_tracks(lib,p.clip) {
-        value:=clip_reader_next(&reader,lib,track)
+    tracks:=clip_tracks(lib,p.clip)
+    for {
+        i,value,more:=clip_reader_next(&reader)
+        if !more {break}
+        track:=tracks[i]
         if track.target==lock.target && track.slot==0 {
             if track.property==.Position && lock.position {value.xyz=lock.value.position}
             if track.property==.Rotation && lock.rotation {value=quat_vec4(lock.value.rotation)}
@@ -149,8 +152,11 @@ pose_blend_additive :: proc(pose:^Pose,lib:^Library,p:Player,reference:f32=0,sca
     ok=true
     reader:Clip_Reader=---
     clip_reader(&reader,lib,p.clip,time)
-    for track,i in clip_tracks(lib,p.clip) {
-        now:=clip_reader_next(&reader,lib,track)
+    tracks:=clip_tracks(lib,p.clip)
+    for {
+        i,now,more:=clip_reader_next(&reader)
+        if !more {break}
+        track:=tracks[i]
         source:=track
         // The clips of a library usually list their targets in one order: the same index first.
         if i<len(others) && others[i].target==track.target && others[i].property==track.property && others[i].slot==track.slot {source=others[i]} else {

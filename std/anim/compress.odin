@@ -18,7 +18,7 @@ Compress_Config :: struct {
 COMPRESS_DEFAULT :: Compress_Config{precision=.0001,shell=.03,float_precision=.0001,vector_precision=.0001}
 // Advances whenever library_compress gives other streams for the same keys and config: a
 // compression kept by its inputs is made again.
-COMPRESS_VERSION :: 2
+COMPRESS_VERSION :: 3
 // The sample rate of a clip whose keys have no interval in common.
 COMPRESS_RATE :: 30
 Compress_Error :: enum u8 {None,Invalid,Out_Of_Memory,Prepared}
@@ -215,6 +215,7 @@ library_compress :: proc(lib:^Library,parents:[]i32=nil,skeletons:[]Skeleton=nil
 @(private)
 compress_clip :: proc(lib:^Library,clip:Clip_Data,parents:[]i32,skeleton:Skeleton,config:Compress_Config,kinds:[]Stream_Kind,out:^[dynamic]u8,tables:^Compress_Tables) -> (worst,curve_worst:f32,ok:bool) {
     tracks:=lib.tracks[clip.first_track:][:clip.track_count]
+    if len(tracks)>STREAM_MAX_TRACKS {return 0,0,true}
     w:=Compress_Work{first=int(clip.first_track),count=len(tracks),duration=clip.duration,skeleton=skeleton,allocator=lib.allocator,tables=tables}
     rate,rated:=compress_rate(lib,tracks,w.allocator)
     if !rated {return 0,0,true}
@@ -1102,8 +1103,21 @@ compress_put_bytes :: proc(out:^[dynamic]u8,value:$T) -> bool {
 compress_encode :: proc(w:^Compress_Work,tracks:[]Track,out:^[dynamic]u8) -> bool {
     put :: compress_put_bytes
     start:=len(out)
+    // The Animated tracks in the blocks of the stream's order.
+    order,e:=make([dynamic]int,0,w.count,w.allocator)
+    if e!=nil {return false}
+    defer delete(order)
+    for block in 0..<3 {for track,t in tracks {if w.kind[t]==.Animated && stream_block(track.property)==block {append(&order,t)}}}
     h:=Stream_Header{count=u32(max(w.samples,1)),rate=w.rate,duration=w.duration,tracks=u32(w.count),segments=u32(w.segments)}
-    for kind in w.kind {if kind==.Constant {h.constants+=1} else if kind==.Animated {h.animated+=1}}
+    for kind,t in w.kind {
+        if kind==.Constant {h.constants+=1}
+        if kind!=.Animated {continue}
+        h.animated+=1
+        switch stream_block(tracks[t].property) {
+        case 0:h.rotations+=1
+        case 1:h.threes+=1
+        }
+    }
     if h.animated==0 {h.count,h.rate,h.segments=1,0,0}
     if !put(out,h) {return false}
     for i:=0;i<w.count;i+=2 {
@@ -1118,11 +1132,12 @@ compress_encode :: proc(w:^Compress_Work,tracks:[]Track,out:^[dynamic]u8) -> boo
         if w.kind[t]!=.Constant {continue}
         for c in 0..<stream_components(track.property) {if !put(out,w.value[t][c]) {return false}}
     }
+    h.order=u32(len(out)-start)
+    for t in order {if !put(out,u16(t)) {return false}}
     h.ranges=u32(len(out)-start)
     for side in 0..<2 {
-        for track,t in tracks {
-            if w.kind[t]!=.Animated {continue}
-            for c in 0..<stream_components(track.property) {if !put(out,w.minimum[t][c] if side==0 else w.extent[t][c]) {return false}}
+        for t in order {
+            for c in 0..<stream_components(tracks[t].property) {if !put(out,w.minimum[t][c] if side==0 else w.extent[t][c]) {return false}}
         }
     }
     h.table=u32(len(out)-start)
@@ -1132,18 +1147,16 @@ compress_encode :: proc(w:^Compress_Work,tracks:[]Track,out:^[dynamic]u8) -> boo
         bits_table:=COMPRESS_BITS
         for s in 0..<w.segments {
             segment:=Stream_Segment{start=u32(w.starts[s]),bits=u32(len(out)-start)}
-            for t in 0..<w.count {
-                if w.kind[t]!=.Animated {continue}
+            for t in order {
                 bits:=bits_table[w.rates[s*w.count+t]]
                 if !put(out,bits) {return false}
                 segment.stride+=u32(int(bits)*stream_components(tracks[t].property))
             }
             if w.segments>1 {
-                for track,t in tracks {
-                    if w.kind[t]!=.Animated {continue}
+                for t in order {
                     bits:=bits_table[w.rates[s*w.count+t]]
                     if bits==STREAM_RAW {continue}
-                    for c in 0..<stream_components(track.property) {
+                    for c in 0..<stream_components(tracks[t].property) {
                         at:=(t*w.segments+s)*4+c
                         pair:=[2]u8{w.low[at],w.span[at]} if bits>0 else [2]u8{u8(w.middle[at]&255),u8(w.middle[at]>>8)}
                         if !put(out,pair) {return false}
@@ -1153,8 +1166,8 @@ compress_encode :: proc(w:^Compress_Work,tracks:[]Track,out:^[dynamic]u8) -> boo
             segment.samples=u32(len(out)-start)
             word:u64;used:uint
             for k in w.starts[s]..<w.starts[s+1] {
-                for track,t in tracks {
-                    if w.kind[t]!=.Animated {continue}
+                for t in order {
+                    track:=tracks[t]
                     rate:=int(w.rates[s*w.count+t])
                     bits:=uint(bits_table[rate])
                     if bits==0 {continue}

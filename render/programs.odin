@@ -68,6 +68,16 @@ Program :: struct {
     moves:bool,                   // of a Vfx program: it moves and ages its particles itself
     births:bool,                  // of a Vfx program: it gives how many particles its emitter starts
     prepare:bool,                 // of a Vfx program: it prepares each frame what its emitter keeps
+    vertex:Program_Vertex,        // of a Surface program: its function vertex, which moves the vertices of what shows it
+}
+
+// The function vertex of a Surface program (`//! vertex`, displace.odin).
+// reach: how far it moves a vertex from its rest, in the space of the mesh;
+// with reach_offset, the float parameter at those bytes gives it instead.
+Program_Vertex :: struct {
+    declared,animated:bool,
+    reach:f32,
+    reach_offset:i32, // -1: reach
 }
 
 Program_Catalog :: struct {
@@ -122,6 +132,7 @@ program_catalog_parse :: proc(bytes:[]u8,allocator:=context.allocator) -> (catal
     if allocation_error!=nil {return}
     for entry,at in list {
         item:=entry.(json.Object) or_return
+        reach_name:string
         program:=&catalog.programs[at]
         id:=catalog_number(item["id"]) or_return
         size:=catalog_number(item["size"]) or_return
@@ -141,6 +152,19 @@ program_catalog_parse :: proc(bytes:[]u8,allocator:=context.allocator) -> (catal
             program.births,_=item["births"].(json.Boolean)
             program.prepare,_=item["prepare"].(json.Boolean)
         case: return
+        }
+        program.vertex.reach_offset=-1
+        if vertex,declared:=item["vertex"].(json.Object);declared {
+            if program.domain!=.Surface {return}
+            program.vertex.declared=true
+            program.vertex.animated,_=vertex["animated"].(json.Boolean)
+            if name,named:=vertex["reach"].(json.String);named {
+                reach_name=strings.clone(name,context.temp_allocator)
+            } else {
+                reach:=catalog_number(vertex["reach"]) or_return
+                if !(reach>=0) || reach>1e30 {return}
+                program.vertex.reach=f32(reach)
+            }
         }
         if layers,listed:=item["layers"].(json.Array);listed {
             for entry in layers {
@@ -241,7 +265,12 @@ program_catalog_parse :: proc(bytes:[]u8,allocator:=context.allocator) -> (catal
             } else {
                 parameter.defaults[0],_=catalog_number(source["default"])
             }
+            if parameter.name==reach_name {
+                if parameter.kind!=.Float || parameter.components!=1 {return}
+                program.vertex.reach_offset=i32(parameter.offset)
+            }
         }
+        if reach_name!="" && program.vertex.reach_offset<0 {return}
     }
     return catalog,true
 }
@@ -253,6 +282,14 @@ renderer_programs :: proc(r:^Renderer) -> []Program {
         r.programs.loaded=true
     }
     return r.programs.programs
+}
+
+// The program of an id; nil when the shaders have none.
+program_of_id :: proc(r:^Renderer,id:u32) -> ^Program {
+    programs:=renderer_programs(r)
+    if id>0 && int(id)<=len(programs) && programs[id-1].id==id {return &programs[id-1]}
+    for &program in programs {if program.id==id {return &program}}
+    return nil
 }
 
 // The program of that name and domain; nil when the shaders have none.

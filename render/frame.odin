@@ -422,6 +422,7 @@ renderer_frame :: proc(r:^Renderer,frame:Frame_Desc) -> bool {
     textures_views_record(r,frame)
     frame,framed:=origin_frame(r,frame)
     if !framed {return false}
+    displaced_prepare(r)
     skins_bounds(r)
     // What changed for the shadows reaches the views of a frame that draws the scene.
     if !frame.ui_only {r.frame_occluders,r.scene.occluders=r.scene.occluders,{}}

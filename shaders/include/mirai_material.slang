@@ -67,6 +67,48 @@ float3 mirai_object_point(Mirai_Surface_Context ctx, float3 p) { return mirai_ob
 float3 mirai_world_vector(Mirai_Surface_Context ctx, float3 v) { return ctx.object_x * v.x + ctx.object_y * v.y + ctx.object_z * v.z; }
 float3 mirai_world_point(Mirai_Surface_Context ctx, float3 p) { return ctx.object_position + mirai_world_vector(ctx, p); }
 float3 mirai_object_scale(Mirai_Surface_Context ctx) { return float3(length(ctx.object_x), length(ctx.object_y), length(ctx.object_z)); }
+// A vertex of what shows a Surface program that moves vertices (`//! vertex`),
+// as its function vertex receives it: where the vertex is at rest, or as its
+// skin poses it, in the space of the object, with what the mesh gives it, and
+// the object in the world as Mirai_Surface_Context has it. time and
+// previous_time are 0 unless the program says `//! vertex animated`.
+struct Mirai_Vertex_Context {
+    float3 position;
+    float3 normal;        // unit
+    float4 tangent;       // xyz along u, w the side of its bitangent
+    float2 uv0;
+    float2 uv1;
+    float4 vertex_color;  // white where the mesh has none
+    float3 world_position; // of position, relative to the origin of the render
+    int3 origin;          // that origin in steps (origin.slang)
+    float3 object_position;
+    float3 object_x;
+    float3 object_y;
+    float3 object_z;
+    float3 object_low;    // the corners of the bounds of its mesh in its own space
+    float3 object_high;
+    float time;
+    float previous_time;
+};
+// Where the vertex goes, in the space of the object: the function keeps it
+// within the reach its program declares of where it was.
+struct Mirai_Vertex {
+    float3 position;
+    float3 normal;
+    float4 tangent;
+};
+Mirai_Vertex mirai_vertex_default(Mirai_Vertex_Context ctx) {
+    Mirai_Vertex v;
+    v.position = ctx.position; v.normal = ctx.normal; v.tangent = ctx.tangent;
+    return v;
+}
+// A vector or a point of the world in the space of the object of ctx, and back.
+float3 mirai_object_vector(Mirai_Vertex_Context ctx, float3 v) {
+    return float3(dot(v, ctx.object_x) / max(dot(ctx.object_x, ctx.object_x), 1e-30), dot(v, ctx.object_y) / max(dot(ctx.object_y, ctx.object_y), 1e-30), dot(v, ctx.object_z) / max(dot(ctx.object_z, ctx.object_z), 1e-30));
+}
+float3 mirai_object_point(Mirai_Vertex_Context ctx, float3 p) { return mirai_object_vector(ctx, p - ctx.object_position); }
+float3 mirai_world_vector(Mirai_Vertex_Context ctx, float3 v) { return ctx.object_x * v.x + ctx.object_y * v.y + ctx.object_z * v.z; }
+float3 mirai_world_point(Mirai_Vertex_Context ctx, float3 p) { return ctx.object_position + mirai_world_vector(ctx, p); }
 // The values of the OpenPBR model at a point. A layer counts where its
 // weight is above zero and the material declares it may have it.
 struct Mirai_Surface {

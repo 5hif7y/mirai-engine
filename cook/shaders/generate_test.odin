@@ -417,6 +417,60 @@ program_reaches_only_the_stages_of_its_domain_and_a_project_gets_the_code_of_its
 @(private="file")
 SHADE_EACH :: "//! per surface program\n" + SHADE
 
+@(private="file")
+MOVE_EACH :: `#include "native.slang"
+//! per vertex program
+#include "scene.slang"
+[[vk::binding(SLOT_PASS0, 0)]] RWStructuredBuffer<float4> moved : register(MIRAI_REGISTER(u, SLOT_PASS0), space0);
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    Mirai_Vertex_Context ctx = (Mirai_Vertex_Context)0;
+    ctx.position = moved[id.x].xyz; ctx.normal = float3(0, 1, 0); ctx.uv1 = float2(float(id.x), 0.0);
+    Mirai_Vertex v = mirai_vertex_default(ctx);
+    mirai_vertex_program(1u, materials[0].custom_params, ctx, v);
+    moved[id.x] = float4(v.position, 1.0);
+}
+`
+
+@(private="file")
+SWAY_PROGRAM :: "//! mirai surface Sway\n//! vertex animated reach 0.5\nnamespace Sway {struct Parameters {float strength;}; Mirai_Vertex vertex(Mirai_Vertex_Context ctx,Parameters p) {Mirai_Vertex v=mirai_vertex_default(ctx);v.position.x+=sin(ctx.time)*clamp(p.strength,0.0,0.5);return v;} Mirai_Surface evaluate(Mirai_Surface_Context ctx,Parameters p) {return mirai_surface_default(ctx);}}\n"
+
+// A stage marked per vertex program is compiled only for the Surface
+// programs with a function vertex, and has no stage of its own: one that
+// moves no vertices runs nothing.
+@(test)
+stage_per_vertex_program_is_compiled_only_for_the_programs_that_move_vertices :: proc(t:^testing.T) {
+    mini:Mini
+    if !mini_make(t,&mini) {return}
+    defer fixture_remove(mini.root)
+    fixture_write(t,mini.root,"shaders/move.comp.slang",MOVE_EACH)
+    engine:=mini_generate(t,&mini,mini.options)
+    testing.expect_value(t,engine.error,"")
+    if engine.error!="" {return}
+    host:=HOST_CODE
+    published :: proc(folder,stage,host:string) -> bool {return os.is_file(path_join(folder,strings.concatenate({stage,host},context.temp_allocator),allocator=context.temp_allocator))}
+    testing.expect(t,published(mini.output,"move__Pieces.comp",host),"the built-in program that moves vertices has its stage")
+    for stage in ([]string{"move.comp","move__Ocean.comp","move__Grid.comp"}) {
+        testing.expectf(t,!published(mini.output,stage,host),"%s%s is not compiled",stage,host)
+    }
+    table:=mini_read(&mini,"render/shaders_gen.odin")
+    enum_end:=strings.index(table,"}")
+    testing.expect(t,enum_end>0 && !strings.contains(table[:enum_end],"Move_Comp") && strings.contains(table,"name = \"move__Pieces.comp\""),"the stage is found by the name of its program")
+
+    project:=path_join(mini.root,"game",allocator=context.temp_allocator)
+    output:=path_join(project,PROJECT_OUTPUT,allocator=context.temp_allocator)
+    fixture_write(t,project,"shaders/sway.slang",SWAY_PROGRAM)
+    fixture_write(t,project,"shaders/tint.slang",tint_program("1.0"))
+    options:=mini.options
+    options.odin=false
+    options.project=project
+    first:=mini_generate(t,&mini,options)
+    testing.expect_value(t,first.error,"")
+    testing.expect_value(t,first.compiled,1)
+    testing.expect(t,published(output,"move__Sway.comp",host) && !published(output,"move__Tint.comp",host),"of the programs of a project, only the one that moves vertices has the stage")
+}
+
 // A stage marked per Surface program: the stage of the materials without one,
 // then one for each program, which the renderer finds by name outside
 // Shader_Id. A program reaches only its own stage.

@@ -445,3 +445,60 @@ test_centroid :: proc(rest:[]Mesh_Vertex,origins:[]u32,influences:[]Skin_Influen
     }
     return
 }
+
+// A program that moves vertices moves a skin where its skin posed it, now
+// and in the frame before, without moving it twice when the skin poses it
+// again; its box grows by the reach of the program.
+@(test)
+gpu_a_program_moves_a_skin_after_its_skin_now_and_before :: proc(t:^testing.T) {
+    r:=new(Renderer);defer free(r)
+    device:=skin_test_renderer(t,r,false)
+    if device==nil {return}
+    defer renderer_destroy(r)
+    pieces:=program_find(r,"Pieces",.Surface)
+    if !testing.expect(t,pieces!=nil,"the engine has the Pieces program") {return}
+    moving:=DEFAULT_MATERIAL
+    moving.program_id=pieces.id
+    moving.custom_params=program_defaults(pieces)
+    Value :: struct {name:string,value:[4]f64}
+    // Its one piece goes 3 m along +X at progress 0, without turning.
+    for v in ([]Value{{"progress",{}},{"spread",{}},{"turn",{}},{"direction",{1,0,0,0}},{"distance",{3,0,0,0}},{"reach",{3,0,0,0}}}) {
+        testing.expectf(t,program_parameter_set(&moving.custom_params,program_parameter(pieces,v.name),v.value),"Pieces takes %s",v.name)
+    }
+    materials_set(r,{moving})
+    vertices,indices,_:=skin_test_geometry()
+    source,_,added:=test_mesh_add(r,vertices[:],indices[:])
+    if !testing.expect(t,added) {return}
+    rest:=test_rest(r,source)
+    influences:=make([]Skin_Influence,len(rest),context.temp_allocator)
+    for &influence in influences {influence.weights[0]=255}
+    skin,created:=skin_create(r,source,influences,1)
+    if !testing.expect(t,created,r.error) {return}
+    scene_set(r,{{object_id=1,mesh=skin,transform=Mat4(1),material=1,tint={1,1,1}}},nil,{},{})
+    camera:=Camera{position={3,4,6},forward={-3,-3.2,-6},up={0,1,0},fov_y=50,near=0.05,far=100,exposure=UNIT_EXPOSURE}
+    lifted:=[1]Mat4{Mat4(1)}
+    lifted[0][1,3]=1
+    testing.expect(t,skin_update(r,skin,lifted[:],true))
+    if !testing.expect(t,renderer_frame(r,{camera=camera}),r.error) {return}
+    lifted[0][1,3]=2
+    testing.expect(t,skin_update(r,skin,lifted[:]))
+    if !testing.expect(t,renderer_frame(r,{camera=camera}),r.error) {return}
+    s:=&r.scene
+    testing.expect(t,s.instances[0].meta.x&INSTANCE_MESH_MASK==u32(skin) && s.meshes[skin].skin.moves,"a skin is moved in place")
+    testing.expect(t,s.instances[0].bounds_max.x>=s.meshes[skin].bounds_max.x+3-1e-4,"its box grows by the reach")
+    now,read_now:=test_posed(device,r,skin)
+    before,read_before:=test_posed(device,r,skin,true)
+    if !testing.expect(t,read_now && read_before) {return}
+    for v,i in rest {
+        testing.expectf(t,linalg.length(now[i].position-(v.position+{3,2,0}))<1e-4,"vertex %d moved after its skin: %v",i,now[i].position)
+        testing.expectf(t,linalg.length(before[i].position-(v.position+{3,1,0}))<1e-4,"vertex %d where it was the frame before: %v",i,before[i].position)
+    }
+    for _ in 0..<3 {testing.expect(t,renderer_frame(r,{camera=camera}),r.error)}
+    now,_=test_posed(device,r,skin)
+    before,_=test_posed(device,r,skin,true)
+    for v,i in rest {
+        testing.expectf(t,linalg.length(now[i].position-(v.position+{3,2,0}))<1e-4,"vertex %d is moved once: %v",i,now[i].position)
+        testing.expectf(t,linalg.length(before[i].position-now[i].position)<1e-5,"vertex %d at rest draws no motion",i)
+    }
+    testing.expectf(t,rhi.device_validation_errors(device)==0,"validation: %s",rhi.device_validation_message(device))
+}

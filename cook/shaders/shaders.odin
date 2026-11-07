@@ -208,6 +208,7 @@ Generation :: struct {
     catalog:      string, // its fingerprint
     vfx:          []string, // the Vfx programs: a stage marked `//! per vfx program` is compiled once for each
     surface:      []string, // the Surface programs: a stage marked `//! per surface program` is compiled once for each
+    vertex:       []string, // those of them with a function vertex: a stage marked `//! per vertex program` is compiled once for each
     staging:      string,
     warnings:     strings.Builder,
     layouts:      []Shared_Layout, // of the structs shaders share with the CPU, from the probe
@@ -705,15 +706,18 @@ jobs_collect :: proc(g:^Generation,jobs:^[dynamic]Job,source_dir,out,staging:str
         // (<stem>__<program>), with the include of that program before those of the generation.
         // The stage itself of one per Surface program evaluates none (the include of the
         // generation): it is that of the materials without a program, unless the source
-        // says it has none (`//! per surface program only`).
+        // says it has none (`//! per surface program only`). One per vertex program is compiled
+        // only for the Surface programs with a function vertex, with their include.
         Of :: struct {name,folder:string}
         per_surface:=strings.contains(text,"//! per surface program")
-        only:=strings.contains(text,"//! per surface program only")
+        per_vertex:=strings.contains(text,"//! per vertex program")
+        only:=per_vertex || strings.contains(text,"//! per surface program only")
         programs:=make([dynamic]Of,context.temp_allocator)
         if collected!=.Programs && !only {append(&programs,Of{"",""})}
         if collected!=.Plain {
             if strings.contains(text,"//! per vfx program") {for name in g.vfx {append(&programs,Of{name,VFX_FOLDER})}}
             if per_surface {for name in g.surface {append(&programs,Of{name,SURFACE_FOLDER})}}
+            if per_vertex {for name in g.vertex {append(&programs,Of{name,SURFACE_FOLDER})}}
         }
         for program in programs do for variant in variants(text,allocator) {
             named:=stem if program.name=="" else fmt.tprintf("%s__%s",stem,program.name)
@@ -1152,7 +1156,7 @@ generate_staged :: proc(options:Options,scratch:runtime.Allocator) -> (result:Re
     // What the engine's own shaders are compiled from. A generation built for
     // a project names it, and the engine loads it only while it is its own.
     identity:=engine_fingerprint(g.root,g.version,g.includes,scratch,&g.sources)
-    g.identity,g.catalog,g.vfx,g.surface=identity,catalog.fingerprint,catalog.vfx,catalog.surface
+    g.identity,g.catalog,g.vfx,g.surface,g.vertex=identity,catalog.fingerprint,catalog.vfx,catalog.surface,catalog.vertex
     // The tools after Slang shape the Metal output of a shader, not what a
     // generation shares with the engine: they are of each shader's digest.
     {

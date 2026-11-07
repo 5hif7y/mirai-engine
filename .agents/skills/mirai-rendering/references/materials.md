@@ -314,6 +314,40 @@ stages.
   what the exact filters change from what the means gave, weighted by what each ray carried
   (`filters_weigh`, `filters_correction`). A crossing that does not fit keeps the mean.
 
+### Vertex functions
+
+A Surface program that moves the vertices of what shows it declares
+`//! vertex [animated] [reach <metres>|reach <parameter>]` and
+`Mirai_Vertex vertex(Mirai_Vertex_Context ctx, Parameters p)` (`mirai_material.slang`), which
+gives where a vertex goes, its normal and tangent, in the space of the object
+([declaration](shaders.md#programs)). `Pieces` (`shaders/materials/pieces.slang`) is the engine's:
+the pieces of a mesh, numbered in UV1, fly in with a turn as its `progress` goes to 1.
+
+- **One geometry for everything** (`displace.odin`). An instance whose materials have such a program
+  shows a pose of its own of level 0 of its mesh (`Skin_State.displaced`, current and previous
+  vertices, kept by instance identity while it shows the same mesh). The program's stage
+  (`surface_vertices__<Program>.comp`) writes it from the rest of the clusters of its materials
+  before the Geometry stage, so raster, shadows, reflections and GI (the pose's tree and BLAS,
+  refit like a [skin](scene.md#gpu-skinning)), outlines and motion vectors read the same
+  vertices. No other pass moves vertices.
+- **Only what changed runs.** A pose is written again when the transform of its instance, the
+  rows of its materials (parameters, those of a `Material_Override` too) or, if `animated`, the
+  time change; otherwise its stage does not run. Its previous vertices are those the frame before
+  showed, so the motion of a parameter that moves it is exact. Without `animated`, `ctx.time` is
+  0. Instances without such a program pay nothing.
+- **Per instance values** come from the parameters of the material of the instance: a game sets
+  them on an entity with `Material_Override` (`material_override_value_set`), each entity then
+  with rows of its own.
+- **Reach.** The box of the instance (culling, the tree of instances, the light it changes) grows
+  by `reach`, in the space of the mesh, in each axis: the function keeps every vertex within it
+  of its rest. A parameter reach is read from the row of each material.
+- **Skins** are moved in place after their skin, the current vertices at the time and transform
+  of the frame and the previous ones at those of the frame before, with the parameters of now;
+  the skin poses again each frame the program moves it. A deformable an extension writes and the
+  instances of batches are drawn as they are.
+- Until its stage's pipeline is made the vertices stay where they were (at rest for a new pose),
+  as a program draws as its row.
+
 ### Program pipelines
 
 - With a window, or with a surface that another process shows (the `--surface` player of a network
@@ -342,6 +376,9 @@ stages.
   `material_program_shows_on_what_the_camera_sees`,
   `material_program_draws_as_its_rows_until_its_pipelines_are_made`,
   `material_textures_color_the_bounced_light`, `glass_tints_the_indirect_light_with_its_mean`,
+  `material_program_moves_the_vertices_the_camera_the_rays_and_the_motion_see`,
+  `gpu_a_program_moves_a_skin_after_its_skin_now_and_before` and, without GPU,
+  `an_instance_whose_program_moves_vertices_shows_a_pose_of_its_own`,
   `gi_reference_gives_the_light_of_a_white_furnace` and, for colors in shadows,
   `material_colored_shadows_filter_textures_and_respect_blockers`.
 

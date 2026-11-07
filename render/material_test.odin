@@ -868,6 +868,82 @@ material_program_shows_on_what_the_camera_sees :: proc(t: ^testing.T) {
 	testing.expectf(t, rhi.device_validation_errors(f.device) == 0, "validation: %s", rhi.device_validation_message(f.device))
 }
 
+// The parameters of the Pieces program that send its one piece distance
+// metres along +X at progress 0, without turning it.
+@(private = "file")
+pieces_material :: proc(t: ^testing.T, pieces: ^Program, progress: f64) -> Material_Desc {
+	m := DEFAULT_MATERIAL
+	m.base_color = {1, 0, 0}
+	m.program_id = pieces.id
+	m.custom_params = program_defaults(pieces)
+	Value :: struct {name: string, value: [4]f64}
+	for v in ([]Value{{"progress", {progress, 0, 0, 0}}, {"spread", {}}, {"turn", {}}, {"direction", {1, 0, 0, 0}}, {"distance", {3, 0, 0, 0}}, {"reach", {3, 0, 0, 0}}}) {
+		testing.expectf(t, program_parameter_set(&m.custom_params, program_parameter(pieces, v.name), v.value), "Pieces takes %s", v.name)
+	}
+	return m
+}
+
+// A program that moves vertices (Pieces) moves what the camera sees, what
+// casts the shadow a ray finds, with both tracers, and draws the motion of
+// the frame its parameters move it in, and none in the next.
+@(test)
+material_program_moves_the_vertices_the_camera_the_rays_and_the_motion_see :: proc(t: ^testing.T) {
+	f: Material_Fixture
+	if !material_fixture(t, &f, 64, 64, material_settings()) {return}
+	defer material_fixture_destroy(&f)
+	r := f.renderer
+	pieces := program_find(r, "Pieces", .Surface)
+	if !testing.expect(t, pieces != nil && pieces.vertex.declared, "the engine has the Pieces program, which moves vertices") {return}
+	materials_set(r, {pieces_material(t, pieces, 0)})
+	// One piece (uv1.x 0) whose pivot is the centre of its bounds (a grey color).
+	corners := [4]Vec3{{-0.5, 0, -0.5}, {0.5, 0, -0.5}, {0.5, 0, 0.5}, {-0.5, 0, 0.5}}
+	vertices: [4]Mesh_Vertex
+	for c, i in corners {vertices[i] = {position = c, normal = {0, 1, 0}, tangent = {1, 0, 0, 1}, uv = {c.x + 0.5, c.z + 0.5}, color = {0.5, 0.5, 0.5}}}
+	piece, added := mesh_add(r, vertices[:], []u32{0, 2, 1, 0, 3, 2})
+	if !testing.expect(t, added, r.error) {return}
+	floor := ground_quad(r)
+	sun := Sun_Desc{direction = {0, 1, 0}, color = {1, 1, 1}, illuminance = math.PI, enabled = true}
+	instances := []Instance_Desc{
+		{object_id = 1, mesh = floor, transform = scale_matrix(20), tint = {1, 1, 1}},
+		{object_id = 2, mesh = piece, transform = placed(1, 1), material = 1, tint = {1, 1, 1}},
+	}
+	above := Camera{position = {1.5, 6, 0}, forward = {0, -1, 0}, up = {0, 0, -1}, fov_y = 60, near = 0.05, far = 100, exposure = UNIT_EXPOSURE}
+	side := Camera{position = {0, 3, 6}, forward = {0, -3, -6}, up = {0, 1, 0}, fov_y = 60, near = 0.05, far = 100, exposure = UNIT_EXPOSURE}
+	for provider in ([]Trace_Mode{.Software, .Hardware}) {
+		if provider == .Hardware && !r.hardware_rt_verified {continue}
+		settings := r.settings; settings.trace_mode = provider
+		testing.expect(t, renderer_apply_settings(r, settings), r.error)
+		for progress in ([]f64{0, 1}) {
+			materials_set(r, {pieces_material(t, pieces, progress)})
+			scene_set(r, instances, nil, sun, {})
+			there, away := Vec3{3, 1, 0}, Vec3{0, 1, 0}
+			if progress == 1 {there, away = away, there}
+			frames(t, r, above, 2)
+			testing.expectf(t, near_bytes(read_albedo(t, &f, above, there), {255, 0, 0, 0}, 3), "%v progress %v: the camera sees the piece where its program put it", provider, progress)
+			testing.expectf(t, near_bytes(read_albedo(t, &f, above, away), {255, 255, 255, 0}, 3), "%v progress %v: and the floor where it is not", provider, progress)
+			shaded := screen_color(t, &f, side, {there.x, 0, 0})
+			lit := screen_color(t, &f, side, {away.x, 0, 0})
+			testing.expectf(t, lit.g > shaded.g + 40, "%v progress %v: the shadow falls under the moved piece: %v vs %v", provider, progress, lit, shaded)
+		}
+	}
+	// Half way the piece is at 3 * 0.5^3 along X: the frame it moves in draws
+	// it coming from 3, the next one at rest.
+	materials_set(r, {pieces_material(t, pieces, 0)})
+	scene_set(r, instances, nil, sun, {})
+	frames(t, r, above, 3)
+	materials_update(r, {pieces_material(t, pieces, 0.5)}, {1})
+	frames(t, r, above, 1)
+	now := Vec3{3 * 0.125, 1, 0}
+	testing.expectf(t, near_bytes(read_albedo(t, &f, above, now), {255, 0, 0, 0}, 3), "the piece is half way: %v", read_albedo(t, &f, above, now))
+	moving := target_at(t, &f, r.targets.motion, above, now)
+	// From 3 to 0.375 m along X, 5 m under a camera of 60 degrees: 0.45 of the image.
+	testing.expectf(t, moving.x > 0.3 && moving.x < 0.6 && abs(moving.y) < 0.02, "the pixel comes from where the piece was: %v", moving)
+	frames(t, r, above, 1)
+	still := target_at(t, &f, r.targets.motion, above, now)
+	testing.expectf(t, abs(still.x) < 0.01 && abs(still.y) < 0.01, "a piece that stopped draws no motion: %v", still)
+	testing.expectf(t, rhi.device_validation_errors(f.device) == 0, "validation: %s", rhi.device_validation_message(f.device))
+}
+
 // Color on screen at a world position, after a few frames.
 @(private = "file")
 screen_color :: proc(t: ^testing.T, f: ^Material_Fixture, camera: Camera, world: Vec3) -> [3]f32 {

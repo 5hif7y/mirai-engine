@@ -329,6 +329,7 @@ renderer_reload_shaders :: proc(r:^Renderer,assets:^Shader_Assets)->bool {
     if shader_assets_match_codes(assets,&r.shader_codes) {
         renderer_publish_shader_metadata(r,assets)
         r.programs=catalog;r.programs.loaded=true;catalog={}
+        displaced_programs_changed(r)
         return true
     }
     candidate:=renderer_shader_reload_begin(r,assets)
@@ -336,6 +337,7 @@ renderer_reload_shaders :: proc(r:^Renderer,assets:^Shader_Assets)->bool {
     if !renderer_shader_reload_build(candidate) {set_error(r,"%s",candidate.error);return false}
     renderer_publish_shader_reload(r,assets,candidate)
     r.programs=catalog;r.programs.loaded=true;catalog={}
+    displaced_programs_changed(r)
     return true
 }
 

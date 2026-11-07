@@ -310,7 +310,7 @@ assets_rescan :: proc(s:^Session) {
 }
 
 // The prefab as its file holds it now, with the instances it holds up to
-// date with their prefabs.
+// date with their prefabs and its components in the layout of the program.
 @(private)
 prefab_scene_load :: proc(s:^Session,id:base.Asset_Id) -> (loaded:^asset.Scene,ok:bool) {
     if s.app.assets==nil {return}
@@ -318,7 +318,41 @@ prefab_scene_load :: proc(s:^Session,id:base.Asset_Id) -> (loaded:^asset.Scene,o
     prefab_reader_begin(s,&reader)
     defer prefab_reader_end(&reader)
     taken,error:=asset.resolver_take(&reader.resolver,id)
-    return taken,error==.None && taken!=nil
+    if error!=.None || taken==nil {return taken,false}
+    if prefab_scene_current(s,taken)!=.None {
+        prefab_scene_free(taken)
+        return nil,false
+    }
+    return taken,true
+}
+
+// Brings the component tables of a prefab read from its file to the layout the program gives each component,
+// as reading the file into the world and saving it would: a field the file does not keep takes what loading
+// gives it. The values the editor compares with the prefab and what it writes into it then have every field.
+@(private)
+prefab_scene_current :: proc(s:^Session,sc:^asset.Scene) -> Prefab_Error {
+    w:=edited_world(s)
+    types:=scene.schema_of(w)
+    if types==nil || !serial.schema_hashes_update(&sc.doc.schema,&sc.doc.hashes) {return .Out_Of_Memory}
+    for at in prefab_component_tables(sc) {
+        index,known:=core.world_table_index_of_hash(w,sc.doc.tables[at].name_hash)
+        if !known {continue}
+        value_type:=&types.tables[index]
+        if value_type.type==serial.TYPE_NONE || sc.doc.hashes[sc.doc.tables[at].columns[1].type]==value_type.hash {continue}
+        default,ok:=scene.read_default(&w.info.tables[index])
+        if !ok {return .Out_Of_Memory}
+        image:[]u8
+        if default!=nil {
+            canonical,allocation_error:=make([]u8,len(default),context.temp_allocator)
+            if allocation_error!=nil {return .Out_Of_Memory}
+            serial.value_write(&value_type.layout,canonical,raw_data(default),1)
+            image=canonical
+        }
+        if error:=asset.document_column_retype(&sc.doc,at,1,&types.schema,value_type.type,image);error!=.None {
+            return .Out_Of_Memory if error==.Out_Of_Memory else .Rejected
+        }
+    }
+    return .None
 }
 
 // The prefab files of the assets, read once for a question and closed by

@@ -476,22 +476,34 @@ document_rows :: proc(doc:^Document,types:^Types,name:string,out:^[dynamic]$T,de
 document_column_convert :: proc(doc:^Document,types:^Types,table,column:int,$T:typeid) -> Error {
     index,known:=types_index(types,T)
     if !known {return types.error}
+    if doc.hashes[doc.tables[table].columns[column].type]==types.hashes[index] {return .None}
+    return document_column_retype(doc,table,column,&types.schema,index)
+}
+
+// Makes a column hold values of a type of another schema, converting what it holds by field names. A field
+// the column did not hold takes its value in default, one value of that type, or zero without it.
+document_column_retype :: proc(doc:^Document,table,column:int,source:^serial.Schema,type:serial.Type_Index,default:[]u8=nil) -> Error {
+    if int(type)>=len(source.types) || default!=nil && len(default)<int(source.types[type].size) {return .Invalid}
+    link:serial.Schema_Import
+    document_import_begin(doc,&link,source)
+    defer serial.schema_import_destroy(&link)
+    imported:=document_import(doc,&link,type)
+    if imported==serial.TYPE_NONE {return .Out_Of_Memory}
     target:=&doc.tables[table].columns[column]
-    if doc.hashes[target.type]==types.hashes[index] {return .None}
+    if doc.hashes[imported]==doc.hashes[target.type] {return .None}
     rows:=doc.tables[table].rows
-    type,imported:=document_type(doc,types,T)
-    if !imported {return .Out_Of_Memory}
-    size:=int(types.schema.types[index].size)
-    converted:=Doc_Column{name=target.name,type=type,size=size,flags=target.flags,ref=target.ref,alignment=max(target.alignment,int(types.schema.types[index].align)),compression=target.compression}
+    stored:=doc.schema.types[imported]
+    size:=int(stored.size)
+    converted:=Doc_Column{name=target.name,type=imported,size=size,flags=target.flags,ref=target.ref,alignment=max(target.alignment,int(stored.align)),compression=target.compression}
     column_size(doc,&converted,rows*size) or_return
     migration:serial.Migration
-    migration_error:=serial.migration_init(&migration,&doc.schema,target.type,&types.schema,index,doc.allocator)
+    migration_error:=serial.migration_init(&migration,&doc.schema,target.type,&doc.schema,imported,doc.allocator)
     defer serial.migration_destroy(&migration)
     if migration_error!=.None {
         mem.free_bytes(raw_data(converted.data)[:converted.capacity],doc.allocator)
         return migration_error==.Out_Of_Memory?.Out_Of_Memory:.Invalid
     }
-    serial.migration_apply(&migration,converted.data,target.data,rows)
+    serial.migration_apply(&migration,converted.data,target.data,rows,default)
     mem.free_bytes(raw_data(target.data)[:target.capacity],doc.allocator)
     target^=converted
     return .None

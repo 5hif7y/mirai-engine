@@ -15,6 +15,11 @@ Key_Encoding :: enum u8 {Raw,Sampled}
 //   codes      4 bits per track of the clip, from the lowest: its Stream_Kind and then its
 //              Stream_Width
 //   constants  per Constant track, in the clip's order, its components as f32
+//   keys       per Keys track held in the stream, in the clip's order: a u32 with its key count
+//              and, in its top 4 bits, the floats of a value (stream_key_width), then the times
+//              of its keys and their values as f32; between two keys it is linear, a rotation
+//              along slerp, as track_evaluate. A Keys track kept in the library (encoding Raw) has
+//              the width code 3
 //   order      the Animated tracks as u16 places in the clip, in blocks: rotations, then positions
 //              and scales, then curves, each block in the clip's order; what follows goes in this
 //              order
@@ -31,14 +36,15 @@ Key_Encoding :: enum u8 {Raw,Sampled}
 // still in the segment at (low|span<<8)/65535 of the track's range; STREAM_RAW keeps its f32. A
 // stream of one segment has no range bytes and no 0 bits: its segment's range is the track's. A
 // rotation stores x, y and z of its quaternion with w>=0. A Default track holds STREAM_DEFAULTS
-// of its property; a Keys track keeps its keys in the library.
+// of its property; a Keys track keeps its keys in the stream or, with encoding Raw, in the library.
 Stream_Header :: struct #packed {
     bytes:u32, // the whole stream, without the STREAM_PADDING after it
     count:u32, // samples
     rate,duration:f32,
     tracks,constants,animated,segments:u32,
     rotations,threes:u32, // Animated tracks in the first two blocks of the order
-    order,ranges,table:u32, // where the order, the ranges and the segments start
+    keyed:u32,              // Keys tracks held in the stream
+    keys,order,ranges,table:u32, // where the keys, the order, the ranges and the segments start
 }
 Stream_Segment :: struct #packed {
     start:u32,   // its first sample
@@ -91,6 +97,8 @@ stream_block :: #force_inline proc "contextless" (property:Property) -> int {
     }
     return 2
 }
+// The floats of a key's value held in a stream: a rotation keeps its four.
+stream_key_width :: #force_inline proc "contextless" (property:Property) -> int {return 4 if property==.Rotation else stream_components(property)}
 stream_bits_valid :: #force_inline proc "contextless" (bits:int) -> bool {return bits==STREAM_RAW || bits>=0 && bits<=STREAM_MAX_BITS}
 
 @(private) STREAM_HEADER :: size_of(Stream_Header)
@@ -133,16 +141,45 @@ stream_check :: proc "contextless" (data:[]u8,tracks:[]$T,padding:=STREAM_PADDIN
         span:=h.rate*h.duration
         if !(h.duration>0) || !anim_finite(h.rate) || !(span>f32(h.count)-2) || span>f32(h.count-1)+1e-3 || h.animated==0 || h.segments==0 || h.segments>h.count {return}
     }
-    constants,constant_floats,animated_floats:=0,0,0
+    constants,constant_floats,animated_floats,keyed:=0,0,0,0
     blocks:[3]int
     for track,i in tracks {
         kind,components:=stream_code(data,i)
-        if (kind==.Keys)!=(track.encoding==.Raw) || track.encoding>.Sampled || track.property>max(Property) {return}
-        if kind!=.Keys && components!=stream_components(track.property) {return}
-        if kind==.Constant {constants+=1;constant_floats+=components} else if kind==.Animated {blocks[stream_block(track.property)]+=1;animated_floats+=components}
+        if kind!=.Keys && track.encoding!=.Sampled || track.encoding>.Sampled || track.property>max(Property) {return}
+        if components!=(0 if kind==.Keys && track.encoding==.Raw else stream_components(track.property)) {return}
+        switch kind {
+        case .Constant:constants+=1;constant_floats+=components
+        case .Animated:blocks[stream_block(track.property)]+=1;animated_floats+=components
+        case .Keys:if track.encoding==.Sampled {keyed+=1}
+        case .Default:
+        }
     }
-    if constants!=int(h.constants) || blocks[0]+blocks[1]+blocks[2]!=int(h.animated) || blocks[0]!=int(h.rotations) || blocks[1]!=int(h.threes) {return}
-    if int(h.order)!=stream_constants(h)+4*constant_floats || int(h.ranges)!=int(h.order)+2*int(h.animated) || int(h.table)!=int(h.ranges)+8*animated_floats {return}
+    if constants!=int(h.constants) || keyed!=int(h.keyed) || blocks[0]+blocks[1]+blocks[2]!=int(h.animated) || blocks[0]!=int(h.rotations) || blocks[1]!=int(h.threes) {return}
+    if int(h.keys)!=stream_constants(h)+4*constant_floats || int(h.order)<int(h.keys) || int(h.ranges)!=int(h.order)+2*int(h.animated) || int(h.table)!=int(h.ranges)+8*animated_floats {return}
+    // The keys held in the stream: counts, times in order and finite values that fill their section.
+    {
+        at:=int(h.keys)
+        for track,i in tracks {
+            kind,_:=stream_code(data,i)
+            if kind!=.Keys || track.encoding!=.Sampled {continue}
+            if at>int(h.order)-4 {return}
+            word:=stream_load(u32,data,at)
+            count,width:=int(word&(1<<28-1)),int(word>>28)
+            if width!=stream_key_width(track.property) || count==0 || count>(int(h.order)-at-4)/(4+4*width) {return}
+            previous:=f32(0)
+            for k in 0..<count {
+                time:=stream_load(f32,data,at+4+4*k)
+                if !anim_finite(time) || time<previous {return}
+                previous=time
+                value:math.Vec4
+                for c in 0..<width {value[c]=stream_load(f32,data,at+4+4*count+4*(width*k+c))}
+                for c in 0..<width {if !anim_finite(value[c]) {return}}
+                if track.property==.Rotation && abs(value.x)+abs(value.y)+abs(value.z)+abs(value.w)<1e-8 {return}
+            }
+            at+=4+4*count*(1+width)
+        }
+        if at!=int(h.order) {return}
+    }
     end:=int(h.table)+int(h.segments)*size_of(Stream_Segment)
     if end>bytes {return}
     // The order: every Animated track once, in its block, each block in the clip's order.
@@ -265,6 +302,39 @@ stream_rotation_mix :: #force_inline proc "contextless" (a,b:math.Vec4,terms:Str
 stream_mix :: #force_inline proc "contextless" (a,b:math.Vec4,amount:f32,property:Property) -> math.Vec4 {
     if property!=.Rotation {return a+(b-a)*amount}
     return stream_rotation_mix(a,b,stream_terms(amount))
+}
+
+// The value at a time of the Keys track held in the stream at `at`, as track_evaluate gives that
+// of linear keys, and where the next one starts. A section that does not fit gives 0.
+@(private)
+stream_keyed :: proc "contextless" (data:[]u8,at,end:int,property:Property,time:f32) -> (value:math.Vec4,next:int) {
+    if at<0 || end>len(data) || at>end-4 {return {},end}
+    word:=intrinsics.unaligned_load((^u32)(uintptr(raw_data(data))+uintptr(at)))
+    count,width:=int(word&(1<<28-1)),int(word>>28)
+    next=at+4+4*count*(1+width)
+    if count==0 || width==0 || width>4 || count>(end-at-4)/(4+4*width) {return {},end}
+    times:=at+4
+    values:=times+4*count
+    key :: #force_inline proc "contextless" (data:[]u8,values,width,k:int) -> (v:math.Vec4) {
+        for c in 0..<width {v[c]=intrinsics.unaligned_load((^f32)(uintptr(raw_data(data))+uintptr(values+4*(width*k+c))))}
+        return
+    }
+    time_of :: #force_inline proc "contextless" (data:[]u8,times,k:int) -> f32 {return intrinsics.unaligned_load((^f32)(uintptr(raw_data(data))+uintptr(times+4*k)))}
+    last:=count-1
+    if !(time>time_of(data,times,0)) {return key(data,values,width,0),next}
+    if time>=time_of(data,times,last) {return key(data,values,width,last),next}
+    low,high:=0,last
+    for high-low>1 {
+        middle:=(low+high)>>1
+        if time_of(data,times,middle)<=time {low=middle} else {high=middle}
+    }
+    ta,tb:=time_of(data,times,low),time_of(data,times,low+1)
+    a,b:=key(data,values,width,low),key(data,values,width,low+1)
+    span:=tb-ta
+    if span<=0 {return b,next}
+    t:=math.ease_apply(.Linear,(time-ta)/span)
+    if property==.Rotation {return quat_vec4(math.quat_slerp(vec4_quat(a),vec4_quat(b),t)),next}
+    return a+(b-a)*t,next
 }
 
 // Cosine of half the largest rotation between two samples that stream_mix follows by its series.
@@ -408,7 +478,7 @@ Clip_Reader :: struct {
     streams:[]u8,    // the library's, for a track another clip's stream holds
     next:int,        // the next track of the clip or, once animated, the next place of the order
     animated:bool,
-    constant_at,range_at:int,
+    constant_at,range_at,keyed_at:int,
     count,at:int,    // what chunk holds and the next of it to give
     chunk:[STREAM_CHUNK]math.Vec4,
     slots:[STREAM_CHUNK]int, // the place in the clip of each value of chunk
@@ -420,14 +490,14 @@ STREAM_CHUNK :: 32
 @(private)
 stream_reader :: proc "contextless" (r:^Clip_Reader,data:[]u8,time:f32) {
     r.data,r.h,r.a,r.b,r.amount,r.time,r.terms={},{},{},{},0,time,{}
-    r.tracks,r.keys,r.streams,r.next,r.animated,r.constant_at,r.range_at,r.count,r.at,r.failed=nil,nil,nil,0,false,0,0,0,0,false
+    r.tracks,r.keys,r.streams,r.next,r.animated,r.constant_at,r.range_at,r.keyed_at,r.count,r.at,r.failed=nil,nil,nil,0,false,0,0,0,0,0,false
     if data==nil {return}
     if len(data)<STREAM_HEADER {r.failed=true;return}
     h:=stream_load(Stream_Header,data,0)
     bytes:=int(h.bytes)
-    if bytes>len(data)-STREAM_PADDING || bytes<stream_constants(h) || int(h.order)<stream_constants(h) || int(h.ranges)<int(h.order) || int(h.table)<int(h.ranges) || int(h.table)+int(h.segments)*size_of(Stream_Segment)>bytes || h.rotations>h.animated || h.threes>h.animated-h.rotations {r.failed=true;return}
+    if bytes>len(data)-STREAM_PADDING || bytes<stream_constants(h) || int(h.keys)<stream_constants(h) || int(h.order)<int(h.keys) || int(h.ranges)<int(h.order) || int(h.table)<int(h.ranges) || int(h.table)+int(h.segments)*size_of(Stream_Segment)>bytes || h.rotations>h.animated || h.threes>h.animated-h.rotations {r.failed=true;return}
     r.data,r.h=data,h
-    r.constant_at,r.range_at=stream_constants(h),int(h.ranges)
+    r.constant_at,r.range_at,r.keyed_at=stream_constants(h),int(h.ranges),int(h.keys)
     if h.animated>0 {
         if h.segments==0 || h.count<2 {r.failed=true;return}
         index:int
@@ -497,7 +567,7 @@ stream_fill :: proc "contextless" (r:^Clip_Reader) -> bool #no_bounds_check {
     data:=r.data
     tracks:=r.tracks
     if !r.animated {
-        constant_at,next,count:=r.constant_at,r.next,0
+        constant_at,keyed_at,next,count:=r.constant_at,r.keyed_at,r.next,0
         chunk,slots:=&r.chunk,&r.slots
         for next<len(tracks) && count<STREAM_CHUNK {
             i:=next
@@ -508,7 +578,8 @@ stream_fill :: proc "contextless" (r:^Clip_Reader) -> bool #no_bounds_check {
                 kind,components:=stream_code(data,i)
                 switch kind {
                 case .Animated:continue
-                case .Keys:value=stream_held(r,tracks[i])
+                case .Keys:
+                    if components>0 {value,keyed_at=stream_keyed(data,keyed_at,int(r.h.order),property,r.time)} else {value=stream_held(r,tracks[i])}
                 case .Default:value=stream_default(property)
                 case .Constant:
                     value=stream_finish(stream_floats(data,constant_at,components),property)
@@ -518,7 +589,7 @@ stream_fill :: proc "contextless" (r:^Clip_Reader) -> bool #no_bounds_check {
             chunk[count],slots[count]=value,i
             count+=1
         }
-        r.constant_at,r.next,r.count=constant_at,next,count
+        r.constant_at,r.keyed_at,r.next,r.count=constant_at,keyed_at,next,count
         if r.next<len(tracks) {return true}
         r.animated,r.next=true,0
         if r.count>0 {return true}
@@ -635,7 +706,16 @@ stream_evaluate :: proc "contextless" (lib:^Library,track:Track,time:f32) -> mat
     kind,components:=stream_code(data,target)
     if components!=stream_components(track.property) {return {}}
     switch kind {
-    case .Keys:return {}
+    case .Keys:
+        if int(h.keys)<stream_constants(h) || int(h.order)<int(h.keys) || int(h.order)>int(h.bytes) {return {}}
+        at:=int(h.keys)
+        for i in 0..<target {
+            if kind_i,components_i:=stream_code(data,i);kind_i!=.Keys || components_i==0 {continue}
+            if at<0 || at>int(h.order)-4 {return {}}
+            _,at=stream_keyed(data,at,int(h.order),.Float,0)
+        }
+        value,_:=stream_keyed(data,at,int(h.order),track.property,time)
+        return value
     case .Default:return stream_default(track.property)
     case .Constant:
         at:=stream_constants(h)

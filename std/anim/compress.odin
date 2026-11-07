@@ -18,7 +18,7 @@ Compress_Config :: struct {
 COMPRESS_DEFAULT :: Compress_Config{precision=.0001,shell=.03,float_precision=.0001,vector_precision=.0001}
 // Advances whenever library_compress gives other streams for the same keys and config: a
 // compression kept by its inputs is made again.
-COMPRESS_VERSION :: 3
+COMPRESS_VERSION :: 4
 // The sample rate of a clip whose keys have no interval in common.
 COMPRESS_RATE :: 30
 Compress_Error :: enum u8 {None,Invalid,Out_Of_Memory,Prepared}
@@ -147,13 +147,15 @@ library_compress :: proc(lib:^Library,parents:[]i32=nil,skeletons:[]Skeleton=nil
     allocator:=lib.allocator
     stats.raw_bytes=library_resident_bytes(lib)
     kinds,e1:=make([]Stream_Kind,lib.track_count,allocator)
+    // Keys tracks the stream holds; the others keep their keys in the library.
+    held,e0:=make([]bool,lib.track_count,allocator)
     // Per clip that heads its tracks: where its stream starts in `out` and its bytes.
     placed,e2:=make([][2]int,lib.clip_count,allocator)
     owner,e3:=make([]int,lib.track_count,allocator)
     out:=make([dynamic]u8,allocator)
     tables:=Compress_Tables{allocator=allocator}
-    defer {delete(kinds,allocator);delete(placed,allocator);delete(owner,allocator);delete(out);compress_tables_free(&tables)}
-    if e1!=nil || e2!=nil || e3!=nil {return stats,.Out_Of_Memory}
+    defer {delete(kinds,allocator);delete(held,allocator);delete(placed,allocator);delete(owner,allocator);delete(out);compress_tables_free(&tables)}
+    if e0!=nil || e1!=nil || e2!=nil || e3!=nil {return stats,.Out_Of_Memory}
     for &o in owner {o=-1}
     for &kind in kinds {kind=.Keys}
     for clip,c in lib.clips[:lib.clip_count] {
@@ -168,7 +170,7 @@ library_compress :: proc(lib:^Library,parents:[]i32=nil,skeletons:[]Skeleton=nil
         skeleton:Skeleton
         if c<len(skeletons) && len(skeletons[c].parents)>0 && skeleton_validate(skeletons[c]) {skeleton=skeletons[c]}
         at:=len(out)
-        clip_error,curve_error,ok:=compress_clip(lib,clip,parents,skeleton,config,kinds[clip.first_track:][:clip.track_count],&out,&tables)
+        clip_error,curve_error,ok:=compress_clip(lib,clip,parents,skeleton,config,kinds[clip.first_track:][:clip.track_count],held[clip.first_track:][:clip.track_count],&out,&tables)
         if !ok {return stats,.Out_Of_Memory}
         if len(out)>at {placed[c]={at,len(out)-at}}
         stats.error=max(stats.error,clip_error);stats.curve_error=max(stats.curve_error,curve_error)
@@ -176,7 +178,9 @@ library_compress :: proc(lib:^Library,parents:[]i32=nil,skeletons:[]Skeleton=nil
     raw_count:=0
     for kind,i in kinds {
         switch kind {
-        case .Keys:raw_count+=int(lib.tracks[i].count);stats.raw_tracks+=1
+        case .Keys:
+            stats.raw_tracks+=1
+            if !held[i] {raw_count+=int(lib.tracks[i].count)}
         case .Default:stats.default_tracks+=1
         case .Constant:stats.constant_tracks+=1
         case .Animated:stats.sampled_tracks+=1
@@ -190,7 +194,7 @@ library_compress :: proc(lib:^Library,parents:[]i32=nil,skeletons:[]Skeleton=nil
     for clip,c in lib.clips[:lib.clip_count] {
         if placed[c][0]<0 || owner[clip.first_track]!=c {continue}
         for &track,i in lib.tracks[clip.first_track:][:clip.track_count] {
-            if kinds[int(clip.first_track)+i]==.Keys {continue}
+            if kinds[int(clip.first_track)+i]==.Keys && !held[int(clip.first_track)+i] {continue}
             track={target=track.target,property=track.property,slot=track.slot,encoding=.Sampled,first=u32(placed[c][0]),count=u32(i)}
         }
     }
@@ -213,7 +217,7 @@ library_compress :: proc(lib:^Library,parents:[]i32=nil,skeletons:[]Skeleton=nil
 // Plans the tracks of one clip and appends its stream to `out`, when any track goes in one. A
 // clip without memory to measure it keeps its keys; ok is false only when `out` cannot grow.
 @(private)
-compress_clip :: proc(lib:^Library,clip:Clip_Data,parents:[]i32,skeleton:Skeleton,config:Compress_Config,kinds:[]Stream_Kind,out:^[dynamic]u8,tables:^Compress_Tables) -> (worst,curve_worst:f32,ok:bool) {
+compress_clip :: proc(lib:^Library,clip:Clip_Data,parents:[]i32,skeleton:Skeleton,config:Compress_Config,kinds:[]Stream_Kind,held:[]bool,out:^[dynamic]u8,tables:^Compress_Tables) -> (worst,curve_worst:f32,ok:bool) {
     tracks:=lib.tracks[clip.first_track:][:clip.track_count]
     if len(tracks)>STREAM_MAX_TRACKS {return 0,0,true}
     w:=Compress_Work{first=int(clip.first_track),count=len(tracks),duration=clip.duration,skeleton=skeleton,allocator=lib.allocator,tables=tables}
@@ -240,19 +244,36 @@ compress_clip :: proc(lib:^Library,clip:Clip_Data,parents:[]i32,skeleton:Skeleto
         if !compress_verify(&w,tracks,config) {return 0,0,true}
         // A track takes its keys back when they cost fewer bytes than its samples.
         for track,i in tracks {
-            if w.kind[i]==.Animated && compress_track_bytes(&w,track,i)>=int(track.count)*size_of(Keyframe) {w.kind[i]=.Keys}
+            if w.kind[i]==.Animated && compress_track_bytes(&w,track,i)>=compress_keys_bytes(lib,track) {w.kind[i]=.Keys}
         }
     } else {
         for &kind,i in w.kind {if kind==.Animated {kind,w.value[i]=.Constant,stream_finish(w.exact[i],tracks[i].property)}}
     }
+    // The stream holds the keys of a Keys track when they are linear: fewer bytes than Keyframes.
+    for track,i in tracks {held[i]=w.kind[i]==.Keys && track.count>0 && compress_linear(track_keys(lib,track))}
     animated:=0
     any:=false
-    for kind in w.kind {any ||= kind!=.Keys;if kind==.Animated {animated+=1}}
+    for kind,i in w.kind {any ||= kind!=.Keys || held[i];if kind==.Animated {animated+=1}}
     if animated==0 {w.segments=0}
     worst,curve_worst=compress_measure(&w,tracks,config)
     copy(kinds,w.kind)
     if !any {return worst,curve_worst,true}
-    return worst,curve_worst,compress_encode(&w,tracks,out)
+    return worst,curve_worst,compress_encode(&w,lib,tracks,held,out)
+}
+
+// Keys that the stream can hold: linear without easing after the first.
+@(private)
+compress_linear :: proc "contextless" (keys:[]Keyframe) -> bool {
+    if len(keys)==0 {return false}
+    for key in keys[1:] {if key.interpolation!=.Linear || key.ease!=.Linear {return false}}
+    return true
+}
+// What the keys of a track cost: in the stream when linear, else as Keyframes.
+@(private)
+compress_keys_bytes :: proc "contextless" (lib:^Library,track:Track) -> int {
+    keys:=track_keys(lib,track)
+    if compress_linear(keys) {return 4+4*len(keys)*(1+stream_key_width(track.property))}
+    return len(keys)*size_of(Keyframe)
 }
 
 @(private)
@@ -1100,7 +1121,7 @@ compress_put_bytes :: proc(out:^[dynamic]u8,value:$T) -> bool {
 
 // Appends the stream of the clip, as stream_decode reads it. False when `out` cannot grow.
 @(private)
-compress_encode :: proc(w:^Compress_Work,tracks:[]Track,out:^[dynamic]u8) -> bool {
+compress_encode :: proc(w:^Compress_Work,lib:^Library,tracks:[]Track,held:[]bool,out:^[dynamic]u8) -> bool {
     put :: compress_put_bytes
     start:=len(out)
     // The Animated tracks in the blocks of the stream's order.
@@ -1124,13 +1145,24 @@ compress_encode :: proc(w:^Compress_Work,tracks:[]Track,out:^[dynamic]u8) -> boo
         code:u8
         for side in 0..<2 {
             if i+side>=w.count {break}
-            code|=(u8(w.kind[i+side])|u8(stream_width(tracks[i+side].property))<<2)<<uint(4*side)
+            width:=u8(3) if w.kind[i+side]==.Keys && !held[i+side] else u8(stream_width(tracks[i+side].property))
+            code|=(u8(w.kind[i+side])|width<<2)<<uint(4*side)
         }
         if !put(out,code) {return false}
     }
     for track,t in tracks {
         if w.kind[t]!=.Constant {continue}
         for c in 0..<stream_components(track.property) {if !put(out,w.value[t][c]) {return false}}
+    }
+    h.keys=u32(len(out)-start)
+    for track,t in tracks {
+        if !held[t] {continue}
+        keys:=track_keys(lib,track)
+        width:=stream_key_width(track.property)
+        h.keyed+=1
+        if !put(out,u32(len(keys))|u32(width)<<28) {return false}
+        for key in keys {if !put(out,key.time) {return false}}
+        for key in keys {for c in 0..<width {if !put(out,key.value[c]) {return false}}}
     }
     h.order=u32(len(out)-start)
     for t in order {if !put(out,u16(t)) {return false}}

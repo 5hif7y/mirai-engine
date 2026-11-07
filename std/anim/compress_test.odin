@@ -123,16 +123,27 @@ compressed_library_keeps_keys_that_samples_would_not_follow :: proc(t:^testing.T
     eased:=[2]Keyframe{key(0,0),key(1,3,.Linear,.Back_Out)}
     step:=[3]Keyframe{key(0,1),key(1,3,.Step),key(2,2,.Step)}
     spline:=[3]Keyframe{rot_key(0,1,.Cubic),rot_key(1,math.quat_axis_angle({0,1,0},.4),.Cubic),rot_key(2,math.quat_axis_angle({0,1,0},.8),.Cubic)}
-    desc:=[4]Track_Desc{{property=.Float,keys=cubic[:]},{property=.Float,keys=eased[:]},{property=.Float,keys=step[:]},{target=3,property=.Rotation,keys=spline[:]}}
+    // Linear keys off the grid of the others: the stream holds them as they are.
+    off:=[4]Keyframe{key(0,0),key(.37,2),key(1.13,-1),key(2,4)}
+    turn:=[3]Keyframe{rot_key(0,1),rot_key(.7,math.quat_axis_angle({0,1,0},2.5)),rot_key(1.9,math.quat_axis_angle({1,0,0},-1))}
+    desc:=[6]Track_Desc{{property=.Float,keys=cubic[:]},{property=.Float,keys=eased[:]},{property=.Float,keys=step[:]},{target=3,property=.Rotation,keys=spline[:]},{target=4,property=.Position,keys=off[:]},{target=4,property=.Rotation,keys=turn[:]}}
+    for &k in off {k.value={k.value.x,1-k.value.x,.5,0}}
     lib:=make_library(t);defer library_destroy(&lib)
     clip,_:=clip_add(&lib,{tracks=desc[:]})
     stats,error:=library_compress(&lib)
     testing.expect_value(t,error,Compress_Error.None)
-    testing.expect_value(t,stats.raw_tracks,4)
+    testing.expect_value(t,stats.raw_tracks,6)
+    values:[6]math.Vec4
     for track,i in clip_tracks(&lib,clip) {
-        testing.expect_value(t,track.encoding,Key_Encoding.Raw)
-        for sample in 0..<101 {time:=f32(sample)/100*2;testing.expect_value(t,clip_evaluate(&lib,track,time),track_evaluate(desc[i].keys,track.property,time))}
+        testing.expect_value(t,track.encoding,Key_Encoding.Raw if i<4 else Key_Encoding.Sampled)
+        for sample in 0..<101 {
+            time:=f32(sample)/100*2
+            testing.expect(t,clip_sample(&lib,clip,time,values[:]))
+            testing.expect_value(t,clip_evaluate(&lib,track,time),track_evaluate(desc[i].keys,track.property,time))
+            testing.expect_value(t,values[i],track_evaluate(desc[i].keys,track.property,time))
+        }
     }
+    testing.expect(t,lib.key_count==len(cubic)+len(eased)+len(step)+len(spline))
     testing.expect(t,track_keys(&lib,clip_tracks(&lib,clip)[0])[1].out_slope==cubic[1].out_slope)
 }
 

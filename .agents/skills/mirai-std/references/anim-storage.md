@@ -34,7 +34,10 @@ compressions by it.
   speed, as the keys' slerp: linear keys of a fast rotation are followed between samples.
 - A track whose keys the samples cannot follow between them (keys off the clip's grid, cubic slopes,
   easing, steps) keeps its keys (`Stream_Kind.Keys`), and so does one whose keys take fewer bytes
-  than its samples.
+  than its samples. Linear keys go into the stream as their times and values, read exactly as
+  `track_evaluate` reads them; the others stay `Keyframe` in the library.
+- A track that holds the rest pose of its bone is a `Constant`: a stream does not know the
+  skeleton, so a library plays without it.
 
 ## Stream
 

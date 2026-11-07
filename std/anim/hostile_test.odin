@@ -416,9 +416,15 @@ hostile_streams_through_the_decoder :: proc(t:^testing.T) {
         keys[2][k]={time=phase,value={phase*.5,0,0,0}}
     }
     still:=[1]Keyframe{{value={1,1,1,0}}}
+    off:=[3]Keyframe{{time=0,value={1,0,0,0}},{time=.41,value={-3,0,0,0}},{time=1.3,value={2,0,0,0}}}
     lib:=make_library(t,keys=200,tracks=8,clips=2,markers=0);defer library_destroy(&lib)
-    clip,_:=clip_add(&lib,{tracks={{target=1,property=.Position,keys=keys[0][:]},{target=1,property=.Rotation,keys=keys[1][:]},{target=1,property=.Scale,keys=still[:]},{target=2,property=.Float,keys=keys[2][:]},{target=3,property=.Vector}}})
+    clip,_:=clip_add(&lib,{tracks={{target=1,property=.Position,keys=keys[0][:]},{target=1,property=.Rotation,keys=keys[1][:]},{target=1,property=.Scale,keys=still[:]},{target=2,property=.Float,keys=keys[2][:]},{target=3,property=.Vector},{target=4,property=.Float,keys=off[:]}}})
     _,error:=library_compress(&lib);testing.expect_value(t,error,Compress_Error.None)
+    testing.expect_value(t,clip_tracks(&lib,clip)[5].encoding,Key_Encoding.Sampled)
+    for step in 0..=40 {
+        time:=f32(step)/40*1.6
+        testing.expect_value(t,clip_evaluate(&lib,clip_tracks(&lib,clip)[5],time),track_evaluate(off[:],.Float,time))
+    }
     saved:=make([]u8,len(lib.streams));defer delete(saved)
     copy(saved,lib.streams)
     values:[8]math.Vec4

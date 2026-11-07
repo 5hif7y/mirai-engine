@@ -425,7 +425,6 @@ arm_query :: proc(user:rawptr,from,to:mm.Vec3,radius:f32) -> (fraction:f32,hit:b
 
 // Its target, or without one the body whose camera it is, or else the one of
 // the focused local player.
-@(private)
 follow_target :: proc(e,target:core.Entity,drivables:core.Read(input.Drivable),player:core.Entity) -> core.Entity {
     if target!=core.NONE {return target}
     for row in 0..<core.count(drivables) {

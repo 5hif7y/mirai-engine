@@ -7,7 +7,6 @@ import "core:mem"
 import img "mirai:cook/image"
 import "mirai:core"
 import "mirai:editor/api"
-import gpu "mirai:render"
 import "mirai:std/base"
 import mm "mirai:std/math"
 import "mirai:std/serial"
@@ -86,7 +85,10 @@ api_filmstrip_read :: proc(s:^Session,call:^api.Call,r:^Run,own:bool,p:^Api_Play
         strip.region=q
     }
     steps:[]Api_Step_Input
-    if values[3]!="" {steps=api_segments_read(call,p.segments[:],values[3]) or_return}
+    if values[3]!="" {
+        steps=api_segments_read(call,p.segments[:],values[3],s.app.tick_dt) or_return
+        if problem:=run_script_blocks(s,run_player(s,r.owner,p.player));problem!="" {api.call_fail(call,api.INVALID_PARAMS,problem);return}
+    }
     given:=api_timeline_ticks(steps)
     if given>total {
         api.call_failf(call,api.INVALID_PARAMS,"segments run %d ticks and the filmstrip %d (every times count less one): shorten them or raise every or count",given,total)
@@ -167,21 +169,8 @@ api_filmstrip_take :: proc(s:^Session,data:rawptr,_:core.World_Ref,ran:int) -> s
     switch {
     case strip.follow!=core.NONE:
         center:=view.xy+view.zw*0.5
-        if core.alive(core.world_entities(w),strip.follow) {
-            // Not its origin, at the feet of a character: the center of mass of a body, or the
-            // middle of what hangs from it. The box of a skinned mesh is that of its bind pose.
-            placed:=entity_world(w,strip.follow)
-            low,high:=placed.position,placed.position
-            it:=scene_items(s,w)
-            for item in scene_item_next(&it) {
-                if !entity_under(w,item.entity,strip.follow) {continue}
-                low,high=linalg.min(low,item.world.position),linalg.max(high,item.world.position)
-            }
-            point:=(low+high)*0.5
-            if motions:=core.world_table_of(w,core.Motion);motions!=nil {
-                if motion,moves:=core.get(core.read(motions),strip.follow);moves {point=placed.position+mm.quat_rotate(placed.rotation,motion.center)}
-            }
-            if at,seen:=api_view_project(s.app.camera,view,point);seen {
+        if seen:=core.world_storage_of(w,core.View);seen!=nil && core.alive(core.world_entities(w),strip.follow) {
+            if at,shown:=api_view_project(seen^,view,api_entity_middle(w,strip.follow));shown {
                 center,cell.at,cell.seen=at,at/density,true
             }
         }
@@ -204,25 +193,37 @@ api_filmstrip_take :: proc(s:^Session,data:rawptr,_:core.World_Ref,ran:int) -> s
     return ""
 }
 
-// Where a world point shows in pixels of an image whose view (x y width
-// height in pixels) the camera draws; false behind the camera.
+// Where a world point shows in pixels of an image whose rect (x y width
+// height in pixels) a view draws; false behind its eye.
 @(private)
-api_view_project :: proc(camera:gpu.Camera,view:[4]f32,point:[3]f32) -> (at:[2]f32,seen:bool) {
-    if !(view.z>0) || !(view.w>0) || linalg.length(camera.forward)<1e-6 {return}
-    aspect:=view.z/view.w
-    near:=max(camera.near,1e-3)
-    far:=max(camera.far,near+1)
-    projection:mm.Mat4
-    if camera.projection==.Orthographic && camera.height>0 {
-        half:=camera.height*0.5
-        projection=mm.orthographic_off_center(-half*aspect,half*aspect,-half,half,near,far)
-    } else {
-        projection=mm.perspective(camera.fov_y*mm.RAD_PER_DEG,aspect,near,far)
+api_view_project :: proc(view:core.View,rect:[4]f32,point:[3]f32) -> (at:[2]f32,seen:bool) {
+    if !(rect.z>0) || !(rect.w>0) {return}
+    drawn:=view
+    drawn.size=rect.zw
+    pixel,_,front:=core.view_project(drawn,point)
+    if !front || !rpc_finite(pixel.x) || !rpc_finite(pixel.y) {return}
+    return rect.xy+pixel,true
+}
+
+// Where an entity is seen to be, not its origin at the feet of a character:
+// the center of mass of a body, or the middle of what hangs from it. The box
+// of a skinned mesh is that of its bind pose.
+@(private)
+api_entity_middle :: proc(w:core.World_Ref,e:core.Entity) -> [3]f32 {
+    placed:=entity_world(w,e)
+    if motions:=core.world_table_of(w,core.Motion);motions!=nil {
+        if motion,moves:=core.get(core.read(motions),e);moves {return placed.position+mm.quat_rotate(placed.rotation,motion.center)}
     }
-    // From the eye: far from the centre of the world a matrix with the place would round it.
-    screen,_,ok:=mm.world_to_screen(point-camera.position,view.zw,projection*mm.look_at({},camera.forward,camera.up))
-    if !ok || !rpc_finite(screen.x) || !rpc_finite(screen.y) {return}
-    return view.xy+screen,true
+    low,high:=placed.position,placed.position
+    transforms,worlds:=core.world_table_of(w,core.Transform),core.world_table_of(w,core.World_Transform)
+    if transforms==nil {return placed.position}
+    for other in transforms.entities {
+        if other==e || !entity_under(w,other,e) {continue}
+        at:=entity_world(w,other).position
+        if row:=worlds!=nil?core.row_of(worlds,other):-1;row>=0 {at=worlds.values[row].transform.position}
+        low,high=linalg.min(low,at),linalg.max(high,at)
+    }
+    return (low+high)*0.5
 }
 
 // The cell of size pixels centered on center in an image of image pixels;

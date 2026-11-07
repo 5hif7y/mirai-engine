@@ -14,6 +14,7 @@ import stbi "vendor:stb/image"
 import "mirai:asset"
 import anim "mirai:std/anim"
 import "mirai:std/base"
+import mm "mirai:std/math"
 import "mirai:std/serial"
 import importer "mirai:cook/import"
 
@@ -201,7 +202,7 @@ a_humanoid_skeleton_is_written_with_its_body_and_keeps_what_a_person_set :: proc
     defer os.remove_all(folder)
     options:=importer.Import_Options{ignore_stored=true,no_save=true}
     options.max_texture_size=4
-    body_of :: proc(t:^testing.T,folder:string,options:importer.Import_Options,types:^asset.Types) -> (map_:anim.Body_Map,bones:[]asset.Skeleton_Bone,path:string) {
+    body_of :: proc(t:^testing.T,folder:string,options:importer.Import_Options,types:^asset.Types) -> (map_:anim.Body_Map,bones:[]asset.Skeleton_Bone,path:string,sockets:[]asset.Skeleton_Socket) {
         model,ok:=import_ok(t,DEMO+"models/mirai/mirai.glb",options)
         if !ok {return}
         defer importer.model_destroy(&model)
@@ -216,10 +217,10 @@ a_humanoid_skeleton_is_written_with_its_body_and_keeps_what_a_person_set :: proc
         view,view_error:=asset.skeleton_view(&file,types)
         if !testing.expect_value(t,view_error,asset.Error.None) || !testing.expect(t,view.body!=nil) {return}
         bones=slice.clone(view.bones,context.temp_allocator)
-        return asset.skeleton_body_map(bones,view.body,view.body_parts),bones,strings.clone(written.path,context.temp_allocator)
+        return asset.skeleton_body_map(bones,view.body,view.body_parts),bones,strings.clone(written.path,context.temp_allocator),slice.clone(view.sockets,context.temp_allocator)
     }
     types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
-    map_,bones,path:=body_of(t,folder,options,&types)
+    map_,bones,path,_:=body_of(t,folder,options,&types)
     if bones==nil {return}
     name :: proc(bones:[]asset.Skeleton_Bone,map_:anim.Body_Map,part:anim.Body_Part) -> string {
         bone:=map_.bones[part]
@@ -241,12 +242,23 @@ a_humanoid_skeleton_is_written_with_its_body_and_keeps_what_a_person_set :: proc
     if !testing.expect_value(t,asset.asset_load(&file,path),asset.Error.None) {return}
     view,_:=asset.skeleton_view(&file,&types)
     id:=file.blob.header.id
-    rewritten:=asset.skeleton_save(path,&types,{id=id,bones=view.bones,sockets=view.sockets,body=&body,body_parts=parts[:count],source=view.source})
+    // And hangs a weapon from the right hand by a socket of its own: importing again keeps it.
+    sockets:=make([dynamic]asset.Skeleton_Socket,context.temp_allocator)
+    append(&sockets,..view.sockets)
+    held:=asset.Skeleton_Socket{offset=mm.TRANSFORM_IDENTITY}
+    held.offset.position={.1,.2,.3}
+    for &bone in bones {if base.text_get(bone.name[:])=="RightHand" {held.bone=bone.path}}
+    base.text_set(held.name[:],"weapon")
+    append(&sockets,held)
+    rewritten:=asset.skeleton_save(path,&types,{id=id,bones=view.bones,sockets=sockets[:],body=&body,body_parts=parts[:count],source=view.source})
     asset.asset_close(&file)
     testing.expect_value(t,rewritten,asset.Error.None)
     options.rebuild=true
-    again,_,_:=body_of(t,folder,options,&types)
+    again,_,_,kept:=body_of(t,folder,options,&types)
     testing.expect(t,name(bones,again,.Hand_L)=="head_end" && again.manual=={.Hand_L} && name(bones,again,.Hand_R)=="RightHand")
+    weapon:=0
+    for &socket in kept {if base.text_get(socket.name[:])=="weapon" && socket.bone==held.bone && socket.offset==held.offset {weapon+=1}}
+    testing.expectf(t,weapon==1,"a socket of its own stays once, on its bone and offset: %d",weapon)
 }
 
 @(test)

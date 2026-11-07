@@ -257,14 +257,24 @@ match_stop :: proc(requests:^Animation_Requests,rig:core.Entity) -> bool {
 // (that of the body with the lag of its spring), and lag, where that root is from the body. World
 // axes. landing_modes: bit m for each mode m whose clips play toward the landing marker, which
 // match_goal.time_to_land times.
-Animation_Match :: struct {clip:u64,time,rate,speed,cost:f32,mode:u16,forced:bool,searches,jumps:u32,velocity,lag:mm.Vec3,landing_modes:u32}
+// travel: the direction its clip moves in, rig axes (unit; zero for one that stands or plays by match_play).
+Animation_Match :: struct {clip:u64,time,rate,speed,cost:f32,mode:u16,forced:bool,searches,jumps:u32,velocity,lag,travel:mm.Vec3,landing_modes:u32}
+
+// The direction remaining of the way from to back toward from, turning about the vertical: a clip
+// that backs off after one that went forward turns through the side and never through zero.
+@(private)
+travel_turn :: proc "contextless" (from,to:mm.Vec3,remaining:f32) -> mm.Vec3 {
+    if from=={} || to=={} || !(remaining>0) {return to}
+    turn:=cmath.atan2(linalg.cross(from,to).y,linalg.dot(from,to))
+    return linalg.normalize0(mm.quat_rotate(linalg.quaternion_angle_axis_f32(turn*(1-remaining),{0,1,0}),from))
+}
 
 // False for an entity that does not play a .match.
 animation_match :: proc(playback:^Playback,entity:core.Entity) -> (value:Animation_Match,ok:bool) {
     state:=constraint_playing(playback,entity) if playback!=nil else nil
     if state==nil || state.program.kind!=MATCH_KIND || !state.program.ready {return}
     m:=state.program.match
-    return {clip=m.clip,time=state.time,rate=m.rate,speed=m.speed*m.rate,cost=m.cost,mode=m.mode,forced=m.phase==.Play,searches=m.searches,jumps=m.jumps,velocity=m.body+m.lag_velocity,lag=m.lag,landing_modes=m.landing_modes},true
+    return {clip=m.clip,time=state.time,rate=m.rate,speed=m.speed*m.rate,cost=m.cost,mode=m.mode,forced=m.phase==.Play,searches=m.searches,jumps=m.jumps,velocity=m.body+m.lag_velocity,lag=m.lag,travel=m.travel,landing_modes=m.landing_modes},true
 }
 
 // What the clip of a rig plays for: matching; a clip of match_play; one toward its landing
@@ -285,6 +295,10 @@ Match_Playing :: struct {
     timer:f32,     // seconds to the next search
     since:f32,     // seconds since the last jump
     rate,speed,cost:f32,
+    // Direction its clip moves in, rig axes; zero when it stands. A jump turns it from travel_from
+    // to travel_to over the blend of the jump, as the pose turns, travel_age seconds ago.
+    travel,travel_from,travel_to:mm.Vec3,
+    travel_age:f32,
     searches,jumps:u32,
     goal:i32,      // 1 + the index of its goal among those of this tick; 0: none
     landing_modes:u32, // event_modes of its database
@@ -619,6 +633,7 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
                 m.range,m.mode,m.loop=i32(range),mode,db.ranges[range].loop
                 m.clip=lib.clip_data(&library.lib,db.ranges[range].clips[0]).name
                 m.speed=db.ranges[range].speed
+                m.travel_from,m.travel_to,m.travel_age=m.travel,linalg.normalize0(db.ranges[range].travel),0
                 start=f32(best-int(db.ranges[range].first))/db.rate
                 m.jumps+=1;m.since=0
             }
@@ -642,7 +657,12 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
             m.rate=clamp(ahead/goal.time_to_land,info.landing_rates[0],info.landing_rates[1])
         }
     }
-    if m.phase==.Play || m.range<0 {m.speed=0}
+    if m.phase==.Play || m.range<0 {
+        m.speed,m.travel,m.travel_from,m.travel_to=0,{},{},{}
+    } else {
+        m.travel=travel_turn(m.travel_from,m.travel_to,lib.inertial_remaining(m.travel_age,info.blend))
+        if m.travel_age<info.blend {m.travel_age+=dt}
+    }
     if !program_output_prepare(output,1,1) {runtime.error=.Out_Of_Memory;return false}
     program_output_reset(output)
     output.asset=source;output.count=1

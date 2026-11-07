@@ -382,11 +382,34 @@ match_play_refuses_a_lower_priority_and_a_waiting_play_starts_once_when_the_blen
 }
 
 @(test)
+the_travel_of_a_jump_turns_with_its_blend_and_never_through_zero :: proc(t:^testing.T) {
+    forward,back,side:=mm.Vec3{0,0,1},mm.Vec3{0,0,-1},mm.Vec3{1,0,0}
+    testing.expect(t,linalg.length(travel_turn(forward,back,1)-forward)<1e-5,"a jump starts in the direction it leaves")
+    testing.expect(t,linalg.length(travel_turn(forward,back,0)-back)<1e-5,"and ends in the one of its clip")
+    for remaining in ([?]f32{.9,.5,.1}) {testing.expectf(t,abs(linalg.length(travel_turn(forward,back,remaining))-1)<1e-5,"forward to back keeps a direction at %v",remaining)}
+    testing.expect(t,linalg.length(travel_turn(forward,side,.5)-linalg.normalize(forward+side))<1e-5,"half way to the side is the diagonal")
+    testing.expect(t,travel_turn({},side,.5)==side,"from standing it is the new direction")
+    previous:=f32(1)
+    for step in 1..=20 {
+        share:=lib.inertial_remaining(f32(step)*.01,.2)
+        testing.expectf(t,share<=previous && share>=0,"the share left only decreases: %v after %v",share,previous)
+        previous=share
+    }
+    testing.expect(t,previous<1e-4 && lib.inertial_remaining(.2,.2)==0 && lib.inertial_remaining(0,.2)==1)
+}
+
+@(test)
 match_play_hands_back_when_the_body_leaves_its_mode_and_reports_the_end_of_its_clip :: proc(t:^testing.T) {
     f:Match_Fixture;defer match_fixture_free(&f)
     if !testing.expect(t,match_fixture(t,&f)) {return}
+    // A clip that walks tells the direction it travels in, which the warping corrects from.
+    for _ in 0..<10 {testing.expect(t,match_step(&f,.1,GROUND,velocity={0,0,1.5},desired={0,0,1.5}))}
+    walking,_:=animation_match(&f.playback,f.rig)
+    testing.expectf(t,walking.speed>0 && linalg.length(walking.travel-mm.Vec3{0,0,1})<1e-3,"the walk travels along +Z: %v",walking.travel)
     // On the second tick: the blend starts from the pose of the first, with no history before it.
     testing.expect(t,match_step(&f,.1,GROUND) && match_step(&f,.1,GROUND,match_test_play(&f,"vault",GROUND)))
+    forced,_:=animation_match(&f.playback,f.rig)
+    testing.expectf(t,forced.forced && forced.travel=={},"a clip of match_play tells no travel: %v",forced.travel)
     testing.expect(t,match_step(&f,.1,AIR))
     value,_:=animation_match(&f.playback,f.rig)
     testing.expect(t,!value.forced && value.mode==AIR && match_test_events(&f,.Exited,"vault")==1 && match_test_events(&f,.Finished,"vault")==0,"leaving its mode hands the rig back to matching")

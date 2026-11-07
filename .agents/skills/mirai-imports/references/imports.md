@@ -610,7 +610,8 @@ A node with `skin` produces its own mesh, without sharing it between nodes.
   Bounds, LODs and colliders describe the bind geometry.
 - The import detects the [body map](../../mirai-std/references/anim-body.md) and stores it if it
   finds any part; when importing again it keeps the `manual` parts and axes of the previous file
-  whose bones still exist.
+  whose bones still exist, and the sockets someone added (not those the import makes: named by the
+  source, `bone.*`, grips) on bones that still exist.
 
 ### glTF morph targets
 

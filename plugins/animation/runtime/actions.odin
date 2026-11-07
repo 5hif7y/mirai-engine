@@ -32,10 +32,11 @@ Action_Definition :: struct {
     priority:i16 `mirai:"optional"`,
     cancel:Action_Cancel_Policy `mirai:"optional"`,
     animation:base.Asset_Id `mirai:"optional"`, // of the clip; empty is the profile's
+    mesh_space:bool `mirai:"optional"`,         // Override: the rotations of its branch blend in the space of the rig, as Animation_Layer.mesh_space
 }
 ACTION_DEFINITION_DEFAULT :: Action_Definition{layer=1,weight=1,speed=1,fade_in=.1,fade_out=.1}
 Action_Policy_Error :: enum u8 {None,UnsupportedPolicy,ReservedLayer}
-action_channel_equal :: proc(a,b:Action_Definition) -> bool {return a.over==b.over && a.mode==b.mode && a.reference==b.reference && a.curves==b.curves && a.root_motion==b.root_motion}
+action_channel_equal :: proc(a,b:Action_Definition) -> bool {return a.over==b.over && a.mode==b.mode && a.reference==b.reference && a.curves==b.curves && a.root_motion==b.root_motion && a.mesh_space==b.mesh_space}
 action_policy_check :: proc(value:Action_Definition,description:Animation) -> Action_Policy_Error {
     if value.layer==0 || value.layer>ANIMATION_LAYERS {return .UnsupportedPolicy}
     if description.layers[value.layer-1].clip!=0 {return .ReservedLayer}
@@ -377,7 +378,7 @@ actions_sample :: proc(runtime:^Action_Runtime,state:^Playing,description:^Anima
         slot.delta,slot.outgoing_delta=ROOT_DELTA_DEFAULT,ROOT_DELTA_DEFAULT;slot.has_root=false;slot.continuous=true;slot.root_weight=0
         over,_:=bone_ref_hash(definition.over)
         source:=source_effective(definition.animation,profile.info.animation,description.library)
-        asked:=Animation_Layer{clip=source_clip_name(content.id,source,base.name_hash(base.text_get(definition.clip[:]))),over=over,weight=definition.weight,speed=0,fade=definition.fade_in,mode=definition.mode,reference=definition.reference,curves=definition.curves}
+        asked:=Animation_Layer{clip=source_clip_name(content.id,source,base.name_hash(base.text_get(definition.clip[:]))),over=over,weight=definition.weight,speed=0,fade=definition.fade_in,mode=definition.mode,reference=definition.reference,curves=definition.curves,mesh_space=definition.mesh_space}
         slot.layer=asked
         handle:=lib.clip_find(&content.lib,asked.clip)
         duration:=lib.clip_duration(&content.lib,handle)

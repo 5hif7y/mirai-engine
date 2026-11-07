@@ -50,7 +50,10 @@ animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Rea
             continue
         }
         if animation.motion=={} || !matching {continue}
-        anim.motion_locomotion(warps,{rig=entity,velocity={playing.velocity.x,0,playing.velocity.z},source_velocity=mm.quat_rotate(placed.rotation,mm.Vec3{0,0,playing.speed}),weight=1,enabled=character.mode==phys.MODE_WALKING && !playing.forced && playing.speed>0})
+        // The warping corrects what the clip travels, in its own direction, toward the body: a clip
+        // that strafes or backs off is not turned as if it went forward.
+        along:=playing.travel if playing.travel!={} else mm.Vec3{0,0,1}
+        anim.motion_locomotion(warps,{rig=entity,velocity={playing.velocity.x,0,playing.velocity.z},source_velocity=mm.quat_rotate(placed.rotation,along*playing.speed),weight=1,enabled=character.mode==phys.MODE_WALKING && !playing.forced && playing.speed>0})
     }
 }
 

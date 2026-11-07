@@ -30,7 +30,8 @@ Api_Filmstrip :: struct {
     frames,count,columns:int,
     follow:core.Entity, // NONE: the region, or the whole image without one
     size:[2]f32,        // of a cell around follow, in window points
-    region:[4]f32,      // in window points; no width: the whole image
+    region:[4]f32,      // in points of the image; no width: the whole image
+    window:bool,        // the Play of the user as the window shows it, editor and all
     sheet:img.Sheet,
     cells:[]Api_Filmstrip_Cell,
     taken:int,
@@ -57,7 +58,7 @@ api_filmstrip_read :: proc(s:^Session,call:^api.Call,r:^Run,own:bool,p:^Api_Play
     if !own {api_play_refused(call);return}
     w:=run_ref(s,r)
     strip=new(Api_Filmstrip,call.allocator)
-    strip^={frames=p.frames,count=p.count,columns=p.columns,size=p.size}
+    strip^={frames=p.frames,count=p.count,columns=p.columns,size=p.size,window=p.ui}
     named:=int(values[4]!="")+int(p.follow_id!=0)+int(values[6]!="")
     switch {
     case named>1:
@@ -153,13 +154,13 @@ api_filmstrip_take :: proc(s:^Session,data:rawptr,_:core.World_Ref,ran:int) -> s
     if strip.taken>=strip.count {return ""}
     r:=run_player(s,strip.run.owner,strip.run.player)
     if r==nil {return "The game ended"}
-    pixels,width,height,drawn:=api_play_pixels(s,r,strip.frames)
+    pixels,width,height,drawn:=api_play_pixels(s,r,strip.frames,strip.window)
     if !drawn {return "The game could not be drawn"}
     defer delete(pixels,s.app.allocator)
     w:=run_ref(s,r)
     density:=s.app.ui_input.scale>0?s.app.ui_input.scale:1
     view:=[4]f32{0,0,f32(width),f32(height)}
-    if r.owner==0 && s.viewport.size.x>0 && s.viewport.size.y>0 {view={s.viewport.origin.x*density,s.viewport.origin.y*density,s.viewport.size.x*density,s.viewport.size.y*density}}
+    if r.owner==0 && strip.window && s.viewport.size.x>0 && s.viewport.size.y>0 {view={s.viewport.origin.x*density,s.viewport.origin.y*density,s.viewport.size.x*density,s.viewport.size.y*density}}
     cell:=&strip.cells[strip.taken]
     if t:=core.world_storage_of(w,core.Time);t!=nil {cell.tick=t.tick}
     region:img.Region

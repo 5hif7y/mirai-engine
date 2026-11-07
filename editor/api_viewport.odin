@@ -27,22 +27,23 @@ Api_Play_Capture_Params :: struct {
     follow:[64]u8 `mirai:"optional,text,label=Filmstrip: every cell is centered on where this entity shows; by its name (the first in the order of play.inspect)"`,
     follow_id:base.Entity_Id `mirai:"optional,label=Filmstrip: the entity to follow by its id in the scene"`,
     follow_entity:[16]u8 `mirai:"optional,text,label=Filmstrip: the entity to follow by its handle as play.inspect gives it"`,
-    size:[2]f32 `mirai:"optional,min=8,max=4096,label=Filmstrip that follows an entity: width and height of a cell in window points"`,
-    region:[4]f32 `mirai:"optional,label=Filmstrip: x y width height in window points that every cell shows in place of following an entity; none: the whole image"`,
+    size:[2]f32 `mirai:"optional,min=8,max=4096,label=Filmstrip that follows an entity: width and height of a cell in points of the image"`,
+    region:[4]f32 `mirai:"optional,label=Filmstrip: x y width height in points of the image that every cell shows in place of following an entity; none: the whole image"`,
+    ui:bool `mirai:"optional,label=The Play of the user: the whole window with the editor around the game, as the user sees it; false: the game alone through its camera, with its own interfaces"`,
 }
 
 @(private)
-API_PLAY_CAPTURE_RESULT :: `{"type":"object","properties":{"content":{"type":"array","items":{"type":"object","properties":{"type":{"enum":["image","text"]},"data":{"type":"string"},"mimeType":{"const":"image/png"},"text":{"type":"string","description":"a filmstrip: structuredContent as JSON"}},"required":["type"],"additionalProperties":false}},"structuredContent":{"type":"object","description":"a filmstrip","properties":{"path":{"type":"string"},"width":{"type":"integer"},"height":{"type":"integer"},"columns":{"type":"integer"},"rows":{"type":"integer"},"cell":{"type":"array","items":{"type":"integer"},"description":"pixels of a cell"},"cells":{"type":"array","description":"from the top left row by row","items":{"type":"object","properties":{"tick":{"type":"integer","description":"the tick of the game it shows"},"at":{"type":["array","null"],"items":{"type":"number"},"description":"following an entity: where it shows in window points; null when it is behind the camera or gone"}},"required":["tick"],"additionalProperties":false}}},"required":["path","width","height","columns","rows","cell","cells"],"additionalProperties":false},"isError":{"const":false}},"required":["content","isError"],"additionalProperties":false}`
+API_PLAY_CAPTURE_RESULT :: `{"type":"object","properties":{"content":{"type":"array","items":{"type":"object","properties":{"type":{"enum":["image","text"]},"data":{"type":"string"},"mimeType":{"const":"image/png"},"text":{"type":"string","description":"a filmstrip: structuredContent as JSON"}},"required":["type"],"additionalProperties":false}},"structuredContent":{"type":"object","description":"a filmstrip","properties":{"path":{"type":"string"},"width":{"type":"integer"},"height":{"type":"integer"},"columns":{"type":"integer"},"rows":{"type":"integer"},"cell":{"type":"array","items":{"type":"integer"},"description":"pixels of a cell"},"cells":{"type":"array","description":"from the top left row by row","items":{"type":"object","properties":{"tick":{"type":"integer","description":"the tick of the game it shows"},"at":{"type":["array","null"],"items":{"type":"number"},"description":"following an entity: where it shows in points of the image; null when it is behind the camera or gone"}},"required":["tick"],"additionalProperties":false}}},"required":["path","width","height","columns","rows","cell","cells"],"additionalProperties":false},"isError":{"const":false}},"required":["content","isError"],"additionalProperties":false}`
 
 @(private)
 api_viewport_register :: proc(s:^Session,st:^Api_State) {
     api_register(s,st,{name="view.viewport",summary="see what the user was looking at when sent this message",params=Api_Viewport_Params,result_schema=API_VIEWPORT_RESULT,flags={.Core,.Read_Only,.Idempotent},mcp_content=true,run=api_view_viewport})
     capture_default:=Api_Play_Capture_Params{frames=8,size={256,256}}
-    api_register(s,st,{name="play.capture",summary="see the game of the caller as its camera shows it: the run of its turn, drawn without showing it on the user's screen, or the Play of the user outside a turn. Also writes the PNG. With every and count it steps the game and writes one filmstrip of cells around an entity or a region with the tick of each.",params=Api_Play_Capture_Params,result_schema=API_PLAY_CAPTURE_RESULT,defaults=&capture_default,flags={.Core,.Read_Only},mcp_content=true,run=api_play_capture})
+    api_register(s,st,{name="play.capture",summary="see the game of the caller as its camera shows it, alone with its own interfaces: the run of its turn, or the Play of the user outside a turn, drawn without showing it on the user's screen (ui shows the editor's window around the Play of the user instead). Also writes the PNG. With every and count it steps the game and writes one filmstrip of cells around an entity or a region with the tick of each.",params=Api_Play_Capture_Params,result_schema=API_PLAY_CAPTURE_RESULT,defaults=&capture_default,flags={.Core,.Read_Only},mcp_content=true,run=api_play_capture})
 }
 
-// The game of the caller as an image. A run the editor does not show is
-// drawn off the screen; the Play of the user is the next frames of the window.
+// The game of the caller as an image, drawn off the screen through its camera with its own
+// interfaces; with ui, the Play of the user is the next frames of the window, editor and all.
 @(private)
 api_play_capture :: proc(s:^Session,call:^api.Call) {
     p:=api.call_params(call,Api_Play_Capture_Params)
@@ -61,27 +62,27 @@ api_play_capture :: proc(s:^Session,call:^api.Call) {
     if path,writable=api_output_file(s,call,path,s.app.allocator);!writable {return}
     defer delete(path,s.app.allocator)
     if strip!=nil {api_filmstrip_run(s,call,strip,path);return}
-    pixels,width,height,drawn:=api_play_pixels(s,r,p.frames)
+    pixels,width,height,drawn:=api_play_pixels(s,r,p.frames,p.ui)
     if !drawn {api.call_fail(call,api.SERVER_ERROR,"The game could not be drawn");return}
     if !api_png_write(s,path,pixels,width,height) {api.call_fail(call,api.SERVER_ERROR,"The capture could not be written");return}
     api_png_content(call,path)
 }
 
-// The game of a run drawn now in pixels of the allocator of the application:
-// the next frames of the window for the Play of the user, off the screen for
-// a run of a turn.
+// The game of a run drawn now in pixels of the allocator of the application: off the screen
+// through its camera, with the interfaces of the game and nothing of the editor; with window, the
+// Play of the user as the next frames of the window.
 @(private)
-api_play_pixels :: proc(s:^Session,r:^Run,frames:int) -> (pixels:[]u8,width,height:int,drawn:bool) {
-    if r.owner==0 {
+api_play_pixels :: proc(s:^Session,r:^Run,frames:int,window:=false) -> (pixels:[]u8,width,height:int,drawn:bool) {
+    if r.owner==0 && window {
         before:=s.app.stats.frames_drawn
         api_frames(s,frames,0)
         if s.app.stats.frames_drawn!=before {pixels,width,height,drawn=host.app_capture_pixels(s.app,s.app.allocator)}
         return
     }
-    window:=s.app.ui_input
-    s.app.ui_input=run_ui_input(r,window)
+    input:=s.app.ui_input
+    s.app.ui_input=run_ui_input(r,input)
     pixels,width,height,drawn=host.app_capture_world(s.app,r.world,frames,allocator=s.app.allocator)
-    s.app.ui_input=window
+    s.app.ui_input=input
     s.view_cut=true
     return
 }

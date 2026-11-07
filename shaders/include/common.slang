@@ -201,7 +201,7 @@ struct Ui_Vertex { float3 position; float4 color; uint material; float2 uv; };
 // effect sees the image exposed, scene-linear values where middle gray is
 // 0.18, whatever the light of the scene.
 // outlined: the outline mask holds this frame (mirai_outline).
-struct Post_Parameters { uint program; uint exposed; uint outlined; uint pad; float4 values[16]; };
+struct Post_Parameters { uint program; uint exposed; uint outlined; float fade; float4 values[16]; };
 
 // Up to 128 triangles of one slot of a mesh, with their vertices
 // (asset.Cluster): in the index pool, CLUSTER_WORDS each, read by geometry.slang.

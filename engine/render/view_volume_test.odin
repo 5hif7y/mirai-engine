@@ -10,7 +10,8 @@ import gpu "mirai:render"
 import "mirai:std/base"
 
 // The level exposes a stop under the meter; a tunnel replaces it inside its
-// box and fades over its border; a camera with its own Exposure keeps it.
+// box and fades over its border, its effects with their fade; a camera with its
+// own Exposure keeps it.
 @(test)
 a_view_takes_the_look_of_the_volume_it_is_in :: proc(t:^testing.T) {
     es:core.Entities;core.entities_init(&es);defer core.entities_destroy(&es)
@@ -22,7 +23,7 @@ a_view_takes_the_look_of_the_volume_it_is_in :: proc(t:^testing.T) {
     tunnel:=VIEW_VOLUME_DEFAULT
     tunnel.exposure.compensation=2
     tunnel.tint={1,0,0}
-    tunnel.layers[0]={material=base.Asset_Id{1,2},enabled=true}
+    tunnel.layers[0]={material=base.Asset_Id{1,2},enabled=true,fade=0.25}
     a,b:=core.create(&es),core.create(&es)
     core.add(&looks,a,level)
     core.add(&looks,b,tunnel)
@@ -38,7 +39,7 @@ a_view_takes_the_look_of_the_volume_it_is_in :: proc(t:^testing.T) {
     inside:=at(&looks,&places,&worlds,0)
     testing.expect_value(t,inside.exposure.compensation,f32(2))
     testing.expect_value(t,inside.tint,[3]f32{1,0,0})
-    testing.expect(t,inside.layers[0].enabled,"its effects past half its weight")
+    testing.expect(t,inside.layers[0].enabled && inside.layers[0].fade==0.25,"its effects past half its weight, as faded")
     border:=at(&looks,&places,&worlds,3)
     testing.expect_value(t,border.exposure.compensation,f32(0.5))
     testing.expect(t,border.layers[0].enabled)

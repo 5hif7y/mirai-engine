@@ -11,7 +11,8 @@ import sim "plugins:physics/runtime/sim"
 // the state between ticks; each mode has its parameters in a component of its
 // own, and an entity can use the modes whose components it has: Walk for
 // walking, falling and crouching, Slide for sliding, Mantle for mantling
-// (locomotion_moves.odin), Fly for flying, Swim for swimming, the component of
+// (locomotion_moves.odin; Tactical_Sprint and Ledge_Jump change how it
+// sprints and jumps), Fly for flying, Swim for swimming, the component of
 // a mode a game declares (a constant of Locomotion_Mode with @(name_requires):
 // climbing). Before every step locomotion_step writes the Character_Move of
 // the character from its input and from the ground and the fluid the last step
@@ -142,7 +143,8 @@ set_gravity_scale :: proc(requests:^Locomotion_Requests,e:core.Entity,scale:f32)
 @(step="fixed",stage="simulate",before="physics_prepare")
 locomotion_step :: proc(
     characters:^core.Table(Character),moves:^core.Table(Character_Move),inputs:^core.Table(input.Move_Input),
-    walks:core.Read(Walk),flights:core.Read(Fly),swims:core.Read(Swim),slides:core.Read(Slide),mantles:core.Read(Mantle),found:core.Read(Character_State),motions:core.Read(core.Motion),
+    walks:core.Read(Walk),flights:core.Read(Fly),swims:core.Read(Swim),slides:core.Read(Slide),mantles:core.Read(Mantle),tacticals:core.Read(Tactical_Sprint),ledges:core.Read(Ledge_Jump),
+    found:core.Read(Character_State),motions:core.Read(core.Motion),
     locals:core.Read(core.Transform),parents:core.Read(core.Parent),remotes:core.Read(core.Remote),physics:core.Ref(Physics_State),
     paces:core.Read(core.Own_Pace),walk_actions:input.Input_Of(Walk_Action),requests:^Locomotion_Requests,time:core.Time,clock:core.Clock,problems:^core.Problems,
 ) {
@@ -207,8 +209,10 @@ locomotion_step :: proc(
         fly,_:=core.get(flights,e)
         swim:Maybe(Swim)
         if found_swim,has:=core.get(swims,e);has {swim=found_swim}
-        slide:Maybe(Slide)
-        if found_slide,has:=core.get(slides,e);has {slide=found_slide}
+        extra:Walk_Moves
+        if found_slide,has:=core.get(slides,e);has {extra.slide=found_slide}
+        if tactical,has:=core.get(tacticals,e);has {extra.tactical=tactical}
+        if ledge,has:=core.get(ledges,e);has {extra.ledge=ledge}
         mantle,mantles_too:=core.get(mantles,e)
         jump:=input.action_of(walk_actions,.Jump)
         // A jump facing a ledge climbs it instead, before the locomotion takes the jump.
@@ -220,6 +224,11 @@ locomotion_step :: proc(
                     if to,height,found_ledge:=ledge_find(&physics.world,l.character,facing,mantle,from_ground);found_ledge {mantle_start(c,placed.position,to,height)}
                 }
             }
+        }
+        // Ready for a ledge jump where the ground falls away ahead, before the locomotion takes the jump.
+        c.ledge_ready=false
+        if ledge,has:=extra.ledge.?;has && walk!=nil && physics.ptr!=nil && physics.ready {
+            if l:=link_find(physics.ptr,e);l!=nil && l.kind==.Character {ledge_ready_update(c,ledge,ground,motion.linear,&physics.world,l.character)}
         }
         if missing:=mode_missing(c.mode,e,walks,flights,swims,slides,mantles);missing!="" {
             core.report(problems,e,"locomotion.mode_component","its Character is in the mode %s and it has no %s; give it a %s, which holds the parameters of that mode, or start it in another mode",mode_label(c.mode),missing,missing)
@@ -237,7 +246,7 @@ locomotion_step :: proc(
             layers_apply(c,&next.value,c.traction_force,pace)
             move_paced(&next.value,c,pace,motion.linear,ground,frame)
         } else {
-            next.value=locomotion_move_paced(c,walk,fly,swim,slide,ground,frame,given,jump,input.action_of(walk_actions,.Sprint),input.action_of(walk_actions,.Crouch),motion.linear,gravity_of_entity(physics,e)*c.gravity_scale,time.dt,pace)
+            next.value=locomotion_move_paced(c,walk,fly,swim,extra,ground,frame,given,jump,input.action_of(walk_actions,.Sprint),input.action_of(walk_actions,.Crouch),motion.linear,gravity_of_entity(physics,e)*c.gravity_scale,time.dt,pace)
         }
         next.height=0
         if walking,ok:=walk.?;ok && c.crouched {next.height=walking.crouch_height}
@@ -260,18 +269,34 @@ move_wish :: proc "contextless" (move_input:input.Move_Input,frame:mm.Quat) -> [
 // Within this angle of where it looks a move may sprint: cos 60°.
 SPRINT_FORWARD :: f32(0.5)
 
-// The top speed of walking for this input: sprint_speed while sprinting
-// forward (within 60° of the look) when it is faster, less backward_slowdown by
-// how straight back from the look the move points (-Z of the move is forward);
-// crouched, crouch_speed, which sprint does not change.
-walk_speed :: proc "contextless" (walk:Walk,move_input:input.Move_Input,sprinting:bool,crouched:=false) -> f32 {
+// The top speed of walking for this input: sprint_speed (times boost, that of
+// a tactical sprint) while sprinting forward (within 60° of the look) when it
+// is faster, less backward_slowdown by how straight back from the look the
+// move points (-Z of the move is forward); crouched, crouch_speed, which
+// sprint does not change.
+walk_speed :: proc "contextless" (walk:Walk,move_input:input.Move_Input,sprinting:bool,crouched:=false,boost:f32=1) -> f32 {
     speed:=crouch_speed(walk) if crouched else walk.max_speed
+    if !crouched && sprint_forward(move_input,sprinting) && walk.sprint_speed*boost>speed {speed=walk.sprint_speed*boost}
     l:=linalg.length(move_input.move.xz)
-    if !crouched && sprinting && walk.sprint_speed>speed && l>0 && -move_input.move.z/l>=SPRINT_FORWARD {speed=walk.sprint_speed}
     if l>0 && walk.backward_slowdown>0 {
         speed*=1-clamp(walk.backward_slowdown,0,1)*max(move_input.move.z/l,0)
     }
     return speed
+}
+
+// Whether an input sprints: the sprint action held with a move within 60° of
+// where it looks.
+sprint_forward :: proc "contextless" (move_input:input.Move_Input,sprinting:bool) -> bool {
+    l:=linalg.length(move_input.move.xz)
+    return sprinting && l>0 && -move_input.move.z/l>=SPRINT_FORWARD
+}
+
+// The components an entity has that change how its Walk slides, sprints and
+// jumps.
+Walk_Moves :: struct {
+    slide:Maybe(Slide),
+    tactical:Maybe(Tactical_Sprint),
+    ledge:Maybe(Ledge_Jump),
 }
 
 // The Character_Move of one tick of a mode of the locomotion: from the input
@@ -280,8 +305,8 @@ walk_speed :: proc "contextless" (walk:Walk,move_input:input.Move_Input,sprintin
 // the body and its gravity, all in its own time, which runs pace times the
 // time of the world (dt is that of its own time). walking and swim are nil
 // for a character that cannot walk or swim: one that only swims stays in the
-// mode out of the water.
-locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),sliding:Maybe(Slide),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint,crouch:input.Action,velocity,gravity:[3]f32,dt:f32,pace:f32=1) -> (move:sim.Character_Move) {
+// mode out of the water; extra holds what else changes its walk.
+locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),extra:Walk_Moves,ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint,crouch:input.Action,velocity,gravity:[3]f32,dt:f32,pace:f32=1) -> (move:sim.Character_Move) {
     up:=mm.quat_rotate(frame,{0,1,0})
     across :: proc "contextless" (v,up:[3]f32) -> [3]f32 {return v-up*linalg.dot(v,up)}
     look:=frame*mm.quat_axis_angle({0,1,0},move_input.look_yaw)*mm.quat_axis_angle({1,0,0},move_input.look_pitch)
@@ -305,7 +330,7 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
         } else if .In_Fluid in ground.fluid && deep {loco.mode=MODE_SWIMMING}
     }
     if swim,swims:=swim.?;swims && loco.mode==MODE_SWIMMING {
-        loco.jumped,loco.coyote,loco.crouched=false,0,false
+        loco.jumped,loco.coyote,loco.crouched,loco.sprint_active,loco.ledge_jumping=false,0,false,false,false
         current:=ground.fluid_velocity
         relative:=v-current
         aim:=move_input.move
@@ -334,14 +359,17 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
             move.flags={.Airborne}
         }
     } else if loco.mode==MODE_FLYING {
-        loco.jumped,loco.coyote,loco.crouched=false,0,false
+        loco.jumped,loco.coyote,loco.crouched,loco.sprint_active,loco.ledge_jumping=false,0,false,false,false
         aim:=move_input.move
         if l:=linalg.length(aim);l>1 {aim/=l}
         aim=mm.quat_rotate(look,aim)
         move.air={mm.approach_point(v,aim*fly.speed,fly.acceleration*dt),traction}
         move.flags={.Airborne,.Drive_Vertical,.No_Gravity}
     } else {
-        slide,slides:=sliding.?
+        slide,slides:=extra.slide.?
+        tactical,tacticals:=extra.tactical.?
+        ledge,ledges:=extra.ledge.?
+        sprint_held:=move_input.buttons&input.action_bit(sprint)!=0
         crouches:=walk.crouch_height>0
         crouch_down:=crouches && move_input.buttons&input.action_bit(crouch)!=0
         crouch_pressed:=crouch_down && !loco.crouch_held
@@ -357,7 +385,7 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
         loco.slide_cooldown=max(loco.slide_cooldown-dt,0)
         was:=loco.mode
         if ground.standing {
-            loco.jumped,loco.coyote,loco.air_time=false,0,0
+            loco.jumped,loco.coyote,loco.air_time,loco.ledge_jumping=false,0,0,false
         } else {
             loco.air_time+=dt
             if (was==MODE_WALKING || was==MODE_CROUCHING || was==MODE_SLIDING) && !loco.jumped {
@@ -388,8 +416,20 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
                 if walk.crouch_toggle {loco.crouch_on=true}
                 slide_start(loco,current,up)
                 loco.mode=MODE_SLIDING
+                if tacticals && loco.sprint_active {tactical_spend(loco,tactical,tactical.cost_slide)}
             }
         }
+        // The tactical sprint runs while it sprints walking or falling, before the walk takes its speed.
+        boost,jump_boost:f32=1,1
+        if tacticals {
+            running:=loco.mode!=MODE_SLIDING && !(ground.standing && (loco.crouch_on || ground.cramped))
+            tactical_update(loco,tactical,sprint_forward(move_input,sprint_held) && walk.sprint_speed>0,running,ground.standing,dt)
+            boost,jump_boost=tactical_boost(loco^,tactical)
+        } else {loco.sprint_active=false}
+        // At min_speed or faster on the ground, toward a ledge jump.
+        if ledges && ground.standing && was==MODE_WALKING && linalg.length(current)>=ledge.min_speed {
+            loco.ledge_time+=dt
+        } else {loco.ledge_time=0}
         if loco.mode==MODE_SLIDING {
             velocity,ended:=slide_velocity(loco,slide,n,up,current,wish,gravity,dt)
             move.ground={velocity,traction}
@@ -399,13 +439,14 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
             crouching:=ground.standing && (loco.crouch_on || ground.cramped)
             loco.mode=ground.standing?(crouching?MODE_CROUCHING:MODE_WALKING):MODE_FALLING
             if move.ground.force==0 {
-                speed:=walk_speed(walk,move_input,move_input.buttons&input.action_bit(sprint)!=0,loco.mode==MODE_CROUCHING)
+                speed:=walk_speed(walk,move_input,sprint_held,loco.mode==MODE_CROUCHING,boost)
                 desired:[3]f32
                 if wish!={} {
                     along:=wish-up*(linalg.dot(wish,n)/linalg.dot(n,up))
                     desired=along*(speed*linalg.length(wish)/linalg.length(along))
                 }
                 rate:=desired=={}?walk.braking:walk.acceleration
+                if desired!={} && loco.sprint_active && tactical.acceleration_multiplier>0 {rate*=tactical.acceleration_multiplier}
                 move.ground={mm.approach_point(current,desired,rate*dt),traction}
             }
         }
@@ -413,7 +454,9 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
 
         move.air={velocity=across(v,up)}
         if wish!={} && walk.air_control>0 {
-            speed:=walk_speed(walk,move_input,move_input.buttons&input.action_bit(sprint)!=0)
+            speed:=walk_speed(walk,move_input,sprint_held,false,boost)
+            // A ledge jump is steered, not slowed.
+            if loco.ledge_jumping {speed=max(speed,linalg.length(move.air.velocity))}
             move.air={mm.approach_point(move.air.velocity,wish*speed,walk.air_control*walk.acceleration*dt),walk.air_control*traction}
             // Ground too steep to walk is not climbed from the air either.
             if ground.ground_normal!={} && !ground.walkable && ground.ground_distance<=loco.step_height {
@@ -424,10 +467,25 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
 
         if pressed && (ground.standing || loco.coyote>0 && !loco.jumped) {
             base:=linalg.dot(ground.standing?v-ground.ground_velocity:v,up)
-            move.launch=up*(cmath.sqrt(2*linalg.length(gravity)*walk.jump_height)-base)
-            if ground.standing {move.air={velocity=across(v,up)}}
+            rise:=cmath.sqrt(2*linalg.length(gravity)*walk.jump_height)*jump_boost
+            if ledges && loco.ledge_ready && ground.standing {
+                // A ledge jump: added_speed along where it goes over the ground, at most max_speed across
+                // its up, and up_speed over the rise of its jump.
+                flat:=across(v-ground.ground_velocity,up)
+                moving:=linalg.length(flat)
+                along:=flat/moving if moving>1e-4 else wish
+                launched:=flat+along*ledge.added_speed
+                if l:=linalg.length(launched);l>ledge.max_speed && l>0 {launched*=ledge.max_speed/l}
+                move.launch=launched-flat
+                rise+=ledge.up_speed
+                loco.ledge_jumping=true
+            }
+            move.launch+=up*(rise-base)
+            if ground.standing {move.air={velocity=across(v,up)+across(move.launch,up)}}
             if loco.mode==MODE_SLIDING {loco.slide_cooldown=slide.cooldown}
+            if tacticals && loco.sprint_active && !loco.ledge_jumping {tactical_spend(loco,tactical,tactical.cost_jump)}
             loco.mode,loco.jumped,loco.coyote,loco.crouched,loco.crouch_on=MODE_FALLING,true,0,false,false
+            loco.ledge_ready,loco.ledge_time=false,0
         }
     }
     layers_apply(loco,&move,traction,pace)
@@ -498,11 +556,11 @@ move_paced :: proc "contextless" (move:^sim.Character_Move,loco:^Character,pace:
 // The Character_Move of one tick of the world for a character whose time runs
 // pace times it (core.pace_of): locomotion_move in its own time, from the
 // ground, the velocity and the dt of the world.
-locomotion_move_paced :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),sliding:Maybe(Slide),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint,crouch:input.Action,velocity,gravity:[3]f32,dt,pace:f32) -> (move:sim.Character_Move) {
+locomotion_move_paced :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),extra:Walk_Moves,ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint,crouch:input.Action,velocity,gravity:[3]f32,dt,pace:f32) -> (move:sim.Character_Move) {
     own:=ground
     own.ground_velocity/=pace
     own.fluid_velocity/=pace
-    move=locomotion_move(loco,walking,fly,swim,sliding,own,frame,move_input,jump,sprint,crouch,velocity/(loco.pace>0?loco.pace:1),gravity,dt*pace,pace)
+    move=locomotion_move(loco,walking,fly,swim,extra,own,frame,move_input,jump,sprint,crouch,velocity/(loco.pace>0?loco.pace:1),gravity,dt*pace,pace)
     move_paced(&move,loco,pace,velocity,ground,frame)
     return
 }

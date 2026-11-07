@@ -382,8 +382,9 @@ a_shake_channel_joins_its_keys_by_their_slopes :: proc(t:^testing.T) {
     testing.expect(t,shake_channel_at({},1)==0,"a channel without keys adds nothing")
 }
 
-// A camera turns its view by the shakes asked of it, at their rate and scale, blended in and out,
-// until they end; one asked again while it plays starts over when single and adds another when not.
+// A camera turns its view and widens its perspective lens by the shakes asked of it, at their rate
+// and scale, blended in and out, until they end; one asked again while it plays starts over when
+// single and adds another when not.
 @(test)
 a_camera_plays_sequence_shakes_over_its_view_until_they_end :: proc(t:^testing.T) {
     f:=test_make()
@@ -446,13 +447,36 @@ a_camera_plays_sequence_shakes_over_its_view_until_they_end :: proc(t:^testing.T
     shakes_take(&f.follows,&shakes,&problems)
     testing.expect(t,core.problem_find(&problems,camera,"camera.shake")!=nil,"a shake without length is a problem")
     testing.expect(t,core.problem_find(&problems,body,"camera.shake")!=nil,"and one asked of what does not follow")
+
+    zoom:Shake_Sequence
+    zoom.fov.keys[0]={value=0.2}
+    zoom.fov.count=1
+    zoom.length,zoom.scale=1,0.5
+    camera_shake(&shakes,camera,zoom)
+    shakes_take(&f.follows,&shakes,&problems)
+    lens:=core.get(&f.cameras,camera)
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)
+    testing.expectf(t,close(lens.fov,1.3,1e-5),"the lens of its mode plus scale times its key: %v",lens.fov)
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)
+    testing.expectf(t,close(lens.fov,1.3,1e-5),"and not more each frame: %v",lens.fov)
+    lens.projection=.Orthographic
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)
+    testing.expect(t,lens.fov==1.2,"an orthographic lens keeps its own")
+    lens.projection=.Perspective
+    for &p in following.state.shakes {
+        if p.sequence.fov.count>0 {p.sequence.scale=100}
+    }
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)
+    testing.expect(t,lens.fov==SHAKE_FOV_MAX,"and a perspective one stays below pi")
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,1)
+    testing.expect(t,lens.fov==1.2,"ended: the lens is its own again")
 }
 
 // How far up the camera looks after following its body dt seconds.
 @(private="file")
 shake_test_look :: proc(f:^Camera_Test,transforms:^core.Table(core.Transform),parents:^core.Table(core.Parent),moves:^core.Table(input.Move_Input),camera,body:core.Entity,dt:f32) -> f32 {
     following:=core.get(&f.follows,camera)
-    follow_one(camera,following,body,transforms,core.read(&f.worlds),core.read(parents),core.read(moves),1,{},{dt=dt,alpha=1},dt)
+    follow_one(camera,following,body,transforms,core.read(&f.worlds),core.read(parents),core.read(moves),1,{},{dt=dt,alpha=1},dt,core.get(&f.cameras,camera))
     placed,_:=core.get(core.read(transforms),camera)
     ahead:=mm.quat_rotate(placed.rotation,{0,0,-1})
     return math.asin(ahead.y) // how far up it looks

@@ -6,11 +6,14 @@ import input "mirai:engine/input"
 import mm "mirai:std/math"
 import sim "plugins:physics/runtime/sim"
 
-// Crouch, slide and mantle, the modes of a character that walks beyond walking and falling.
+// Crouch, slide and mantle, the modes of a character that walks beyond walking and falling, and the
+// tactical sprint and the ledge jump, which change its walk and its jump.
 // Crouching (the crouch action held while it stands, with a Walk whose crouch_height is not zero)
 // makes its capsule that tall and walks at crouch_speed; it stands up again when the action is let go
 // and what is over it lets it (Character_State.cramped meanwhile). A Slide turns a crouch at a run
-// into a slide along the ground, and a Mantle turns a jump facing a ledge into a climb onto it.
+// into a slide along the ground, and a Mantle turns a jump facing a ledge into a climb onto it. A
+// Tactical_Sprint spends energy for a faster sprint and jump, and a Ledge_Jump turns a jump at speed
+// where the ground falls away ahead into a longer one.
 
 @(component,replicated,description="The character can slide (mode sliding of its Character): crouching while it runs at start_speed or faster, or landing at land_speed with crouch pressed within buffer before (or held), it slides along the ground at its speed, at least min_speed and at most max_speed, which gravity changes on a slope and friction takes, steering toward its move a little. It stops after time unless the ground falls away along its course, when something stops it, or with a jump. It needs a Walk with a crouch_height, the height it slides at.")
 Slide :: struct {
@@ -41,6 +44,115 @@ Mantle :: struct {
 }
 
 MANTLE_DEFAULT :: Mantle{reach=1,min_height=0.5,max_height=2.5,ground_height=1.2,facing=45*mm.RAD_PER_DEG,time=0.6,delay=0.25}
+
+@(component,replicated,description="The sprint of the character spends energy for more speed (tactical sprint): sprinting on the ground with at least min_energy, its top speed ramps from the sprint_speed of its Walk to speed_multiplier times it, by speed_step every step_time, it accelerates acceleration_multiplier times faster and its jumps go up to jump_multiplier times faster (ramped by jump_step). It spends cost_per_second while it runs (not in the air when pause_falling), cost_jump on a jump and cost_slide when it slides; it ends without energy, after fall_grace in the air, or once sprint has been let go for grace. Energy comes back at recharge per second recharge_delay after it was last spent. Without energy it sprints as its Walk says. It needs a Walk.")
+Tactical_Sprint :: struct {
+    speed_multiplier:f32 `mirai:"min=1"`,        // of the sprint_speed of its Walk, at the end of the ramp
+    acceleration_multiplier:f32 `mirai:"min=0"`, // of the acceleration of its Walk on the ground while it lasts
+    jump_multiplier:f32 `mirai:"min=1"`,         // of the speed of its jumps, at the end of the ramp
+    speed_step:f32 `mirai:"min=1"`,              // the speed multiplier grows by this factor every step_time, up to speed_multiplier
+    jump_step:f32 `mirai:"min=1"`,               // and the jump multiplier by this one, up to jump_multiplier
+    step_time:f32 `mirai:"min=0,unit=s"`,        // 0: the multipliers whole at once
+    energy:f32 `mirai:"min=0"`,                  // most it holds
+    min_energy:f32 `mirai:"min=0"`,              // it starts only with this much
+    cost_per_second:f32 `mirai:"min=0,unit=1/s"`,
+    cost_jump:f32 `mirai:"min=0"`,
+    cost_slide:f32 `mirai:"min=0"`,
+    recharge:f32 `mirai:"min=0,unit=1/s"`,
+    recharge_delay:f32 `mirai:"min=0,unit=s"`,   // after energy was last spent
+    fall_grace:f32 `mirai:"min=0,unit=s"`,       // in the air past this it ends
+    grace:f32 `mirai:"min=0,unit=s"`,            // sprint let go (or the move off forward) this long ends it; back within it, it goes on
+    pause_falling:bool,                          // it spends nothing in the air
+}
+
+TACTICAL_SPRINT_DEFAULT :: Tactical_Sprint{speed_multiplier=1.4,acceleration_multiplier=3,jump_multiplier=1.2,speed_step=1.04138,jump_step=1.019,step_time=0.075,energy=115,min_energy=10,cost_per_second=15,cost_jump=18,cost_slide=10,recharge=52,recharge_delay=2,fall_grace=0.5,grace=0.5,pause_falling=true}
+
+@(component,replicated,description="The character jumps off a ledge farther (ledge jump): standing at min_speed or faster for min_time, with nothing in the way for reach ahead along where it goes and no ground there within min_drop under its feet, it is ready (Character.ledge_ready) and a jump adds added_speed along where it goes, at most max_speed across its up, and up_speed up to the speed of its jump. It lasts until it lands (Character.ledge_jumping), and meanwhile air control steers it without slowing it. It needs a Walk.")
+Ledge_Jump :: struct {
+    min_speed:f32 `mirai:"min=0,unit=m/s"`, // across its up, relative to the ground
+    min_time:f32 `mirai:"min=0,unit=s"`,    // standing at min_speed or more
+    reach:f32 `mirai:"min=0,unit=m"`,       // ahead of its feet, where the ground has to fall away
+    min_drop:f32 `mirai:"min=0,unit=m"`,    // under its feet there
+    added_speed:f32 `mirai:"min=0,unit=m/s"`,
+    max_speed:f32 `mirai:"min=0,unit=m/s"`, // across its up after the launch
+    up_speed:f32 `mirai:"min=0,unit=m/s"`,  // over that of its jump
+}
+
+LEDGE_JUMP_DEFAULT :: Ledge_Jump{min_speed=6,min_time=0.25,reach=1.5,min_drop=1.9,added_speed=8,max_speed=10.24,up_speed=0.8}
+
+// The multipliers of speed and jump of a tactical sprint that has lasted sprint_time: each grows
+// by its step every step_time up to its whole value. 1 outside a tactical sprint.
+tactical_boost :: proc "contextless" (loco:Character,tactical:Tactical_Sprint) -> (speed,jump:f32) {
+    if !loco.sprint_active {return 1,1}
+    speed,jump=max(tactical.speed_multiplier,1),max(tactical.jump_multiplier,1)
+    if !(tactical.step_time>0) {return}
+    steps:=max(loco.sprint_time,0)/tactical.step_time
+    if tactical.speed_step>1 {speed=min(cmath.pow(tactical.speed_step,steps),speed)}
+    if tactical.jump_step>1 {jump=min(cmath.pow(tactical.jump_step,steps),jump)}
+    return
+}
+
+// The energy left of the tactical sprint of a character.
+tactical_energy :: proc "contextless" (loco:Character,tactical:Tactical_Sprint) -> f32 {
+    return clamp(tactical.energy-loco.sprint_spent,0,tactical.energy)
+}
+
+@(private)
+tactical_spend :: proc "contextless" (loco:^Character,tactical:Tactical_Sprint,amount:f32) {
+    if !(amount>0) {return}
+    loco.sprint_spent=min(loco.sprint_spent+amount,tactical.energy)
+    loco.sprint_rest=0
+    if loco.sprint_spent>=tactical.energy {loco.sprint_active=false}
+}
+
+// A tick of the energy and the state of a tactical sprint, before the speed of the walk is taken:
+// sprinting says whether the input sprints (sprint held, the move forward), walking whether it
+// runs standing (not crouched or sliding). It starts sprinting on the ground with min_energy; it
+// ends without energy, falling past fall_grace, out of walking or falling, or past grace without
+// sprinting. Energy comes back once it has rested recharge_delay.
+@(private)
+tactical_update :: proc "contextless" (loco:^Character,tactical:Tactical_Sprint,sprinting,walking,standing:bool,dt:f32) {
+    loco.sprint_rest+=dt
+    if loco.sprint_active {
+        loco.sprint_off=0 if sprinting else loco.sprint_off+dt
+        if !walking || !standing && loco.air_time>tactical.fall_grace || loco.sprint_off>=tactical.grace {loco.sprint_active=false}
+    } else if sprinting && walking && standing && tactical_energy(loco^,tactical)>=tactical.min_energy && tactical.energy>0 {
+        loco.sprint_active,loco.sprint_time,loco.sprint_off=true,0,0
+    }
+    if loco.sprint_active {
+        loco.sprint_time+=dt
+        if standing || !tactical.pause_falling {tactical_spend(loco,tactical,tactical.cost_per_second*dt)}
+    }
+    if !loco.sprint_active && loco.sprint_rest>=tactical.recharge_delay {
+        loco.sprint_spent=max(loco.sprint_spent-tactical.recharge*dt,0)
+    }
+}
+
+// Whether the ground falls away ahead of a standing character along direction: a sphere almost as
+// wide as it, from over its step, meets nothing for reach, and a ray down from there, from its
+// step over its feet, meets no ground within min_drop under them. It is what makes it ready for a
+// ledge jump.
+ledge_drop_ahead :: proc(w:^sim.World,h:sim.Character_Handle,direction:[3]f32,ledge:Ledge_Jump) -> bool {
+    if !sim.character_valid(w,h) || !(ledge.reach>0) || !(ledge.min_drop>0) {return false}
+    desc:=sim.character_desc(w,h)
+    up:=mm.quat_rotate(sim.character_state(w,h).up_frame,{0,1,0})
+    ahead:=direction-up*linalg.dot(direction,up)
+    if l:=linalg.length(ahead);l>1e-6 && l<=max(f32) {ahead/=l} else {return false}
+    feet:=sim.character_position(w,h)
+    filter:=sim.Query_Filter{filter=desc.filter,ignore_body=sim.character_body(w,h)}
+    radius:=desc.radius*LEDGE_SWEEP
+    if _,blocked:=sim.shape_cast_closest(w,sim.Sphere{radius},{feet+up*(desc.step_height+desc.radius),mm.QUAT_IDENTITY},ahead*ledge.reach,filter);blocked {return false}
+    _,ground:=sim.ray_cast_closest(w,feet+ahead*ledge.reach+up*desc.step_height,-up*(desc.step_height+ledge.min_drop),filter)
+    return !ground
+}
+
+// Whether a character with a Ledge_Jump is ready for one this tick: it has stood at min_speed for
+// min_time, it walks and the ground falls away ahead along its velocity over the ground.
+ledge_ready_update :: proc(loco:^Character,ledge:Ledge_Jump,ground:Character_State,velocity:[3]f32,w:^sim.World,h:sim.Character_Handle) {
+    loco.ledge_ready=false
+    if loco.ledge_jumping || !ground.standing || loco.mode!=MODE_WALKING || loco.ledge_time<ledge.min_time || overriding(loco) {return}
+    loco.ledge_ready=ledge_drop_ahead(w,h,velocity-ground.ground_velocity,ledge)
+}
 
 @(private) SLIDE_BLOCKED :: f32(0.5)     // share of the speed of the slide under which the body is held back
 @(private) SLIDE_BLOCK_AFTER :: f32(0.1) // s into a slide before that is checked: it starts from the speed the body had

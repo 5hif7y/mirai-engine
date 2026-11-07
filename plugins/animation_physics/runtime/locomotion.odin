@@ -17,7 +17,7 @@ import phys "plugins:physics/runtime"
 // the speed of the root of its pose. A game writes no code for locomotion; the clips and their
 // modes are in the .match.
 @(step="fixed",before="animation_sample")
-animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Read(phys.Character_State),animations:core.Read(anim.Animation),motions:core.Read(core.Motion),inputs:core.Read(inp.Move_Input),walk_actions:inp.Input_Of(phys.Walk_Action),walks:core.Read(phys.Walk),flights:core.Read(phys.Fly),swims:core.Read(phys.Swim),worlds:core.Read(core.World_Transform),playback:core.Ref(anim.Playback),physics:core.Ref(phys.Physics_State),requests:^anim.Animation_Requests,warps:^anim.Motion_Requests,problems:^core.Problems) {
+animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Read(phys.Character_State),animations:core.Read(anim.Animation),motions:core.Read(core.Motion),inputs:core.Read(inp.Move_Input),walk_actions:inp.Input_Of(phys.Walk_Action),walks:core.Read(phys.Walk),tacticals:core.Read(phys.Tactical_Sprint),flights:core.Read(phys.Fly),swims:core.Read(phys.Swim),worlds:core.Read(core.World_Transform),playback:core.Ref(anim.Playback),physics:core.Ref(phys.Physics_State),requests:^anim.Animation_Requests,warps:^anim.Motion_Requests,problems:^core.Problems) {
     for row in 0..<core.count(characters) {
         entity:=core.entity_at(characters,row)
         animation,animated:=core.get(animations,entity)
@@ -45,7 +45,9 @@ animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Rea
         case:
             if walk,ok:=core.get(walks,entity);ok {
                 sprinting:=input.buttons&inp.action_bit(inp.action_of(walk_actions,.Sprint))!=0
-                goal.desired,goal.acceleration,goal.braking=walk_goal(walk,character.mode==phys.MODE_FALLING,wish,going.linear,phys.walk_speed(walk,input,sprinting,character.mode==phys.MODE_CROUCHING))
+                boost:f32=1
+                if tactical,has:=core.get(tacticals,entity);has {boost,_=phys.tactical_boost(character,tactical)}
+                goal.desired,goal.acceleration,goal.braking=walk_goal(walk,character.mode==phys.MODE_FALLING,wish,going.linear,phys.walk_speed(walk,input,sprinting,character.mode==phys.MODE_CROUCHING,boost))
             }
         }
         if !anim.match_goal(requests,goal) {

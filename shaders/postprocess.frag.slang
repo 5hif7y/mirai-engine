@@ -46,5 +46,6 @@ float4 main(Post_Input input):SV_Target0 {
     float scale=post_scale();
     ctx.color.rgb*=scale;
     float4 result=mirai_evaluate_postprocess(post_params.program,post_params.values,ctx);
+    if (post_params.fade>0.0) result=lerp(result,ctx.color,post_params.fade);
     return float4(result.rgb/scale,result.a);
 }

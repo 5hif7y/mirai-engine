@@ -45,6 +45,18 @@ postprocess_gpu_order_stage_filter_and_hdr_ldr_precision :: proc(t:^testing.T) {
     expected={.4,.8,1.2}
     for axis in 0..<3 {testing.expectf(t,abs(f32(pixels[0][axis])-expected[axis])<.003,"Inspected axis%d got%v expected%v",axis,f32(pixels[0][axis]),expected[axis])}
     testing.expect_value(t,execute(t,r,r.targets.display,false,{postprocess={limited=true}}),r.targets.display)
+    // A faded effect leaves that share of the image as it read it: half at 0.5; at 1 it does not run.
+    half:=a;half.fade=.5
+    renderer_set_postprocesses(r,{count=1,entries={0=half}})
+    target=execute(t,r,r.targets.display,false)
+    testing.expect(t,golden_read_texture(d,target,mem.slice_data_cast([]u8,pixels[:])))
+    expected={.3,.6,.9}
+    for axis in 0..<3 {testing.expectf(t,abs(f32(pixels[0][axis])-expected[axis])<.003,"Faded axis%d got%v expected%v",axis,f32(pixels[0][axis]),expected[axis])}
+    gone:=a;gone.fade=1
+    renderer_set_postprocesses(r,{count=1,entries={0=gone}})
+    faded:=Pass{r=r}
+    testing.expect(t,!postprocess_active(&faded,false),"an effect faded out is none to run")
+    testing.expect_value(t,execute(t,r,r.targets.display,false),r.targets.display)
     renderer_set_postprocesses(r,{count=3,entries={0=b,1=after,2=a}})
     target=execute(t,r,r.targets.display,false)
     testing.expect(t,golden_read_texture(d,target,mem.slice_data_cast([]u8,pixels[:])))

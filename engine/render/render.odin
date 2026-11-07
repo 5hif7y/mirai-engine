@@ -199,6 +199,7 @@ Post_Process_Layer :: struct {
     material:base.Asset_Id, // a material whose program is a PostProcess one
     after_tonemap:bool,
     enabled:bool,
+    fade:f32 `mirai:"min=0,max=1"`, // the share of the image it leaves as it read it: 0 the whole effect, 1 none
 }
 
 

@@ -2,10 +2,12 @@ package camera
 
 import "core:math"
 import "mirai:core"
+import render "mirai:engine/render"
 import mm "mirai:std/math"
 
-// A camera shake authored as keys (a camera animation): the angles it adds to the view along its
-// own time, played at a rate, scaled, and blended in and out. Unlike Shake (trauma and noise), it
+// A camera shake authored as keys (a camera animation): the angles it adds to the view, and the
+// field of view it adds to a perspective lens, along its own time, played at a rate, scaled, and
+// blended in and out. Unlike Shake (trauma and noise), it
 // moves the view the same way every time, as a swing or a landing asks. camera_shake asks a camera
 // for one; camera_follow, the only writer of the camera, plays it over the rotation it gives the
 // view, in the axes of the view: pitch up, yaw to its left and roll counterclockwise as seen, all
@@ -13,6 +15,10 @@ import mm "mirai:std/math"
 
 SHAKE_SEQUENCE_KEYS :: 16
 CAMERA_SHAKES :: 4
+// The field of view a shake leaves a perspective lens within, radians: render.Camera takes 0 as its
+// default and needs less than pi.
+SHAKE_FOV_MIN :: 1*mm.RAD_PER_DEG
+SHAKE_FOV_MAX :: 179*mm.RAD_PER_DEG
 
 // A key of a channel: its value at time (seconds of the sequence) and the slope it passes with
 // (per second of the sequence; 0 is flat). Between two keys the value is the cubic Hermite of
@@ -30,6 +36,7 @@ Shake_Channel :: struct {
 
 Shake_Sequence :: struct {
     pitch,yaw,roll:Shake_Channel,
+    fov:Shake_Channel,                    // radians added to the vertical field of view of a perspective lens
     length:f32 `mirai:"min=0,unit=s"`,    // of the sequence; it ends there
     rate:f32 `mirai:"min=0"`,             // sequence seconds per second; 0: 1
     scale:f32,                            // of its angles
@@ -99,6 +106,15 @@ shake_sequence_rotation :: proc "contextless" (s:Shake_Sequence,time:f32) -> mm.
     return mm.quat_axis_angle({0,1,0},yaw)*mm.quat_axis_angle({1,0,0},pitch)*mm.quat_axis_angle({0,0,1},roll)
 }
 
+// The radians a shake adds to the vertical field of view after time seconds of play.
+shake_sequence_fov :: proc "contextless" (s:Shake_Sequence,time:f32) -> f32 {
+    weight:=shake_weight(s,time)*s.scale
+    if weight==0 || !(abs(weight)<math.F32_MAX) {return 0}
+    rate:=s.rate if s.rate>0 else 1
+    widen:=shake_channel_at(s.fov,time*rate)*weight
+    return widen if abs(widen)<math.F32_MAX else 0
+}
+
 // Starts what was asked of a camera that follows: a single one that plays starts over.
 @(private)
 shakes_take :: proc(follows:^core.Table(Camera_Follow),shakes:^Camera_Shakes,problems:^core.Problems) {
@@ -131,16 +147,38 @@ shakes_take :: proc(follows:^core.Table(Camera_Follow),shakes:^Camera_Shakes,pro
     }
 }
 
-// The rotation the shakes of a camera add this frame, after advancing them dt seconds.
+// The rotation and the radians of vertical field of view the shakes of a camera add this frame,
+// after advancing them dt seconds.
 @(private)
-shakes_advance :: proc "contextless" (state:^Camera_Follow_State,dt:f32) -> mm.Quat {
-    turn:=mm.Quat(1)
+shakes_advance :: proc "contextless" (state:^Camera_Follow_State,dt:f32) -> (turn:mm.Quat,widen:f32) {
+    turn=1
     for &p in state.shakes {
         if p.sequence.length<=0 {continue}
         p.time+=dt
         rate:=p.sequence.rate if p.sequence.rate>0 else 1
         if !(p.time<p.sequence.length/rate) {p={};continue}
         turn*=shake_sequence_rotation(p.sequence,p.time)
+        widen+=shake_sequence_fov(p.sequence,p.time)
     }
-    return turn
+    return
+}
+
+// Gives a perspective camera its field of view without the shakes plus widen, within
+// SHAKE_FOV_MIN..SHAKE_FOV_MAX. What it had without them is kept in state, so the shakes of one
+// frame never add to those of the last; an orthographic one keeps its own.
+@(private)
+shakes_fov :: proc "contextless" (camera:^render.Camera,state:^Camera_Follow_State,widen:f32) {
+    shakes_fov_restore(camera,state)
+    if camera.projection!=.Perspective || widen==0 {return}
+    state.fov_base,state.fov_shaken=camera.fov,true
+    lens:=camera.fov if camera.fov>0 else render.CAMERA_DEFAULT.fov
+    camera.fov=clamp(lens+widen,SHAKE_FOV_MIN,SHAKE_FOV_MAX)
+}
+
+// Puts back the field of view a camera had without its shakes.
+@(private)
+shakes_fov_restore :: proc "contextless" (camera:^render.Camera,state:^Camera_Follow_State) {
+    if !state.fov_shaken {return}
+    camera.fov=state.fov_base
+    state.fov_shaken=false
 }

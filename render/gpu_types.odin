@@ -417,7 +417,7 @@ pack_half2 :: proc "contextless" (a, b: f32) -> u32 {
 }
 
 // The parameters of a post-process effect (Post_Parameters of common.slang).
-Gpu_Post_Parameters :: struct {program,exposed,outlined,pad:u32,values:[16]Vec4}
+Gpu_Post_Parameters :: struct {program,exposed,outlined:u32,fade:f32,values:[16]Vec4}
 
 // A texel of the normal target of the G-buffer as gbuffer.slang decodes it:
 // the shading normal (octahedral), its roughness and the layer bits.

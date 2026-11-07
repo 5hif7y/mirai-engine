@@ -89,6 +89,9 @@ project world. Layout, manifests and build:
   extensions](../mirai-rendering/references/views.md#views-cameras-and-extensions)
 - `prompts_kenney` (Kenney prompt pack and how it is regenerated):
   [plugins.md](references/plugins.md#first-party-plugins)
+- `abilities` (attacks, combos, dashes and reactions as rows of game data: sheets with timeline
+  windows, cancel rules, statuses, attributes and effects; `abilities.*`):
+  [abilities skill](../mirai-abilities/SKILL.md)
 - `animation` (clips, graphs, rigs, morphs, actions, authoring and its API):
   [animation skill](../mirai-animation/SKILL.md)
 - `lens` (depth of field, motion blur, bloom, vignette, distortion and aberration; settings per

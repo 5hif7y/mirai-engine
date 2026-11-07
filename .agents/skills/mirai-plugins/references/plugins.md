@@ -153,6 +153,9 @@ demo enables. How an `editor/` adds steps, panels and tools:
 - **`behavior`** (`Runtime`, `Editor`; depends on `physics` and `navigation`): minds that the game
   runs by name in its functions, perception with memory, smart objects, place queries, influence
   maps and the `behavior.*` methods. Contract in [behavior](behavior.md).
+- **`abilities`** (`Runtime`, `Editor`; depends on `physics` and `animation`): abilities as
+  `Ability` and `Ability_Kit` rows of game data, the `Ability_User` that runs them, effects and
+  the `abilities.*` methods. Contract in [abilities](../../mirai-abilities/SKILL.md).
 - **`spawn`** (`Runtime`, `Editor`): spawn points and bodies for the players, which it destroys
   with their seat; the Spawn card of Create
   ([spawn points](../../mirai-gameplay/references/control.md#spawn-points)).

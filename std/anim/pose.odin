@@ -110,8 +110,10 @@ pose_blend :: proc(pose:^Pose,lib:^Library,p:Player,scale:f32=1,lock:Pose_Lock={
     time:=player_time(lib,p)
     weight:=p.weight*scale
     ok=true
+    reader:Clip_Reader=---
+    clip_reader(&reader,lib,p.clip,time)
     for track in clip_tracks(lib,p.clip) {
-        value:=clip_evaluate(lib,track,time)
+        value:=clip_reader_next(&reader,lib,track)
         if track.target==lock.target && track.slot==0 {
             if track.property==.Position && lock.position {value.xyz=lock.value.position}
             if track.property==.Rotation && lock.rotation {value=quat_vec4(lock.value.rotation)}
@@ -145,13 +147,16 @@ pose_blend_additive :: proc(pose:^Pose,lib:^Library,p:Player,reference:f32=0,sca
     others:[]Track
     if from!=0 && clip_valid(lib,from) {others=clip_tracks(lib,from)}
     ok=true
+    reader:Clip_Reader=---
+    clip_reader(&reader,lib,p.clip,time)
     for track,i in clip_tracks(lib,p.clip) {
+        now:=clip_reader_next(&reader,lib,track)
         source:=track
         // The clips of a library usually list their targets in one order: the same index first.
         if i<len(others) && others[i].target==track.target && others[i].property==track.property && others[i].slot==track.slot {source=others[i]} else {
             for other in others {if other.target==track.target && other.property==track.property && other.slot==track.slot {source=other;break}}
         }
-        now,rest:=clip_evaluate(lib,track,time),clip_evaluate(lib,source,reference)
+        rest:=clip_evaluate(lib,source,reference)
         change:=quat_vec4(conj(vec4_quat(rest))*vec4_quat(now)) if track.property==.Rotation else now-rest
         ok=pose_add_additive(pose,track.target,track.property,track.slot,change,weight) && ok
     }

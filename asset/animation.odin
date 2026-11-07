@@ -13,11 +13,11 @@ import "mirai:std/serial"
 //   tracks    Animation_Track: what it moves, by name, and where its keys or samples are
 //   keys      anim.Keyframe, those of a track in time order
 //   markers   Animation_Marker: a named moment of a clip
-//   sampled   anim.Sampled_Track: the header of a sampled track
-//   samples   bulk: the segments of the sampled tracks, with anim.SAMPLED_PADDING bytes after
+//   streams   bulk: the stream of each clip that has one (anim.Stream_Header), with
+//             anim.STREAM_PADDING bytes after the last
 //
 // The asset of a project keeps every track as its keys, which the editor edits. A cooked one
-// (animation_cooked_document, for a shipped game) keeps as samples what library_compress samples.
+// (animation_cooked_document, for a shipped game) keeps the streams library_compress makes.
 //
 // A track names the entity it moves below the one that plays the clip; an
 // empty target is that entity itself. A clip names the .skeleton it plays on,
@@ -25,7 +25,7 @@ import "mirai:std/serial"
 // measures the error on it. How a clip repeats belongs to whoever
 // plays it. A morph target's weight is the target "<path>/@morph/<target>".
 
-ANIMATION_VERSION :: 2
+ANIMATION_VERSION :: 3
 ANIMATION_NAME_CAPACITY :: 64
 // The path of a node or bone below the entity that plays, with its zero: a
 // track target, a skeleton bone, a root bone.
@@ -34,7 +34,7 @@ ANIMATION_MAX_CLIPS :: 1024
 ANIMATION_MAX_TRACKS :: 65536
 ANIMATION_MAX_KEYS :: 1<<24
 ANIMATION_MAX_MARKERS :: 1<<20
-ANIMATION_SAMPLES_ALIGNMENT :: 8
+ANIMATION_STREAMS_ALIGNMENT :: 8
 ANIMATION_MORPH_PATH :: "/@morph/"
 
 Animation_Clip :: struct {
@@ -43,6 +43,7 @@ Animation_Clip :: struct {
     first_marker,marker_count:u32,
     root:Animation_Root,
     skeleton:base.Asset_Id,
+    stream,stream_bytes:u32, // its stream in streams; 0 bytes: none
 }
 Animation_Root :: struct {
     bone:[NODE_PATH_CAPACITY]u8 `mirai:"text"`,
@@ -53,7 +54,7 @@ Animation_Track :: struct {
     property:anim.Property,
     slot:u8,
     encoding:anim.Key_Encoding,
-    first_key,key_count:u32, // a sampled track: its row of sampled and 1
+    first_key,key_count:u32, // a sampled track is in its clip's stream and has none
 }
 Animation_Marker :: struct {
     time:f32,
@@ -86,8 +87,7 @@ Animation_View :: struct {
     tracks:[]Animation_Track,
     keys:[]anim.Keyframe,
     markers:[]Animation_Marker,
-    sampled:[]anim.Sampled_Track,
-    samples:[]u8,
+    streams:[]u8,
     source:^Import_Info,
 }
 
@@ -142,8 +142,7 @@ animation_tables :: proc(doc:^Document,types:^Types,view:Animation_View,desc:Ani
     document_put(doc,types,"tracks",view.tracks,{},.LZ) or_return
     document_put(doc,types,"keys",view.keys,{},.LZ) or_return
     document_put(doc,types,"markers",view.markers,{},.LZ) or_return
-    document_put(doc,types,"sampled",view.sampled,{},.LZ) or_return
-    document_put(doc,types,"samples",view.samples,{.Bulk},.LZ,ANIMATION_SAMPLES_ALIGNMENT) or_return
+    document_put(doc,types,"streams",view.streams,{.Bulk},.LZ,ANIMATION_STREAMS_ALIGNMENT) or_return
     return import_put(doc,types,desc.source)
 }
 
@@ -160,8 +159,7 @@ animation_view :: proc(a:^Asset,types:^Types) -> (view:Animation_View,error:Erro
     view.tracks=table_rows(a,types,"tracks",Animation_Track) or_return
     view.keys=table_rows(a,types,"keys",anim.Keyframe) or_return
     view.markers=table_rows(a,types,"markers",Animation_Marker) or_return
-    view.sampled=table_rows(a,types,"sampled",anim.Sampled_Track) or_return
-    view.samples=table_rows(a,types,"samples",u8) or_return
+    view.streams=table_rows(a,types,"streams",u8) or_return
     view.source=import_info(a,types) or_return
     if !animation_check(view) {return {},.Corrupt}
     return view,.None
@@ -169,10 +167,9 @@ animation_view :: proc(a:^Asset,types:^Types) -> (view:Animation_View,error:Erro
 
 // Every range inside its table, the keys of a track in time order, numbers
 // finite and names ended and, for clips, different from each other, and the
-// samples of a sampled track consistent and inside samples.
+// stream of a clip consistent with its tracks and inside streams.
 animation_check :: proc(view:Animation_View) -> bool {
-    if len(view.clips)>ANIMATION_MAX_CLIPS || len(view.tracks)>ANIMATION_MAX_TRACKS || len(view.keys)>ANIMATION_MAX_KEYS || len(view.markers)>ANIMATION_MAX_MARKERS || len(view.sampled)>ANIMATION_MAX_TRACKS {return false}
-    if len(view.sampled)>0 && len(view.samples)<anim.SAMPLED_PADDING {return false}
+    if len(view.clips)>ANIMATION_MAX_CLIPS || len(view.tracks)>ANIMATION_MAX_TRACKS || len(view.keys)>ANIMATION_MAX_KEYS || len(view.markers)>ANIMATION_MAX_MARKERS {return false}
     for &clip,i in view.clips {
         if !text_valid(clip.name[:]) || clip.name[0]==0 {return false}
         if !text_valid(clip.root.bone[:]) {return false}
@@ -181,12 +178,18 @@ animation_check :: proc(view:Animation_View) -> bool {
         for &other in view.clips[:i] {
             if other.name==clip.name {return false}
         }
+        tracks:=view.tracks[clip.first_track:][:clip.track_count]
+        if clip.stream_bytes==0 {
+            for &track in tracks {if track.encoding!=.Raw {return false}}
+            continue
+        }
+        if u64(clip.stream)+u64(clip.stream_bytes)+anim.STREAM_PADDING>u64(len(view.streams)) {return false}
+        if bytes,ok:=anim.stream_check(view.streams[clip.stream:],tracks);!ok || bytes!=int(clip.stream_bytes) {return false}
     }
     for &track in view.tracks {
         if !text_valid(track.target[:]) || track.property>max(anim.Property) || track.encoding>max(anim.Key_Encoding) {return false}
         if track.encoding==.Sampled {
-            if track.key_count!=1 || int(track.first_key)>=len(view.sampled) {return false}
-            if _,_,ok:=anim.sampled_walk(view.sampled[track.first_key],track.property,view.samples);!ok {return false}
+            if track.key_count!=0 || track.first_key!=0 {return false}
             continue
         }
         if u64(track.first_key)+u64(track.key_count)>u64(len(view.keys)) {return false}
@@ -211,12 +214,8 @@ animation_library_desc :: proc(view:Animation_View) -> anim.Library_Desc {
     desc:=anim.Library_Desc{max_clips=max(len(view.clips),1)}
     if !animation_check(view) {return desc}
     for clip in view.clips {
-        desc.max_tracks+=int(clip.track_count);desc.max_markers+=int(clip.marker_count)
-        for track in view.tracks[clip.first_track:][:clip.track_count] {
-            if track.encoding==.Raw {desc.max_keys+=int(track.key_count);continue}
-            bytes,segments,_:=anim.sampled_walk(view.sampled[track.first_key],track.property,view.samples)
-            desc.max_sampled+=1;desc.max_segments+=segments;desc.max_samples+=bytes
-        }
+        desc.max_tracks+=int(clip.track_count);desc.max_markers+=int(clip.marker_count);desc.max_stream_bytes+=int(clip.stream_bytes)
+        for track in view.tracks[clip.first_track:][:clip.track_count] {if track.encoding==.Raw {desc.max_keys+=int(track.key_count)}}
     }
     desc.max_tracks=max(desc.max_tracks,1);desc.max_keys=max(desc.max_keys,1)
     return desc
@@ -247,29 +246,28 @@ animation_descs :: proc(view:Animation_View,allocator:=context.allocator) -> (cl
 // Returns the first clip, or 0 without changes when the library has no room.
 animation_clips_add :: proc(view:Animation_View,lib:^anim.Library,loop:=anim.Loop.Once) -> anim.Clip {
     if !animation_check(view) || len(view.clips)>len(lib.clips)-lib.clip_count {return 0}
-    needed_tracks,needed_keys,needed_markers:u64
+    needed_tracks,needed_keys,needed_markers,needed_streams:u64
     for clip in view.clips {
-        needed_tracks+=u64(clip.track_count);needed_markers+=u64(clip.marker_count)
+        needed_tracks+=u64(clip.track_count);needed_markers+=u64(clip.marker_count);needed_streams+=u64(clip.stream_bytes)
         for track in view.tracks[clip.first_track:][:clip.track_count] {if track.encoding==.Raw {needed_keys+=u64(track.key_count)}}
     }
     if needed_keys>u64(len(lib.keys)-lib.key_count) {return 0}
+    if needed_streams>0 && needed_streams>u64(max(len(lib.streams)-anim.STREAM_PADDING-lib.stream_bytes,0)) {return 0}
     if needed_tracks>u64(len(lib.tracks)-lib.track_count) || needed_markers>u64(len(lib.markers)-lib.marker_count) {return 0}
     first:anim.Clip
     for &clip in view.clips {
         tracks:=make([]anim.Track_Desc,clip.track_count,context.temp_allocator)
         for &track,i in view.tracks[clip.first_track:][:clip.track_count] {
             target:=serial.text_field(track.target[:])
-            tracks[i]={target=target!=""?base.name_hash(target):0,property=track.property,slot=track.slot}
-            if track.encoding==.Raw {tracks[i].keys=view.keys[track.first_key:][:track.key_count];continue}
-            sampled:=view.sampled[track.first_key]
-            bytes,_,_:=anim.sampled_walk(sampled,track.property,view.samples)
-            tracks[i].sampled={sampled,view.samples[sampled.data:][:bytes]}
+            tracks[i]={target=target!=""?base.name_hash(target):0,property=track.property,slot=track.slot,encoding=track.encoding}
+            if track.encoding==.Raw {tracks[i].keys=view.keys[track.first_key:][:track.key_count]}
         }
         markers:=make([]anim.Marker,clip.marker_count,context.temp_allocator)
         for &marker,i in view.markers[clip.first_marker:][:clip.marker_count] {
             markers[i]={marker.time,clip.first_marker+u32(i)}
         }
-        added,_:=anim.clip_add(lib,{name=base.name_hash(serial.text_field(clip.name[:])),loop=loop,tracks=tracks,markers=markers})
+        stream:=view.streams[clip.stream:][:clip.stream_bytes] if clip.stream_bytes>0 else nil
+        added,_:=anim.clip_add(lib,{name=base.name_hash(serial.text_field(clip.name[:])),loop=loop,tracks=tracks,markers=markers,stream=stream})
         if added==0 {return 0}
         if first==0 {first=added}
     }
@@ -333,8 +331,8 @@ skeleton_anim :: proc(view:Skeleton_View,allocator:=context.allocator) -> (skele
 // Compresses the clips a library holds of a checked view, which
 // animation_clips_add added first and in order: what the runtime plays. Each
 // clip is measured on the skeleton it names, which `open` opens; one that does
-// not open is measured on its tracks alone. A cooked view is already sampled
-// and only prepares the library.
+// not open is measured on its tracks alone. A cooked view already holds its
+// streams and only prepares the library.
 animation_compress :: proc(view:Animation_View,lib:^anim.Library,types:^Types,open:Skeleton_Open=nil,data:rawptr=nil,config:=anim.COMPRESS_DEFAULT) -> (stats:anim.Compress_Stats,error:anim.Compress_Error) {
     if lib==nil || lib.track_count!=len(view.tracks) {return {},.Invalid}
     for track in view.tracks {
@@ -356,18 +354,24 @@ animation_compress :: proc(view:Animation_View,lib:^anim.Library,types:^Types,op
 }
 
 // The cooked asset of a view whose clips `lib` holds as animation_compress
-// left them: the same clips, names and markers, with what lib samples as
-// samples.
+// left them, first and in order: the same clips, names and markers, with the
+// streams of lib.
 animation_cooked_document :: proc(doc:^Document,types:^Types,id,owner:base.Asset_Id,view:Animation_View,lib:^anim.Library,allocator:=context.allocator) -> Error {
-    if lib==nil || !lib.prepared || lib.track_count!=len(view.tracks) || lib.key_count>len(lib.keys) || lib.sampled_count>len(lib.sampled) || lib.sample_count+anim.SAMPLED_PADDING>len(lib.samples) && lib.sampled_count>0 {return .Invalid}
+    if lib==nil || !lib.prepared || lib.track_count!=len(view.tracks) || lib.key_count>len(lib.keys) || lib.clip_count<len(view.clips) || lib.stream_bytes<0 || lib.stream_bytes>0 && lib.stream_bytes+anim.STREAM_PADDING>len(lib.streams) {return .Invalid}
     tracks:=make([]Animation_Track,len(view.tracks),context.temp_allocator)
     for &track,i in tracks {
         stored:=lib.tracks[i]
         track=view.tracks[i]
         track.encoding,track.first_key,track.key_count=stored.encoding,stored.first,stored.count
+        if stored.encoding==.Sampled {track.first_key,track.key_count=0,0}
     }
-    cooked:=Animation_View{clips=view.clips,tracks=tracks,keys=lib.keys[:lib.key_count],markers=view.markers,sampled=lib.sampled[:lib.sampled_count],source=view.source}
-    if lib.sampled_count>0 {cooked.samples=lib.samples[:lib.sample_count+anim.SAMPLED_PADDING]}
+    clips:=make([]Animation_Clip,len(view.clips),context.temp_allocator)
+    for &clip,i in clips {
+        clip=view.clips[i]
+        clip.stream,clip.stream_bytes=lib.clips[i].stream,lib.clips[i].stream_bytes
+    }
+    cooked:=Animation_View{clips=clips,tracks=tracks,keys=lib.keys[:lib.key_count],markers=view.markers,source=view.source}
+    if lib.stream_bytes>0 {cooked.streams=lib.streams[:lib.stream_bytes+anim.STREAM_PADDING]}
     if !animation_check(cooked) {return .Invalid}
     document_init(doc,KIND_ANIMATION,id,allocator)
     doc.owner=owner

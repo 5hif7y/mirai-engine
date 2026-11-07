@@ -139,8 +139,8 @@ plugin without adding them to the core: `.pose`, `.blend` and `.agraph`
 - **`.scene`, `.prefab`** (`SCEN`, `PRFB`): `entities`, a table per component, `scene`,
   `instances`, `members`, `overrides` and `off` (turned-off components).
 - **`.anim`** (`ANIM`): `clips` (`Animation_Clip`), `tracks` (`Animation_Track`), `keys`
-  (`anim.Keyframe`), `markers` (`Animation_Marker`), `sampled` (`anim.Sampled_Track`) and the bulk
-  `samples`, empty but in a cooked `.anim`.
+  (`anim.Keyframe`), `markers` (`Animation_Marker`) and the bulk `streams`, empty but in a cooked
+  `.anim`.
 - **`.pose`** (`POSE`): constraint tables of the [animation
   plugin](../../mirai-animation/references/animation.md): `ik`, `look`, `limits`, `contacts`,
   `grounding`, `retarget`.

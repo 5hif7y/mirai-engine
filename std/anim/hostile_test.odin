@@ -402,3 +402,36 @@ hostile_skeletons_and_solvers_reject_invalid_inputs :: proc(t:^testing.T) {
         parents[bone]=i32(bone)-1
     }
 }
+
+// Streams changed after they were checked, and sampled tracks that point anywhere: every read
+// stays inside the library.
+@(test)
+hostile_streams_through_the_decoder :: proc(t:^testing.T) {
+    h:=Hostile{23}
+    keys:[3][48]Keyframe
+    for k in 0..<48 {
+        phase:=f32(k)/30
+        keys[0][k]={time=phase,value={phase,phase*phase,1-phase,0}}
+        keys[1][k]={time=phase,value=quat_vec4(math.quat_axis_angle({0,1,0},phase*3))}
+        keys[2][k]={time=phase,value={phase*.5,0,0,0}}
+    }
+    still:=[1]Keyframe{{value={1,1,1,0}}}
+    lib:=make_library(t,keys=200,tracks=8,clips=2,markers=0);defer library_destroy(&lib)
+    clip,_:=clip_add(&lib,{tracks={{target=1,property=.Position,keys=keys[0][:]},{target=1,property=.Rotation,keys=keys[1][:]},{target=1,property=.Scale,keys=still[:]},{target=2,property=.Float,keys=keys[2][:]},{target=3,property=.Vector}}})
+    _,error:=library_compress(&lib);testing.expect_value(t,error,Compress_Error.None)
+    saved:=make([]u8,len(lib.streams));defer delete(saved)
+    copy(saved,lib.streams)
+    values:[8]math.Vec4
+    for _ in 0..<HOSTILE_ROUNDS {
+        for _ in 0..<1+hostile_int(&h,4) {lib.streams[hostile_int(&h,len(lib.streams))]=u8(hostile_next(&h))}
+        time:=hostile_time(&h)
+        _=clip_sample(&lib,clip,time,values[:])
+        for track in clip_tracks(&lib,clip) {_=clip_evaluate(&lib,track,time)}
+        stray:=Track{property=Property(hostile_int(&h,5)),encoding=.Sampled,first=hostile_u32(&h),count=hostile_u32(&h)}
+        _=clip_evaluate(&lib,stray,time)
+        if hostile_int(&h,3)==0 {lib.clips[0].stream,lib.clips[0].stream_bytes=hostile_u32(&h),hostile_u32(&h)}
+        _=clip_sample(&lib,clip,time,values[:])
+        copy(lib.streams,saved)
+        lib.clips[0].stream,lib.clips[0].stream_bytes=0,u32(lib.stream_bytes)
+    }
+}

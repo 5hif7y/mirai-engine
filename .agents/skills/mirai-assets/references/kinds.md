@@ -196,8 +196,9 @@ of a shipped game keeps what `anim.library_compress` samples as samples
 
 `asset/sound.odin`. A `.sound` stores `Lossless` (16 bit samples coded without loss by
 `audio.lossless_encode`, in the bulk table `lossless`, read from the file without a copy) or `File`
-(a WAV or Ogg Vorbis as is in the bulk table `file`). Either is decoded whole on loading or, with
-the `Stream` flag, while it plays ([audio](../../mirai-platform/references/audio.md#sounds)). The
+(a WAV or Ogg Vorbis as is in the bulk table `file`). Without the `Stream` flag the mixer keeps it
+in memory (lossless stays encoded and each voice decodes it); with it, it is decoded while it plays
+([audio](../../mirai-platform/references/audio.md#sounds)). The
 lossless table is stored without LZ: the residual coding leaves it nothing to gain. What the
 importer stores: [imports guide](../../mirai-imports/references/imports.md#sounds).
 

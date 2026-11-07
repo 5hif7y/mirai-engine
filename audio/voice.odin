@@ -1,5 +1,6 @@
 package mirai_audio
 
+import "core:sync"
 import "mirai:std/base"
 
 // Voices: one playing instance of a sound. The handle is valid from
@@ -40,7 +41,8 @@ Voice_Shadow :: struct {
     active:bool,
     priority:u8,
     sequence:u64, // order of creation
-    stream:i32,   // the stream it plays; -1 for a sound in memory
+    feed:i32,     // the feed it plays from; -1 for a sound decoded in memory
+    stream:bool,  // it plays a stream
 }
 
 @(private)
@@ -54,18 +56,23 @@ voice_shadow :: proc(m:^Mixer,voice:Voice) -> (index:u32,shadow:^Voice_Shadow) {
 @(private)
 voice_shadow_free :: proc(m:^Mixer,index:u32) {
     shadow:=&m.shadows[index]
-    if shadow.stream>=0 && m.streams[shadow.stream].voice==i32(index) {m.streams[shadow.stream].voice=-1}
     shadow.active=false
     shadow.generation+=1
     m.free_voices[m.free_count]=index;m.free_count+=1
 }
 
 // Plays a sound. Returns 0 when it cannot: the sound is not valid, a stream
-// that is already playing, no voice to use or steal, or a full command queue.
+// that is already playing, no voice or feed to use or steal, or a full
+// command queue.
 voice_play :: proc(m:^Mixer,sound:Sound,desc:Voice_Desc=VOICE_DEFAULT) -> Voice {
     slot:=sound_slot(m,sound)
     if slot==nil || !bus_valid(m,desc.bus) {return 0}
-    if slot.stream>=0 && m.streams[slot.stream].voice>=0 {m.counters.streams_busy+=1;return 0}
+    feed:=slot.feed
+    if feed>=0 && feed_phase(&m.feeds[feed])!=.Free {m.counters.streams_busy+=1;return 0}
+    if feed<0 && slot.source.kind!=.None {
+        if m.free_feed_count==0 {m.counters.feeds_busy+=1;return 0}
+        feed=i32(m.free_feeds[m.free_feed_count-1])
+    }
     index:u32
     stolen:=false
     if m.free_count>0 {
@@ -75,7 +82,7 @@ voice_play :: proc(m:^Mixer,sound:Sound,desc:Voice_Desc=VOICE_DEFAULT) -> Voice 
         victim:=-1
         for shadow,i in m.shadows {
             // A voice that plays a stream is not stolen: its stream would have to be handed over too.
-            if !shadow.active || shadow.stream>=0 {continue}
+            if !shadow.active || shadow.stream {continue}
             if victim<0 || shadow.priority<m.shadows[victim].priority || (shadow.priority==m.shadows[victim].priority && shadow.sequence<m.shadows[victim].sequence) {victim=i}
         }
         if victim<0 || m.shadows[victim].priority>desc.priority {m.counters.voices_rejected+=1;return 0}
@@ -84,11 +91,13 @@ voice_play :: proc(m:^Mixer,sound:Sound,desc:Voice_Desc=VOICE_DEFAULT) -> Voice 
     }
     shadow:=&m.shadows[index]
     generation:=shadow.generation+1 if stolen else shadow.generation
+    handle:=Voice(base.handle_make(index,generation))
     rate:=f64(slot.rate)
+    sound_index:=base.handle_index(base.Handle(sound))
     start:=Voice_Start{
         generation=generation,
-        sound=base.handle_index(base.Handle(sound)),
-        source={samples=raw_data(slot.samples),frames=slot.frames,channels=slot.channels,rate=slot.rate,stream=slot.stream},
+        sound=sound_index,
+        source={samples=raw_data(slot.samples),frames=slot.frames,channels=slot.channels,rate=slot.rate,feed=feed},
         bus=u16(desc.bus),
         volume=max(desc.volume,0),pitch=desc.pitch,pan=desc.pan,
         loop=desc.loop,paused=desc.paused,spatial=desc.spatial,
@@ -99,14 +108,9 @@ voice_play :: proc(m:^Mixer,sound:Sound,desc:Voice_Desc=VOICE_DEFAULT) -> Voice 
         lowpass=max(desc.lowpass,0),reverb=max(desc.reverb,0),
     }
     frames:=slot.frames
-    if slot.stream>=0 {frames=u32(min(m.streams[slot.stream].decoder.frames,int(max(u32))))}
     offset:=frames>0?u32(min(max(f64(desc.offset),0)*rate,f64(frames-1))):0
-    if slot.stream>=0 {
-        // The ring begins at the offset.
-        stream_begin(m,&m.streams[slot.stream],desc.loop,int(offset))
-    } else {
-        start.offset=offset
-    }
+    start.offset=offset
+    if feed>=0 {feed_prepare(m,&m.feeds[feed],slot.source,sound_index,int(offset),desc.loop)}
     if !command_push(m,{kind=.Voice_Play,index=index,start=start}) {
         if !stolen {m.free_voices[m.free_count]=index;m.free_count+=1}
         return 0
@@ -115,11 +119,17 @@ voice_play :: proc(m:^Mixer,sound:Sound,desc:Voice_Desc=VOICE_DEFAULT) -> Voice 
     shadow.active=true
     shadow.priority=desc.priority
     shadow.sequence=m.sequence;m.sequence+=1
-    shadow.stream=slot.stream
-    if slot.stream>=0 {m.streams[slot.stream].voice=i32(index)}
+    shadow.feed=feed
+    shadow.stream=slot.feed>=0
     m.counters.voices_played+=1
     if stolen {m.counters.voices_stolen+=1}
-    return Voice(base.handle_make(index,generation))
+    if feed>=0 {
+        f:=&m.feeds[feed]
+        if !f.stream {m.free_feed_count-=1}
+        f.owner=handle
+        feed_hand_over(m,f)
+    }
+    return handle
 }
 
 // The voice has not ended, as far as the last mixer_update knows.
@@ -158,7 +168,8 @@ voice_set_pan :: proc(m:^Mixer,voice:Voice,pan:f32) -> bool {
 voice_set_loop :: proc(m:^Mixer,voice:Voice,loop:bool) -> bool {
     _,shadow:=voice_shadow(m,voice)
     if shadow==nil {return false}
-    if shadow.stream>=0 {m.streams[shadow.stream].loop=loop}
+    // A feed that went back to the pool, and maybe to another voice, is not this voice's any more.
+    if shadow.feed>=0 && m.feeds[shadow.feed].owner==voice {sync.atomic_store_explicit(&m.feeds[shadow.feed].loop,u32(loop),.Relaxed)}
     return voice_send(m,voice,{kind=.Voice_Loop,flag=loop})
 }
 // Moves the envelope of the voice to level (1 is its volume, 0 silence) over

@@ -756,9 +756,9 @@ this path. FBX 6 files are rejected with their version.
 WAV and Ogg Vorbis, mono or stereo) and writes `<name>.sound`, the root of its import
 ([identity](#identity-and-reimport)).
 
-- **Short: lossless, decoded on loading.** Under `SOUND_STREAM_SECONDS` its 16 bit samples, at
-  its frequency and channels, are stored `Lossless` (a 16-bit WAV arrives bit for bit; anything
-  else is rounded without dither) and decoded whole when it loads.
+- **Short: lossless, kept encoded.** Under `SOUND_STREAM_SECONDS` its 16 bit samples, at its
+  frequency and channels, are stored `Lossless` (a 16-bit WAV arrives bit for bit; anything else
+  is rounded without dither); the mixer keeps that coding in memory and each voice decodes it.
 - **Long: streamed.** From that limit it has the `Stream` flag: the mixer decodes it while it plays
   and it is never whole in memory. A WAV whose samples are exactly 16 bit ones is stored
   `Lossless`; an Ogg Vorbis, already lossy, and a WAV that 16 bits would round keep their file as

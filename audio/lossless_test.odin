@@ -1,5 +1,6 @@
 package mirai_audio
 
+import "core:fmt"
 import "core:testing"
 
 @(private="file") TONE_LONG :: #load("testdata/tone_long.ogg") // 2 s of 330 Hz at 32 kHz, mono
@@ -97,37 +98,46 @@ lossless_refuses_what_it_does_not_code_and_survives_damage :: proc(t:^testing.T)
         damaged[length]~=u8(next(&r,255)+1)
         decode(damaged,context.temp_allocator)
         m:=test_mixer(t,{stream_frames=1024})
-        if sound,stream_error:=sound_stream(m,damaged);stream_error==.None {
-            voice_play(m,sound)
-            for _ in 0..<12 {
-                test_render(m,1000)
-                mixer_update(m)
+        if sound,stream_error:=sound_stream(m,damaged);stream_error==.None {voice_play(m,sound)}
+        // Kept encoded: a cut file whose blocks point past its end is refused, a damaged block plays as silence.
+        cut,cut_error:=sound_load(m,file[:length])
+        if length>=LOSSLESS_HEADER && length<len(file) {testing.expect_value(t,cut_error,Error.Invalid_Data)}
+        if cut_error==.None {voice_play(m,cut)}
+        if kept,kept_error:=sound_load(m,damaged);kept_error==.None {
+            desc:=VOICE_DEFAULT
+            desc.loop=true;desc.pitch=3
+            voice_play(m,kept,desc)
+            desc.pitch=f32(0h7FC00000);desc.offset=f32(0h7F800000)
+            voice_play(m,kept,desc)
+        }
+        for _ in 0..<12 {
+            out:=test_render(m,1000)
+            for sample in out {
+                if !(abs(sample)<=4) {testing.expectf(t,false,"damage at byte %d plays %v",length,sample);break}
             }
+            mixer_update(m)
         }
         mixer_destroy(m)
     }
 }
 
-// Streamed, from the beginning or from an offset and looping, a lossless
-// sound plays the frames of its whole decode.
+// Streamed or kept encoded, from the beginning or from an offset and looping,
+// a lossless sound plays the frames of its whole decode, also while a decoder
+// thread fills its voices.
 @(test)
-lossless_stream_and_its_offsets_play_the_whole_decode :: proc(t:^testing.T) {
+lossless_voices_and_their_offsets_play_the_whole_decode :: proc(t:^testing.T) {
     defer free_all(context.temp_allocator)
     r:=u64(0x9E3779B97F4A7C15+3)
     FRAMES :: LOSSLESS_BLOCK_FRAMES*7+1234
     music:=lossless_music(FRAMES,2,&r)
     file,_:=lossless_encode(music,2,RATE,context.temp_allocator)
     whole,_:=decode(file,context.temp_allocator)
-
-    m:=test_mixer(t,{stream_frames=1024})
-    defer mixer_destroy(m)
-    sound,error:=sound_stream(m,file)
-    testing.expect_value(t,error,Error.None)
-    testing.expect(t,sound_frames(m,sound)==FRAMES && sound_channels(m,sound)==2 && sound_sample_rate(m,sound)==RATE)
     play :: proc(m:^Mixer,frames:int) -> []f32 {
         out:=make([]f32,frames*2,context.temp_allocator)
         for done:=0;done<frames;done+=173 {
             n:=min(173,frames-done)
+            // Faster than real time: a decoder thread may lag, so decode here too.
+            if m.feeder!=nil {mixer_decode(m)}
             mixer_render(m,out[done*2:][:n*2])
             mixer_update(m)
         }
@@ -142,20 +152,104 @@ lossless_stream_and_its_offsets_play_the_whole_decode :: proc(t:^testing.T) {
             }
         }
     }
-    voice:=voice_play(m,sound)
-    same(t,"from the beginning",play(m,FRAMES),whole.samples,0,FRAMES)
-    play(m,CHUNK_FRAMES*2)
-    testing.expect(t,!voice_valid(m,voice))
+    Mode :: enum {Stream,Kept,Kept_With_Thread}
+    for mode in Mode {
+        m:=test_mixer(t,{stream_frames=1024,decoder_thread=mode==.Kept_With_Thread})
+        defer mixer_destroy(m)
+        sound:Sound
+        error:Error
+        if mode==.Stream {sound,error=sound_stream(m,file)} else {sound,error=sound_load(m,file)}
+        testing.expect_value(t,error,Error.None)
+        testing.expect(t,sound_frames(m,sound)==FRAMES && sound_channels(m,sound)==2 && sound_sample_rate(m,sound)==RATE)
+        // What stays in memory is the file, not its decode.
+        if mode!=.Stream {testing.expect_value(t,mixer_stats(m).sound_bytes,len(file))}
+        voice:=voice_play(m,sound)
+        same(t,fmt.tprint(mode,"from the beginning"),play(m,FRAMES),whole.samples,0,FRAMES)
+        play(m,CHUNK_FRAMES*2)
+        testing.expect(t,!voice_valid(m,voice))
 
-    // An offset inside a block, looping back to the beginning at the end.
+        // An offset inside a block, looping back to the beginning at the end.
+        desc:=VOICE_DEFAULT
+        desc.offset=0.3125 // 15000 frames
+        desc.loop=true
+        voice=voice_play(m,sound,desc)
+        same(t,fmt.tprint(mode,"from an offset, looping"),play(m,FRAMES+20000),whole.samples,15000,FRAMES)
+        testing.expect(t,voice_stop(m,voice))
+        play(m,CHUNK_FRAMES*2)
+        // Past the end, or not a number, or before the beginning: the last frame, or the first.
+        for offset,i in ([?]f32{1e9,f32(0h7FC00000),-5}) {
+            desc=VOICE_DEFAULT
+            desc.offset=offset
+            voice=voice_play(m,sound,desc)
+            out:=play(m,CHUNK_FRAMES*2)
+            if i==0 {
+                testing.expect(t,out[0]==whole.samples[(FRAMES-1)*2] && out[2]==0,"an offset past the end plays the last frame")
+            } else {
+                same(t,fmt.tprint(mode,"offset",offset),out,whole.samples,0,FRAMES)
+                voice_stop(m,voice)
+                play(m,CHUNK_FRAMES)
+            }
+        }
+        testing.expect_value(t,mixer_stats(m).underruns,u64(0))
+    }
+}
+
+// Every voice of a sound kept encoded decodes it apart: voices at different
+// places, resampled and looping, sound as the same sound decoded in memory.
+@(test)
+encoded_sound_plays_like_its_decode_in_memory :: proc(t:^testing.T) {
+    defer free_all(context.temp_allocator)
+    r:=u64(0x9E3779B97F4A7C15+5)
+    FRAMES :: LOSSLESS_BLOCK_FRAMES*2+777
+    music:=lossless_music(FRAMES,1,&r)
+    file,_:=lossless_encode(music,1,44100,context.temp_allocator)
+    whole,_:=decode(file,context.temp_allocator)
+    memory:=test_mixer(t)
+    defer mixer_destroy(memory)
+    kept:=test_mixer(t,{voice_capacity=4,feed_capacity=5})
+    defer mixer_destroy(kept)
+    a,_:=sound_create(memory,whole.samples,1,44100)
+    b,error:=sound_load(kept,file)
+    testing.expect_value(t,error,Error.None)
+    voices:[4][2]Voice
+    for i in 0..<4 {
+        desc:=VOICE_DEFAULT
+        desc.loop=i%2==0;desc.pitch=0.75+f32(i)*0.3;desc.pan=f32(i)*0.5-0.75;desc.offset=f32(i)*0.04;desc.volume=0.25
+        voices[i]={voice_play(memory,a,desc),voice_play(kept,b,desc)}
+        testing.expect(t,voices[i][0]!=0 && voices[i][1]!=0)
+    }
+    worst:=f32(0)
+    for round in 0..<100 {
+        if round==60 {
+            // No more loops: it ends at the end of the round it is in, whatever was decoded ahead.
+            voice_set_loop(memory,voices[2][0],false)
+            voice_set_loop(kept,voices[2][1],false)
+        }
+        want:=test_render(memory,480)
+        got:=test_render(kept,480)
+        mixer_update(memory);mixer_update(kept)
+        for i in 0..<len(want) {worst=max(worst,abs(want[i]-got[i]))}
+    }
+    testing.expectf(t,worst<1e-6,"the voices of the encoded sound differ from those of its decode by %v",worst)
+    testing.expect_value(t,mixer_stats(kept).underruns,u64(0))
+    // The looping one still plays and holds its feed; the others gave theirs back.
+    testing.expect_value(t,mixer_stats(kept).voices_active,1)
+    testing.expect_value(t,kept.free_feed_count,4)
+    // A stolen voice keeps its feed until the audio thread lets it go: the spare one plays meanwhile.
     desc:=VOICE_DEFAULT
-    desc.offset=0.3125 // 15000 frames
-    desc.loop=true
-    voice=voice_play(m,sound,desc)
-    same(t,"from an offset, looping",play(m,FRAMES+20000),whole.samples,15000,FRAMES)
-    testing.expect(t,voice_stop(m,voice))
-    play(m,CHUNK_FRAMES*2)
-    testing.expect_value(t,mixer_stats(m).stream_underruns,u64(0))
+    desc.priority=1
+    testing.expect(t,voice_play(kept,b,desc)!=0 && voice_play(kept,b,desc)!=0 && voice_play(kept,b,desc)!=0)
+    testing.expect(t,voice_play(kept,b,desc)!=0,"a voice of lower priority is stolen")
+    test_render(kept,CHUNK_FRAMES)
+    mixer_update(kept)
+    testing.expect_value(t,kept.free_feed_count,1)
+    testing.expect(t,voice_play(kept,b,desc)!=0)
+    testing.expect_value(t,voice_play(kept,b,desc),Voice(0))
+    testing.expect_value(t,mixer_stats(kept).feeds_busy,u64(1))
+    sound_destroy(kept,b)
+    test_render(kept,CHUNK_FRAMES)
+    mixer_update(kept)
+    testing.expect(t,kept.free_feed_count==kept.pool_feeds && mixer_stats(kept).sounds==0 && mixer_stats(kept).sound_bytes==0)
 }
 
 // A Vorbis stream starts at an offset as the same file played from memory does.

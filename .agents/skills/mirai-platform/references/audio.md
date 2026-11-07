@@ -1,6 +1,7 @@
 # Package `audio`
 
-SDL-free mixing library (`std/base`, `core:sync`, `core:math`, `vendor:stb/vorbis`). The output
+SDL-free mixing library (`std/base`, `core:sync`, `core:thread`, `core:math`,
+`vendor:stb/vorbis`). The output
 device is in [`platform`](platform.md#audio-device).
 
 ## Mixer
@@ -9,26 +10,35 @@ device is in [`platform`](platform.md#audio-device).
 of sound. `mixer_render(m,out)` replaces `out` with interleaved f32 frames and does not clip: a mix
 louder than full scale exceeds 1.
 
-### Two threads
+### Threads
 
 `mixer_render` can run on an audio thread; everything else belongs to a single other thread (the
-game thread), with no shared locks:
+game thread), with no shared locks. With `decoder_thread`, the mixer has a third thread of its own
+that decodes [feeds](#feeds):
 
 - The game thread's requests enter a lock-free single-producer single-consumer queue; when full,
   the function returns false or a handle 0 and adds to `commands_dropped`.
 - The audio thread drains the queue at the start of each chunk of `CHUNK_FRAMES` (or less, if the
   request is shorter) and ramps across the chunk the changes of volume, pan, position, pause and
   buses.
-- What it reports (finished voices, released sounds, clock, underruns) comes back through atomics.
-  `mixer_update`, once per frame on the game thread, frees what finished and decodes ahead for
-  streams.
+- What it reports (finished voices, released sounds and feeds, clock, underruns) comes back
+  through atomics. `mixer_update`, once per frame on the game thread, frees what finished and,
+  without a decoder thread, decodes the feeds ahead.
 - As long as parameters do not change, one call or chunks of any size give the same samples.
 - `mixer_destroy` requires that the audio thread is no longer rendering.
 
 ## Sounds
 
-Interleaved f32 PCM, mono or stereo, at its own sample rate. `sound_create` copies the samples and
-`sound_load` decodes a WAV, an Ogg Vorbis or a lossless file whole, told apart by their first bytes.
+Mono or stereo, at its own sample rate. `sound_create` copies f32 samples. `sound_load` takes a
+WAV, an Ogg Vorbis or a lossless file, told apart by their first bytes:
+
+- **Kept encoded**: a lossless file whose blocks fit half a feed, and a WAV of 8 or 16 bits, are
+  copied as they are; each voice decodes them from a feed. Loading decodes nothing: it checks the
+  header and the block table (a file whose blocks point past its end is refused) and copies. A
+  damaged block plays as silence.
+- **Decoded whole** to interleaved f32 when it loads: any other WAV and every Ogg Vorbis (a Vorbis
+  decoder per voice would weigh more than the decode of a short sound; long ones are streams).
+- A WAV sample that is not a finite f32 decodes as 0.
 
 - **Lossless** (`lossless.odin`, written by `lossless_encode`): 16 bit samples coded as FLAC codes
   them, in blocks that decode on their own, each indexed so that a stream starts at any frame.
@@ -37,24 +47,40 @@ Interleaved f32 PCM, mono or stereo, at its own sample rate. `sound_create` copi
 - `sound_stream` decodes while playing and does not copy the file: it must stay in memory until
   the sound is destroyed and a later `mixer_update` frees it.
 - `sound_destroy` invalidates the handle at once and ends its voices; the memory is freed in a
-  later `mixer_update`, when the audio thread confirmed that it let go of it.
+  later `mixer_update`, once the audio thread let go of it and no decoder reads it.
 - `decode`, `wav_decode` and `vorbis_decode` work without a mixer. WAV is read in Odin (integer and
   float PCM, also `WAVE_FORMAT_EXTENSIBLE`; a truncated file delivers the complete frames); Vorbis
   with `stb_vorbis`, with all its memory in one allocator block. More than two channels give
   `Unsupported_Format`.
 
-### Streams
+### Feeds
 
-The game thread decodes in `mixer_update` (and when the voice starts) into a ring that the audio
-thread reads, without waits: `mixer_update` must be called more often than the ring's duration.
+A voice of a sound kept encoded, or of a stream, plays from a feed: a ring of decoded frames that a
+decoder fills ahead and the audio thread reads without waits (`feed.odin`). Every voice of a sound
+kept encoded takes a feed of a preallocated pool, with a decoder state of its own; a stream has one
+feed, with its own decoder and a larger ring.
 
+- **Who decodes.** The mixer's decoder thread wakes when a voice starts and every few milliseconds
+  while a feed plays. Without one, `voice_play` fills the new feed and `mixer_update` the rest: it
+  must then be called more often than a ring lasts. Whoever renders faster than real time (a
+  recording) calls `mixer_decode` before each render. One decoder at a time fills the feeds.
+- **Phases.** The game thread readies a free feed and hands it over; the decoder seeks and fills
+  it until the audio thread lets go of it; `mixer_update` takes it back. Neither the game thread
+  nor the audio thread touches a feed the decoder holds.
+- A voice whose first frames are not decoded yet waits silent; one whose ring empties goes silent
+  (`underruns`) and resumes where it was. With a decoder thread a voice may start a chunk late: a
+  `start_frame` far enough ahead is kept exactly.
+- A lossless block of a feed of the pool is decoded whole, once the rest of it fits the ring: a
+  seek is block exact plus a discard.
+- `offset` seeks before the ring fills; a loop starts over from the beginning and is sample exact,
+  also for interpolating. `voice_set_loop(false)` ends at the next end of the sound, whatever was
+  decoded ahead; turning a loop on applies at an end not decoded yet.
+- The pitch of a voice that plays from a feed has a cap of source frames per output frame.
+- No free feed: `voice_play` returns 0 (`feeds_busy`). A stolen voice holds its feed until the
+  audio thread lets go of it, which is why the pool is larger than the voices.
 - A stream plays in one voice at a time: another playback returns 0 (`streams_busy`) until a
-  `mixer_update` sees the voice finish, and then it starts from the beginning.
-- If the ring empties the voice goes silent (`stream_underruns`) and resumes when there is data.
-- `voice_set_loop(false)` applies at the next end of file that has not been decoded yet.
-- `offset` seeks the decoder before the ring fills; a loop starts over from the beginning.
-- A lossless stream decodes one block at a time into memory taken when the stream opens.
-- Its pitch has a cap of source frames per output frame and its voice is not stolen.
+  `mixer_update` sees its feed come back, and then it starts from the beginning. Its voice is not
+  stolen.
 
 ## Voices
 

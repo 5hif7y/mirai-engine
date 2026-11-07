@@ -66,6 +66,10 @@ mixer_rejects_a_desc_it_cannot_serve :: proc(t:^testing.T) {
     testing.expect(t,m==nil && error==.Invalid_Desc)
     m,error=mixer_create({voice_capacity=-4})
     testing.expect(t,m==nil && error==.Invalid_Desc)
+    for desc in ([?]Mixer_Desc{{feed_capacity=max(int)},{feed_frames=max(int)},{stream_frames=max(int)},{voice_capacity=max(int)},{command_capacity=max(int)},{feed_frames=-1}}) {
+        m,error=mixer_create(desc)
+        testing.expect(t,m==nil && error==.Invalid_Desc)
+    }
     m,error=mixer_create({})
     testing.expect(t,m!=nil && error==.None)
     defer mixer_destroy(m)

@@ -56,6 +56,17 @@ wav_decodes_every_sample_format_it_names :: proc(t:^testing.T) {
     testing.expect(t,pcm.channels==1 && pcm.sample_rate==8000 && len(pcm.samples)==5)
     want8:=[]f32{0,127.0/128,-1,0.5,-0.5}
     for value,i in want8 {test_near(t,pcm.samples[i],value,0)}
+    // Kept as it is in a mixer, its voices play the same samples.
+    {
+        m:=test_mixer(t)
+        defer mixer_destroy(m)
+        sound,load_error:=sound_load(m,test_wav(1,1,RATE,8,u8_data))
+        testing.expect(t,load_error==.None && mixer_stats(m).sound_bytes==len(u8_data))
+        voice_play(m,sound)
+        out:=test_render(m,6)
+        for value,i in want8 {test_near(t,out[i*2],value*f32(math.SQRT_TWO/2))}
+        test_near(t,out[10],0,0)
+    }
 
     s24:=[]u8{0,0,0, 0xff,0xff,0x7f, 0,0,0x80, 0,0,0x40, 0xff,0xff,0xff}
     pcm,error=wav_decode(test_wav(1,1,96000,24,s24),allocator)
@@ -80,6 +91,16 @@ wav_decodes_every_sample_format_it_names :: proc(t:^testing.T) {
     pcm,error=wav_decode(test_wav(3,1,44100,64,bytes_of(f64_data)),allocator)
     testing.expect_value(t,error,Error.None)
     for value,i in f64_data {test_near(t,pcm.samples[i],f32(value),0)}
+
+    // What is not a number, or does not fit an f32, is silence: it would stay in every filter it reached.
+    hostile:=[]f64le{f64le(transmute(f64)u64(0x7FF8_0000_0000_0001)),f64le(transmute(f64)u64(0x7FF0_0000_0000_0000)),1e300,-0.5}
+    pcm,error=wav_decode(test_wav(3,1,44100,64,bytes_of(hostile)),allocator)
+    testing.expect_value(t,error,Error.None)
+    for value,i in ([?]f32{0,0,0,-0.5}) {test_near(t,pcm.samples[i],value,0)}
+    nan32:=[]u32le{0x7FC0_0000,0xFF80_0000,0x3F00_0000}
+    pcm,error=wav_decode(test_wav(3,1,44100,32,bytes_of(nan32)),allocator)
+    testing.expect_value(t,error,Error.None)
+    for value,i in ([?]f32{0,0,0.5}) {test_near(t,pcm.samples[i],value,0)}
 
     // The extensible header, with a chunk of odd length before it.
     pcm,error=wav_decode(test_wav(1,2,22050,16,bytes_of(s16),extensible=true,junk=true),allocator)
@@ -187,6 +208,8 @@ sound_is_loaded_from_a_wav_or_an_ogg_file :: proc(t:^testing.T) {
     wav,error:=sound_load(m,test_wav(1,2,RATE,16,bytes_of(ramp)))
     testing.expect_value(t,error,Error.None)
     testing.expect(t,sound_frames(m,wav)==100 && sound_channels(m,wav)==2 && sound_sample_rate(m,wav)==RATE)
+    // A WAV of 16 bits keeps its samples as they are, which every voice decodes.
+    testing.expect_value(t,mixer_stats(m).sound_bytes,len(ramp)*2)
     voice_play(m,wav)
     out:=test_render(m,120)
     for i in 0..<120 {
@@ -195,6 +218,8 @@ sound_is_loaded_from_a_wav_or_an_ogg_file :: proc(t:^testing.T) {
     }
     ogg,ogg_error:=sound_load(m,SINE_MONO)
     testing.expect_value(t,ogg_error,Error.None)
+    // An Ogg Vorbis is decoded whole.
+    testing.expect_value(t,mixer_stats(m).sound_bytes,len(ramp)*2+22050*4)
     testing.expect(t,sound_frames(m,ogg)==22050 && sound_channels(m,ogg)==1 && sound_sample_rate(m,ogg)==44100)
     test_near(t,sound_seconds(m,ogg),0.5)
     // Played by a 48 kHz mixer it is still 440 Hz.

@@ -578,6 +578,15 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
         // those that travel, whether they loop or not; an entry clip plays whatever the body does.
         filter_stationary:=info.stationary_speed>0 && has_goal && !entering && db.still_modes&bit!=0 && db.moving_modes&bit!=0
         moving:=filter_stationary && linalg.length(velocity)>info.stationary_speed
+        // A body slow now that its trajectory carries on within the first horizon moves too: one
+        // that turns around passes through rest for a tick, where the clips that stand would plant it.
+        trajectory:lib.Match_Trajectory
+        traced:=false
+        if filter_stationary && !moving {
+            trajectory=lib.match_trajectory(velocity,goal.desired,goal.acceleration,goal.braking,facing,goal.facing,goal.turn_rate,goal.wall,&m.trail)
+            traced=true
+            moving=linalg.length(trajectory.positions[0])>info.stationary_speed*lib.MATCH_HORIZON[0]
+        }
         // A body that starts or stops searches in that tick instead of waiting for the interval: a
         // loop that does not move as the body does would hold its legs still, or walk in place. A
         // clip that plays once goes on until it ends or a search leaves it.
@@ -587,7 +596,7 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
             m.timer=info.interval
             request:=lib.Match_Request{query=lib.match_features(db,row) if row>=0 else {},modes=bit,min_rate=info.min_rate,max_rate=info.max_rate,rate=m.rate,entry=entering}
             request.filter_stationary,request.moving=filter_stationary,moving
-            request.trajectory=lib.match_trajectory(velocity,goal.desired,goal.acceleration,goal.braking,facing,goal.facing,goal.turn_rate,goal.wall,&m.trail)
+            request.trajectory=trajectory if traced else lib.match_trajectory(velocity,goal.desired,goal.acceleration,goal.braking,facing,goal.facing,goal.turn_rate,goal.wall,&m.trail)
             // A clip that ends is left whole: a row of it a little earlier would play its tail
             // again.
             whole:=ending || info.keep_loop_phase && current>=0 && db.ranges[current].loop

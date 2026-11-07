@@ -55,7 +55,7 @@ planet_tick :: proc(f:^Planet_Test,move:[3]f32,jump:=false) {
     state:=sim.character_state(&f.w,f.ch)
     given:=input.Move_Input{move=move,buttons=jump?input.action_bit(TEST_JUMP):0}
     gravity:=sim.body_gravity(&f.w,sim.character_body(&f.w,f.ch))
-    m:=locomotion_move(&f.loco,f.walk,{},nil,character_state_of(state),state.up_frame,given,TEST_JUMP,TEST_SPRINT,sim.character_velocity(&f.w,f.ch),gravity,1.0/60)
+    m:=locomotion_move(&f.loco,f.walk,{},nil,nil,character_state_of(state),state.up_frame,given,TEST_JUMP,TEST_SPRINT,TEST_CROUCH,sim.character_velocity(&f.w,f.ch),gravity,1.0/60)
     sim.character_set_move(&f.w,f.ch,m)
     sim.world_step(&f.w,1.0/60)
 }

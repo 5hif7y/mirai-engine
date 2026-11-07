@@ -26,6 +26,22 @@ root_motion_is_carried_into_the_rig_by_the_bones_above_the_root :: proc(t:^testi
     testing.expect(t,kept==mm.Vec3{1,2,3} && same==turn)
 }
 
+// A bound rig's first slot is its entity, with the Transform it had when bound as its rest: a
+// character spawned facing back still gets the root motion in its own axes, which the game turns
+// by its current rotation, not by the one it was spawned with.
+@(test)
+root_motion_leaves_out_the_transform_the_entity_was_bound_with :: proc(t:^testing.T) {
+    state:Playing;defer playing_free(&state)
+    append(&state.targets,0,base.name_hash("Armature"),base.name_hash("Armature/root"))
+    append(&state.parents,-1,0,1)
+    spawned:=mm.Transform{{3,0,5},mm.quat_axis_angle({0,1,0},mm.PI),{1,1,1}}
+    append(&state.rest,spawned,mm.TRANSFORM_IDENTITY,mm.TRANSFORM_IDENTITY)
+    turn:=mm.quat_axis_angle({0,1,0},.3)
+    moved,turned:=root_motion_to_rig(&state,base.name_hash("Armature/root"),{0,0,0.1},turn)
+    testing.expectf(t,linalg.length(moved-mm.Vec3{0,0,0.1})<1e-6,"forward in the clip is forward of the entity: %v",moved)
+    testing.expectf(t,mm.quat_angle(turned,turn)<1e-5,"its turn is its own: %v",turned)
+}
+
 @(test)
 selected_clip_root_metadata_drives_extraction_and_in_place_without_a_rebuilt_table :: proc(t:^testing.T) {
     problems:core.Problems

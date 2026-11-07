@@ -10,8 +10,9 @@ import sim "plugins:physics/runtime/sim"
 // How a Character moves by its Move_Input. The Character holds its mode and
 // the state between ticks; each mode has its parameters in a component of its
 // own, and an entity can use the modes whose components it has: Walk for
-// walking and falling, Fly for flying, Swim for swimming, the component of a
-// mode a game declares (a constant of Locomotion_Mode with @(name_requires):
+// walking, falling and crouching, Slide for sliding, Mantle for mantling
+// (locomotion_moves.odin), Fly for flying, Swim for swimming, the component of
+// a mode a game declares (a constant of Locomotion_Mode with @(name_requires):
 // climbing). Before every step locomotion_step writes the Character_Move of
 // the character from its input and from the ground and the fluid the last step
 // found, in the frame of its vertical (core.Vertical): the look turns about
@@ -31,6 +32,11 @@ Locomotion_Mode :: distinct u16
 @(name_requires="Walk") MODE_WALKING :: Locomotion_Mode(1)
 @(name_requires="Fly") MODE_FLYING :: Locomotion_Mode(2)
 @(name_requires="Swim") MODE_SWIMMING :: Locomotion_Mode(3)
+@(name_requires="Walk") MODE_CROUCHING :: Locomotion_Mode(4)
+@(name_requires="Slide") MODE_SLIDING :: Locomotion_Mode(5)
+@(name_requires="Mantle") MODE_MANTLING :: Locomotion_Mode(6)
+// The last mode of the engine: those after it are of games, written by them.
+MODE_ENGINE_LAST :: MODE_MANTLING
 
 // What forward is for the seat that drives a Character: where its Move_Input
 // comes from while a seat drives it.
@@ -58,7 +64,7 @@ Layered_Move :: struct {
     id:u32,                             // meaning given by the game
 }
 
-@(component,replicated,description="The character can walk, jump and fall (modes walking and falling of its Character).")
+@(component,replicated,description="The character can walk, jump, fall and crouch (modes walking, falling and crouching of its Character).")
 Walk :: struct {
     max_speed:f32 `mirai:"min=0,unit=m/s"`,
     sprint_speed:f32 `mirai:"min=0,unit=m/s"`,     // while the sprint action is held; at most max_speed: it does not sprint
@@ -68,9 +74,11 @@ Walk :: struct {
     air_control:f32 `mirai:"min=0,max=1"`,  // share of the acceleration and of the traction left in the air
     jump_height:f32 `mirai:"min=0,unit=m"`,
     coyote_time:f32 `mirai:"min=0,unit=s"`, // after walking off a ledge, in which a jump still starts
+    crouch_speed:f32 `mirai:"min=0,unit=m/s"`,  // top speed while crouched
+    crouch_height:f32 `mirai:"min=0,unit=m"`,   // of its capsule crouched or sliding, from the feet to the top of the head; 0: it does not crouch
 }
 
-WALK_DEFAULT :: Walk{max_speed=5,acceleration=30,braking=40,air_control=0.3,jump_height=1.2,coyote_time=0.1}
+WALK_DEFAULT :: Walk{max_speed=5,acceleration=30,braking=40,air_control=0.3,jump_height=1.2,coyote_time=0.1,crouch_speed=2.5,crouch_height=1.2}
 
 @(component,replicated,description="The character can fly (mode flying of its Character): toward the move in the axes of the look, without gravity.")
 Fly :: struct {
@@ -94,6 +102,7 @@ Locomotion_Request_Kind :: enum u8 {
     Add_Move,
     Remove_Moves, // those of the id of the move
     Set_Mode,
+    Set_Gravity_Scale, // the gravity_scale of the Character until asked again: low gravity while charging a dash
 }
 
 Locomotion_Request :: struct {
@@ -101,7 +110,10 @@ Locomotion_Request :: struct {
     kind:Locomotion_Request_Kind,
     move:Layered_Move,
     mode:Locomotion_Mode,
+    gravity_scale:f32,
 }
+
+GRAVITY_SCALE_MAX :: f32(1000)
 
 // The game asks for layered moves and modes by pushing here; locomotion_step
 // takes them before it moves the characters.
@@ -119,11 +131,17 @@ remove_moves :: proc(requests:^Locomotion_Requests,e:core.Entity,id:u32) {
 set_mode :: proc(requests:^Locomotion_Requests,e:core.Entity,mode:Locomotion_Mode) {
     core.push(&requests.queue,Locomotion_Request{entity=e,kind=.Set_Mode,mode=mode})
 }
+// Scales the gravity of a Character until asked again (its authored gravity_scale is the one it
+// starts with): the locomotion is the only writer of the Character, so a game changes its gravity
+// for a while (low gravity while charging, a glide) through here.
+set_gravity_scale :: proc(requests:^Locomotion_Requests,e:core.Entity,scale:f32) {
+    core.push(&requests.queue,Locomotion_Request{entity=e,kind=.Set_Gravity_Scale,gravity_scale=scale})
+}
 
 @(step="fixed",stage="simulate",before="physics_prepare")
 locomotion_step :: proc(
     characters:^core.Table(Character),moves:^core.Table(Character_Move),inputs:^core.Table(input.Move_Input),
-    walks:core.Read(Walk),flights:core.Read(Fly),swims:core.Read(Swim),found:core.Read(Character_State),motions:core.Read(core.Motion),
+    walks:core.Read(Walk),flights:core.Read(Fly),swims:core.Read(Swim),slides:core.Read(Slide),mantles:core.Read(Mantle),found:core.Read(Character_State),motions:core.Read(core.Motion),
     locals:core.Read(core.Transform),parents:core.Read(core.Parent),remotes:core.Read(core.Remote),physics:core.Ref(Physics_State),
     paces:core.Read(core.Own_Pace),walk_actions:input.Input_Of(Walk_Action),requests:^Locomotion_Requests,time:core.Time,clock:core.Clock,problems:^core.Problems,
 ) {
@@ -144,11 +162,17 @@ locomotion_step :: proc(
         case .Remove_Moves:
             moves_remove(c,asked.move.id)
         case .Set_Mode:
-            if missing:=mode_missing(asked.mode,asked.entity,walks,flights,swims);missing!="" {
+            if missing:=mode_missing(asked.mode,asked.entity,walks,flights,swims,slides,mantles);missing!="" {
                 core.report(problems,asked.entity,"locomotion.mode_component","the mode %s was asked of an entity without %s; give it a %s, which holds the parameters of that mode",mode_label(asked.mode),missing,missing)
                 continue
             }
             c.mode,c.jumped,c.coyote=asked.mode,false,0
+        case .Set_Gravity_Scale:
+            if !(abs(asked.gravity_scale)<=GRAVITY_SCALE_MAX) {
+                core.report(problems,asked.entity,"locomotion.request","a gravity scale of %v was asked; ask for a finite one of at most %v either way",asked.gravity_scale,GRAVITY_SCALE_MAX)
+                continue
+            }
+            c.gravity_scale=asked.gravity_scale
         }
     }
     if !time.playing || time.dt<=0 {return}
@@ -182,20 +206,40 @@ locomotion_step :: proc(
         fly,_:=core.get(flights,e)
         swim:Maybe(Swim)
         if found_swim,has:=core.get(swims,e);has {swim=found_swim}
-        if missing:=mode_missing(c.mode,e,walks,flights,swims);missing!="" {
+        slide:Maybe(Slide)
+        if found_slide,has:=core.get(slides,e);has {slide=found_slide}
+        mantle,mantles_too:=core.get(mantles,e)
+        jump:=input.action_of(walk_actions,.Jump)
+        // A jump facing a ledge climbs it instead, before the locomotion takes the jump.
+        if mantles_too && walk!=nil && (c.mode==MODE_WALKING || c.mode==MODE_FALLING || c.mode==MODE_CROUCHING) && !overriding(c) && physics.ptr!=nil && physics.ready {
+            if wanted,from_ground:=mantle_wanted(c,mantle,ground,given,jump);wanted {
+                l:=link_find(physics.ptr,e)
+                if placed,ok:=core.world_of(locals,parents,e);ok && l!=nil && l.kind==.Character {
+                    facing:=mm.quat_rotate(frame*mm.quat_axis_angle({0,1,0},given.look_yaw),{0,0,-1})
+                    if to,height,found_ledge:=ledge_find(&physics.world,l.character,facing,mantle,from_ground);found_ledge {mantle_start(c,placed.position,to,height)}
+                }
+            }
+        }
+        if missing:=mode_missing(c.mode,e,walks,flights,swims,slides,mantles);missing!="" {
             core.report(problems,e,"locomotion.mode_component","its Character is in the mode %s and it has no %s; give it a %s, which holds the parameters of that mode, or start it in another mode",mode_label(c.mode),missing,missing)
             // It falls when it can, and otherwise stands.
             if core.has(walks,e) {c.mode=MODE_FALLING}
         }
-        if mode_missing(c.mode,e,walks,flights,swims)!="" {
+        if mode_missing(c.mode,e,walks,flights,swims,slides,mantles)!="" {
             next.value={}
-        } else if c.mode>MODE_SWIMMING {
+        } else if c.mode==MODE_MANTLING {
+            placed,_:=core.world_of(locals,parents,e)
+            next.value=mantle_move(c,mantle,frame,placed.position,given,jump,time.dt*pace)
+            move_paced(&next.value,c,pace,motion.linear,ground,frame)
+        } else if c.mode>MODE_ENGINE_LAST {
             if written:=core.get(moves,e);written!=nil {next=written^}
             layers_apply(c,&next.value,c.traction_force,pace)
             move_paced(&next.value,c,pace,motion.linear,ground,frame)
         } else {
-            next.value=locomotion_move_paced(c,walk,fly,swim,ground,frame,given,input.action_of(walk_actions,.Jump),input.action_of(walk_actions,.Sprint),motion.linear,gravity_of_entity(physics,e)*c.gravity_scale,time.dt,pace)
+            next.value=locomotion_move_paced(c,walk,fly,swim,slide,ground,frame,given,jump,input.action_of(walk_actions,.Sprint),input.action_of(walk_actions,.Crouch),motion.linear,gravity_of_entity(physics,e)*c.gravity_scale,time.dt,pace)
         }
+        next.height=0
+        if walking,ok:=walk.?;ok && c.crouched {next.height=walking.crouch_height}
         if row:=core.row_of(moves,e);row<0 {
             core.add(moves,e,next)
         } else if moves.values[row]!=next {core.at(moves,row)^=next}
@@ -217,11 +261,12 @@ SPRINT_FORWARD :: f32(0.5)
 
 // The top speed of walking for this input: sprint_speed while sprinting
 // forward (within 60° of the look) when it is faster, less backward_slowdown by
-// how straight back from the look the move points (-Z of the move is forward).
-walk_speed :: proc "contextless" (walk:Walk,move_input:input.Move_Input,sprinting:bool) -> f32 {
-    speed:=walk.max_speed
+// how straight back from the look the move points (-Z of the move is forward);
+// crouched, crouch_speed, which sprint does not change.
+walk_speed :: proc "contextless" (walk:Walk,move_input:input.Move_Input,sprinting:bool,crouched:=false) -> f32 {
+    speed:=crouch_speed(walk) if crouched else walk.max_speed
     l:=linalg.length(move_input.move.xz)
-    if sprinting && walk.sprint_speed>speed && l>0 && -move_input.move.z/l>=SPRINT_FORWARD {speed=walk.sprint_speed}
+    if !crouched && sprinting && walk.sprint_speed>speed && l>0 && -move_input.move.z/l>=SPRINT_FORWARD {speed=walk.sprint_speed}
     if l>0 && walk.backward_slowdown>0 {
         speed*=1-clamp(walk.backward_slowdown,0,1)*max(move_input.move.z/l,0)
     }
@@ -235,7 +280,7 @@ walk_speed :: proc "contextless" (walk:Walk,move_input:input.Move_Input,sprintin
 // time of the world (dt is that of its own time). walking and swim are nil
 // for a character that cannot walk or swim: one that only swims stays in the
 // mode out of the water.
-locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint:input.Action,velocity,gravity:[3]f32,dt:f32,pace:f32=1) -> (move:sim.Character_Move) {
+locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),sliding:Maybe(Slide),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint,crouch:input.Action,velocity,gravity:[3]f32,dt:f32,pace:f32=1) -> (move:sim.Character_Move) {
     up:=mm.quat_rotate(frame,{0,1,0})
     across :: proc "contextless" (v,up:[3]f32) -> [3]f32 {return v-up*linalg.dot(v,up)}
     look:=frame*mm.quat_axis_angle({0,1,0},move_input.look_yaw)*mm.quat_axis_angle({1,0,0},move_input.look_pitch)
@@ -259,7 +304,7 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
         } else if .In_Fluid in ground.fluid && deep {loco.mode=MODE_SWIMMING}
     }
     if swim,swims:=swim.?;swims && loco.mode==MODE_SWIMMING {
-        loco.jumped,loco.coyote=false,0
+        loco.jumped,loco.coyote,loco.crouched=false,0,false
         current:=ground.fluid_velocity
         relative:=v-current
         aim:=move_input.move
@@ -288,35 +333,75 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
             move.flags={.Airborne}
         }
     } else if loco.mode==MODE_FLYING {
-        loco.jumped,loco.coyote=false,0
+        loco.jumped,loco.coyote,loco.crouched=false,0,false
         aim:=move_input.move
         if l:=linalg.length(aim);l>1 {aim/=l}
         aim=mm.quat_rotate(look,aim)
         move.air={mm.approach_point(v,aim*fly.speed,fly.acceleration*dt),traction}
         move.flags={.Airborne,.Drive_Vertical,.No_Gravity}
     } else {
+        slide,slides:=sliding.?
+        crouches:=walk.crouch_height>0
+        crouch_down:=crouches && move_input.buttons&input.action_bit(crouch)!=0
+        crouch_pressed:=crouch_down && !loco.crouch_held
+        loco.crouch_held=crouch_down
+        if !crouch_down {loco.crouch_lock=false}
+        loco.slide_cooldown=max(loco.slide_cooldown-dt,0)
+        was:=loco.mode
         if ground.standing {
-            loco.jumped,loco.coyote=false,0
-        } else if loco.mode==MODE_WALKING && !loco.jumped {
-            loco.coyote=walk.coyote_time
-        } else {loco.coyote=max(loco.coyote-dt,0)}
-        loco.mode=ground.standing?MODE_WALKING:MODE_FALLING
+            loco.jumped,loco.coyote,loco.air_time=false,0,0
+        } else {
+            loco.air_time+=dt
+            if (was==MODE_WALKING || was==MODE_CROUCHING || was==MODE_SLIDING) && !loco.jumped {
+                loco.coyote=walk.coyote_time
+            } else {loco.coyote=max(loco.coyote-dt,0)}
+        }
 
         n:=ground.ground_normal
         if linalg.dot(n,up)<=0 {n=up}
-        speed:=walk_speed(walk,move_input,move_input.buttons&input.action_bit(sprint)!=0)
-        desired:[3]f32
-        if wish!={} {
-            along:=wish-up*(linalg.dot(wish,n)/linalg.dot(n,up))
-            desired=along*(speed*linalg.length(wish)/linalg.length(along))
-        }
         relative:=v-ground.ground_velocity
         current:=relative-n*linalg.dot(relative,n)
-        rate:=desired=={}?walk.braking:walk.acceleration
-        move.ground={mm.approach_point(current,desired,rate*dt),traction}
+        // A slide starts from a crouch at a run or a landing with crouch held, goes on along the
+        // ground and ends standing, or crouched when crouch is held without a move.
+        slide_end :: proc "contextless" (loco:^Character,slide:Slide,crouch_down,moving:bool) {
+            loco.mode,loco.slide_cooldown=MODE_WALKING,slide.cooldown
+            if crouch_down && moving {loco.crouch_lock=true}
+        }
+        if was==MODE_SLIDING && !(slides && crouches && ground.standing) {
+            slide_end(loco,slide,crouch_down,wish!={})
+            if !ground.standing {loco.mode=MODE_FALLING}
+        }
+        if slides && crouches && ground.standing && loco.mode!=MODE_SLIDING && loco.slide_cooldown<=0 && !loco.crouch_lock {
+            speed:=linalg.length(current)
+            if crouch_pressed && speed>=slide.start_speed || was==MODE_FALLING && crouch_down && speed>=slide.land_speed {
+                slide_start(loco,current,up)
+                loco.mode=MODE_SLIDING
+            }
+        }
+        if loco.mode==MODE_SLIDING {
+            velocity,ended:=slide_velocity(loco,slide,n,up,current,wish,gravity,dt)
+            move.ground={velocity,traction}
+            if ended {slide_end(loco,slide,crouch_down,wish!={})}
+        }
+        if loco.mode!=MODE_SLIDING {
+            crouching:=ground.standing && (crouch_down && !loco.crouch_lock || ground.cramped)
+            loco.mode=ground.standing?(crouching?MODE_CROUCHING:MODE_WALKING):MODE_FALLING
+            if move.ground.force==0 {
+                speed:=walk_speed(walk,move_input,move_input.buttons&input.action_bit(sprint)!=0,loco.mode==MODE_CROUCHING)
+                desired:[3]f32
+                if wish!={} {
+                    along:=wish-up*(linalg.dot(wish,n)/linalg.dot(n,up))
+                    desired=along*(speed*linalg.length(wish)/linalg.length(along))
+                }
+                rate:=desired=={}?walk.braking:walk.acceleration
+                move.ground={mm.approach_point(current,desired,rate*dt),traction}
+            }
+        }
+        loco.crouched=loco.mode==MODE_SLIDING || ground.standing && crouch_down && !loco.crouch_lock
 
         move.air={velocity=across(v,up)}
         if wish!={} && walk.air_control>0 {
+            speed:=walk_speed(walk,move_input,move_input.buttons&input.action_bit(sprint)!=0)
             move.air={mm.approach_point(move.air.velocity,wish*speed,walk.air_control*walk.acceleration*dt),walk.air_control*traction}
             // Ground too steep to walk is not climbed from the air either.
             if ground.ground_normal!={} && !ground.walkable && ground.ground_distance<=loco.step_height {
@@ -329,8 +414,8 @@ locomotion_move :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(S
             base:=linalg.dot(ground.standing?v-ground.ground_velocity:v,up)
             move.launch=up*(cmath.sqrt(2*linalg.length(gravity)*walk.jump_height)-base)
             if ground.standing {move.air={velocity=across(v,up)}}
-
-            loco.mode,loco.jumped,loco.coyote=MODE_FALLING,true,0
+            if loco.mode==MODE_SLIDING {loco.slide_cooldown=slide.cooldown}
+            loco.mode,loco.jumped,loco.coyote,loco.crouched=MODE_FALLING,true,0,false
         }
     }
     layers_apply(loco,&move,traction,pace)
@@ -401,11 +486,11 @@ move_paced :: proc "contextless" (move:^sim.Character_Move,loco:^Character,pace:
 // The Character_Move of one tick of the world for a character whose time runs
 // pace times it (core.pace_of): locomotion_move in its own time, from the
 // ground, the velocity and the dt of the world.
-locomotion_move_paced :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint:input.Action,velocity,gravity:[3]f32,dt,pace:f32) -> (move:sim.Character_Move) {
+locomotion_move_paced :: proc(loco:^Character,walking:Maybe(Walk),fly:Fly,swim:Maybe(Swim),sliding:Maybe(Slide),ground:Character_State,frame:mm.Quat,move_input:input.Move_Input,jump,sprint,crouch:input.Action,velocity,gravity:[3]f32,dt,pace:f32) -> (move:sim.Character_Move) {
     own:=ground
     own.ground_velocity/=pace
     own.fluid_velocity/=pace
-    move=locomotion_move(loco,walking,fly,swim,own,frame,move_input,jump,sprint,velocity/(loco.pace>0?loco.pace:1),gravity,dt*pace,pace)
+    move=locomotion_move(loco,walking,fly,swim,sliding,own,frame,move_input,jump,sprint,crouch,velocity/(loco.pace>0?loco.pace:1),gravity,dt*pace,pace)
     move_paced(&move,loco,pace,velocity,ground,frame)
     return
 }
@@ -485,11 +570,17 @@ water_depth :: proc "contextless" (loco:^Character,ground:Character_State) -> f3
 
 // The component a mode of the engine needs that the entity lacks; "" when it has it or the mode is of a game.
 @(private)
-mode_missing :: proc(mode:Locomotion_Mode,e:core.Entity,walks:core.Read(Walk),flights:core.Read(Fly),swims:core.Read(Swim)) -> string {
+mode_missing :: proc(mode:Locomotion_Mode,e:core.Entity,walks:core.Read(Walk),flights:core.Read(Fly),swims:core.Read(Swim),slides:core.Read(Slide),mantles:core.Read(Mantle)) -> string {
     switch mode {
-    case MODE_FALLING,MODE_WALKING: if !core.has(walks,e) {return "Walk"}
+    case MODE_FALLING,MODE_WALKING,MODE_CROUCHING: if !core.has(walks,e) {return "Walk"}
     case MODE_FLYING:               if !core.has(flights,e) {return "Fly"}
     case MODE_SWIMMING:             if !core.has(swims,e) {return "Swim"}
+    case MODE_SLIDING:
+        if !core.has(walks,e) {return "Walk"}
+        if !core.has(slides,e) {return "Slide"}
+    case MODE_MANTLING:
+        if !core.has(walks,e) {return "Walk"}
+        if !core.has(mantles,e) {return "Mantle"}
     }
     return ""
 }
@@ -501,6 +592,9 @@ mode_label :: proc(mode:Locomotion_Mode) -> string {
     case MODE_WALKING: return "walking"
     case MODE_FLYING:  return "flying"
     case MODE_SWIMMING: return "swimming"
+    case MODE_CROUCHING: return "crouching"
+    case MODE_SLIDING: return "sliding"
+    case MODE_MANTLING: return "mantling"
     }
     return "of the game"
 }

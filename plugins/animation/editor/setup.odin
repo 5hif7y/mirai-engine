@@ -78,9 +78,9 @@ setup_register :: proc(s:^editor.Session) {
 // What a clip of the library is by the words of its name. Landing enters walking and Jumping enters
 // falling; the rest are what a mode plays.
 @(private)
-Setup_Class :: enum u8 {None,Walking,Landing,Falling,Jumping,Swimming,Flying}
+Setup_Class :: enum u8 {None,Walking,Landing,Falling,Jumping,Swimming,Flying,Crouching,Sliding}
 @(private)
-SETUP_CLASS_MODES :: [Setup_Class]string{.None="",.Walking="walking",.Landing="walking",.Falling="falling",.Jumping="falling",.Swimming="swimming",.Flying="flying"}
+SETUP_CLASS_MODES :: [Setup_Class]string{.None="",.Walking="walking",.Landing="walking",.Falling="falling",.Jumping="falling",.Swimming="swimming",.Flying="flying",.Crouching="crouching",.Sliding="sliding"}
 @(private)
 Setup_Clip :: struct {name:string,class:Setup_Class,mode:u16,loop:bool,speed,duration:f32,root,told:bool}
 @(private)
@@ -88,7 +88,8 @@ Setup_Clips :: struct {all:[dynamic]Setup_Clip,locomotion:[dynamic]Setup_Clip,wa
 
 // The class of a clip by the words of its name (split at separators, case and digits, so a word
 // starts a token: Walk_Fwd, JogStart, MM_Land): land, a fall or air loop, jump or takeoff, swim,
-// fly, and idle, stand, walk, jog, run or sprint. A start, stop, turn or pivot does not loop.
+// fly, slide, crouch, and idle, stand, walk, jog, run or sprint. A start, stop, turn or pivot does
+// not loop; the start of a slide is the entry of its mode.
 @(private)
 setup_class :: proc(name:string) -> (class:Setup_Class,loop:bool) {
     words:=make([dynamic]string,context.temp_allocator)
@@ -113,6 +114,8 @@ setup_class :: proc(name:string) -> (class:Setup_Class,loop:bool) {
     case has(words[:],"jump") || takeoff: return .Jumping,false
     case has(words[:],"swim"): return .Swimming,loop
     case has(words[:],"fly","flight","hover"): return .Flying,loop
+    case has(words[:],"slid"): return .Sliding,loop
+    case has(words[:],"crouch"): return .Crouching,loop
     case has(words[:],"idle","stand","breath","walk","jog","run","sprint"): return .Walking,loop
     }
     return .None,false
@@ -501,7 +504,7 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
         samples:=make([dynamic]anim.Match_Sample,call.allocator)
         for clip in clips.locomotion {
             if setup_blended(p,blend_count,blend_members,clip.name) {continue}
-            entry:=clip.class==.Landing || clip.class==.Jumping
+            entry:=clip.class==.Landing || clip.class==.Jumping || clip.class==.Sliding && !clip.loop
             source:=anim.Match_Source{modes=u32(1)<<clip.mode,loop=clip.loop,entry=entry,speed=clip.speed if clip.told else 0};base.text_set(source.clip[:],clip.name)
             append(&sources,source)
         }
@@ -643,7 +646,7 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
         if listed>0 {serial.text_write_raw(out,",")};listed+=1
         mode,_:=locomotion_mode_name(modes,clip.mode)
         serial.text_write_raw(out,"{");api.write_text(out,"clip",clip.name,true);api.write_text(out,"mode",mode)
-        api.write_bool(out,"entry",clip.class==.Landing || clip.class==.Jumping);api.write_bool(out,"loop",clip.loop)
+        api.write_bool(out,"entry",clip.class==.Landing || clip.class==.Jumping || clip.class==.Sliding && !clip.loop);api.write_bool(out,"loop",clip.loop)
         api.write_key(out,"speed");api.write_number(out,clip.speed)
         if clip.told {api.write_bool(out,"told",true)}
         serial.text_write_raw(out,"}")
@@ -715,7 +718,7 @@ setup_locomotion_detail :: proc(clips:[]Setup_Clip,modes:[]core.Name_Info,shown:
             count+=1
             if count>shown {continue}
             if count>1 {strings.write_string(&b,", ")}
-            fmt.sbprintf(&b,"%s%s",clip.name," (entry)" if clip.class==.Landing || clip.class==.Jumping else "")
+            fmt.sbprintf(&b,"%s%s",clip.name," (entry)" if clip.class==.Landing || clip.class==.Jumping || clip.class==.Sliding && !clip.loop else "")
         }
         if count>shown {fmt.sbprintf(&b," and %d more",count-shown)}
     }

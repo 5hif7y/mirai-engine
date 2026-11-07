@@ -366,3 +366,94 @@ look_offset_follows_the_pitch :: proc(t:^testing.T) {
         testing.expectf(t,linalg.length(got-c.offset)<1e-5,"pitch %v gives %v",c.pitch,got)
     }
 }
+
+// The keys of a channel join by cubic Hermite with their slopes, and hold their first and last
+// values outside them.
+@(test)
+a_shake_channel_joins_its_keys_by_their_slopes :: proc(t:^testing.T) {
+    c:Shake_Channel
+    c.keys[0],c.keys[1],c.keys[2]={time=0.5,value=0,slope=0},{time=1.5,value=2,slope=0},{time=2.5,value=0,slope=-4}
+    c.count=3
+    testing.expect(t,shake_channel_at(c,0)==0 && shake_channel_at(c,3)==0,"before and after its keys, their values")
+    testing.expectf(t,abs(shake_channel_at(c,1)-1)<1e-5,"flat at both ends, halfway is half: %v",shake_channel_at(c,1))
+    testing.expect(t,abs(shake_channel_at(c,1.5)-2)<1e-6)
+    // From 2, flat, to 0 arriving with slope -4: it stays above the flat curve, which would be 1.
+    testing.expectf(t,abs(shake_channel_at(c,2)-1.5)<1e-5,"the slope of the last key bends the way in: %v",shake_channel_at(c,2))
+    testing.expect(t,shake_channel_at({},1)==0,"a channel without keys adds nothing")
+}
+
+// A camera turns its view by the shakes asked of it, at their rate and scale, blended in and out,
+// until they end; one asked again while it plays starts over when single and adds another when not.
+@(test)
+a_camera_plays_sequence_shakes_over_its_view_until_they_end :: proc(t:^testing.T) {
+    f:=test_make()
+    defer test_free(f)
+    transforms:core.Table(core.Transform);core.table_init(&transforms,"Transform");defer core.table_destroy(&transforms)
+    parents:core.Table(core.Parent);core.table_init(&parents,"Parent");defer core.table_destroy(&parents)
+    moves:core.Table(input.Move_Input);core.table_init(&moves,"Move_Input");defer core.table_destroy(&moves)
+    camera,body:=core.create(&f.es),core.create(&f.es)
+    test_place(f,body,{})
+    test_place(f,camera,{})
+    core.add(&transforms,camera,core.Transform{rotation=1,scale={1,1,1}})
+    core.add(&f.follows,camera,Camera_Follow{target=body,mode=.Eyes,offset={0,1.6,0}})
+    test_settle(f)
+    core.table_settle(&transforms,&f.es)
+    shakes:Camera_Shakes
+    defer delete(shakes.queue.items)
+    problems:core.Problems
+    nod:Shake_Sequence
+    nod.pitch.keys[0]={value=0.1}
+    nod.pitch.count=1
+    nod.length,nod.rate,nod.scale,nod.blend_in,nod.blend_out=1,2,0.5,0.1,0.1
+    camera_shake(&shakes,camera,nod)
+    shakes_take(&f.follows,&shakes,&problems)
+    // 0.05 s in, a quarter of the way through blend_in 0.1 at weight 0.5 x 0.1 rad.
+    testing.expectf(t,abs(shake_test_look(f,&transforms,&parents,&moves,camera,body,0.05)-0.025)<1e-4,"blending in")
+    testing.expectf(t,abs(shake_test_look(f,&transforms,&parents,&moves,camera,body,0.2)-0.05)<1e-4,"at full weight: scale times its key")
+    // The sequence lasts 1 s at rate 2: 0.5 s of play, the last 0.1 blending out.
+    testing.expectf(t,abs(shake_test_look(f,&transforms,&parents,&moves,camera,body,0.2)-0.025)<1e-4,"blending out at 0.45 s")
+    testing.expect(t,shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)==0,"ended: the view is its own again")
+    following:=core.get(&f.follows,camera)
+    testing.expect(t,following.state.shakes[0].sequence.length==0,"and its slot is free")
+
+    swing:=nod
+    swing.single,swing.id=true,7
+    camera_shake(&shakes,camera,swing)
+    camera_shake(&shakes,camera,swing)
+    camera_shake(&shakes,camera,nod)
+    shakes_take(&f.follows,&shakes,&problems)
+    playing:=0
+    slots:=following.state.shakes
+    for p in slots {
+        if p.sequence.length>0 {playing+=1}
+    }
+    testing.expect_value(t,playing,2)
+    // A change of mode (a dash camera) does not cut what plays.
+    core.add(&f.cameras,camera,render.Camera{fov=1,near=0.1,active=true})
+    test_settle(f)
+    setup:=Camera_Setup{follow={mode=.Eyes,offset={0,1.5,0}},lens={fov=1.2,near=0.1}}
+    mode_take(&f.follows,&f.cameras,core.read(&f.worlds),{camera=camera,setup=setup},&problems)
+    following=core.get(&f.follows,camera)
+    kept:=following.state.shakes
+    still:=0
+    for p in kept {
+        if p.sequence.length>0 {still+=1}
+    }
+    testing.expect(t,following.offset.y==1.5 && still==2,"the mode is taken and its shakes go on")
+
+    camera_shake(&shakes,camera,{})
+    camera_shake(&shakes,body,nod)
+    shakes_take(&f.follows,&shakes,&problems)
+    testing.expect(t,core.problem_find(&problems,camera,"camera.shake")!=nil,"a shake without length is a problem")
+    testing.expect(t,core.problem_find(&problems,body,"camera.shake")!=nil,"and one asked of what does not follow")
+}
+
+// How far up the camera looks after following its body dt seconds.
+@(private="file")
+shake_test_look :: proc(f:^Camera_Test,transforms:^core.Table(core.Transform),parents:^core.Table(core.Parent),moves:^core.Table(input.Move_Input),camera,body:core.Entity,dt:f32) -> f32 {
+    following:=core.get(&f.follows,camera)
+    follow_one(camera,following,body,transforms,core.read(&f.worlds),core.read(parents),core.read(moves),1,{},{dt=dt,alpha=1},dt)
+    placed,_:=core.get(core.read(transforms),camera)
+    ahead:=mm.quat_rotate(placed.rotation,{0,0,-1})
+    return math.asin(ahead.y) // how far up it looks
+}

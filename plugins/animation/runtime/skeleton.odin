@@ -310,7 +310,12 @@ root_motion_to_rig :: proc "contextless" (state:^Playing,root:u64,moved:mm.Vec3,
     if bone<0 || bone>=len(state.parents) || len(state.rest)!=len(state.parents) || state.parents[bone]<0 {return moved,turned}
     above:=mm.TRANSFORM_IDENTITY
     steps:=0
-    for parent:=state.parents[bone];parent>=0 && int(parent)<len(state.rest) && steps<len(state.rest);parent=state.parents[parent] {above=mm.transform_compose(state.rest[parent],above);steps+=1}
+    // Only the bones above the root: a bound rig's first slot is its entity (no target), whose
+    // Transform when it was bound is not part of the rig's space.
+    for parent:=state.parents[bone];parent>=0 && int(parent)<len(state.rest) && steps<len(state.rest);parent=state.parents[parent] {
+        if int(parent)<len(state.targets) && state.targets[parent]==0 {break}
+        above=mm.transform_compose(state.rest[parent],above);steps+=1
+    }
     return mm.transform_vector(above,moved),linalg.normalize(above.rotation*turned*conj(above.rotation))
 }
 

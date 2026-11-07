@@ -79,6 +79,7 @@ Camera_Follow_State :: struct {
     ready:bool,
     written:core.Transform, // what the last frame left in the transform
     wrote:bool,
+    shakes:[CAMERA_SHAKES]Shake_Playing, // the sequence shakes it plays over its view (camera_shake)
 }
 
 CAMERA_FOLLOW_DEFAULT :: Camera_Follow{
@@ -278,8 +279,10 @@ camera_follow :: proc(
     seats:core.Read(input.Seat),moves:core.Read(input.Move_Input),shown:core.Ref(Cameras),
     seat_state:core.Ref(input.Seats),look_actions:input.Frame_Input_Of(input.Look_Action),queries:core.Ref(core.World_Queries),look_input:^Camera_Input,changes:^Camera_Changes,
     views:core.Ref(Camera_Views),verticals:core.Read(core.Vertical),frame:core.Frame_Time,time:core.Time,problems:^core.Problems,
+    shakes:^Camera_Shakes,
 ) {
     for change in core.take(&changes.queue) {mode_take(follows,cameras,worlds,change,problems)}
+    shakes_take(follows,shakes,problems)
     for item in shown.overrides {
         if !item.active || item.fov<=0 {continue}
         if camera:=core.get(cameras,item.camera);camera!=nil && (camera.fov!=item.fov || camera.near!=item.near) {camera.fov,camera.near=item.fov,item.near}
@@ -369,6 +372,7 @@ mode_take :: proc(follows:^core.Table(Camera_Follow),cameras:^core.Table(render.
     follow.state.blend=change.blend
     follow.state.written=state.written
     follow.state.wrote=state.wrote
+    follow.state.shakes=state.shakes // a shake goes on through a change of mode
     if follow.mode==.Orbit && !follow.aim && (follow.min_pitch!=follow.max_pitch || follow.min_pitch==0) {
         follow.state.handoff=looked
         follow.state.handing=true
@@ -540,6 +544,7 @@ follow_one :: proc(
         world_rotation=vertical*mm.quat_from_euler({follow.looking.y,follow.looking.x,0})
 
     }
+    world_rotation*=shakes_advance(s,dt)
     if core.world_set(row,core.read(transforms),parents,e,world_position,world_rotation) {
         s.written,s.wrote=row^,true
     }

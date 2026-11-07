@@ -39,10 +39,13 @@ animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Rea
             if swim,ok:=core.get(swims,entity);ok {goal.desired,goal.acceleration,goal.braking=wish*swim.speed,swim.acceleration,swim.acceleration}
         case phys.MODE_FLYING:
             if fly,ok:=core.get(flights,entity);ok {goal.desired,goal.acceleration,goal.braking=wish*fly.speed,fly.acceleration,fly.acceleration}
+        case phys.MODE_SLIDING,phys.MODE_MANTLING:
+            // The slide keeps its course and the climb its way: what the body does is what it asks.
+            if walk,ok:=core.get(walks,entity);ok {goal.desired,goal.acceleration,goal.braking={going.linear.x,0,going.linear.z},walk.acceleration,walk.braking}
         case:
             if walk,ok:=core.get(walks,entity);ok {
                 sprinting:=input.buttons&inp.action_bit(inp.action_of(walk_actions,.Sprint))!=0
-                goal.desired,goal.acceleration,goal.braking=walk_goal(walk,character.mode==phys.MODE_FALLING,wish,going.linear,phys.walk_speed(walk,input,sprinting))
+                goal.desired,goal.acceleration,goal.braking=walk_goal(walk,character.mode==phys.MODE_FALLING,wish,going.linear,phys.walk_speed(walk,input,sprinting,character.mode==phys.MODE_CROUCHING))
             }
         }
         if !anim.match_goal(requests,goal) {
@@ -53,7 +56,7 @@ animation_locomotion :: proc(characters:core.Read(phys.Character),found:core.Rea
         // The warping corrects what the clip travels, in its own direction, toward the body: a clip
         // that strafes or backs off is not turned as if it went forward.
         along:=playing.travel if playing.travel!={} else mm.Vec3{0,0,1}
-        anim.motion_locomotion(warps,{rig=entity,velocity={playing.velocity.x,0,playing.velocity.z},source_velocity=mm.quat_rotate(placed.rotation,along*playing.speed),weight=1,enabled=character.mode==phys.MODE_WALKING && !playing.forced && playing.speed>0})
+        anim.motion_locomotion(warps,{rig=entity,velocity={playing.velocity.x,0,playing.velocity.z},source_velocity=mm.quat_rotate(placed.rotation,along*playing.speed),weight=1,enabled=(character.mode==phys.MODE_WALKING || character.mode==phys.MODE_CROUCHING) && !playing.forced && playing.speed>0})
     }
 }
 

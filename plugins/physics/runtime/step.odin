@@ -192,7 +192,9 @@ physics_step :: proc(
                 sim.character_set_move(w,l.character,{})
                 continue
             }
-            if move,has:=core.get(moves,e);has {sim.character_set_move(w,l.character,move.value)}
+            move,has:=core.get(moves,e)
+            if has {sim.character_set_move(w,l.character,move.value)}
+            character_height_set(w,l,e,move.height)
         }
     }
 
@@ -673,6 +675,19 @@ link_release :: proc(s:^Sync,l:^Link) {
     l^={pass=l.pass}
 }
 
+HEIGHT_EPSILON :: f32(1e-4) // m of capsule height that are no change
+
+// Makes the capsule of a character as tall as its move asks (0: that of its Collider, which it is
+// never taller than) before it steps: shorter at once, taller when nothing over it is in the way.
+@(private)
+character_height_set :: proc(w:^sim.World,l:^Link,e:core.Entity,asked:f32) {
+    full:=character_desc(l.config,l.collider,l.scale,l.filter,e).height
+    want:=asked
+    if !(want>0) || want>full {want=full}
+    l.height_asked=want
+    if abs(sim.character_desc(w,l.character).height-want)>HEIGHT_EPSILON {_=sim.character_set_height(w,l.character,want)}
+}
+
 // The capsule stands on the feet: its center and surface are those of the controller.
 @(private)
 character_desc :: proc "contextless" (c:Character,capsule:Collider,scale:[3]f32,filter:sim.Filter,e:core.Entity) -> sim.Character_Desc {
@@ -1103,6 +1118,8 @@ poses_write :: proc(s:^Sync) {
             if !sim.character_valid(w,l.character) {continue}
             if row:=core.row_of(s.character_states,e);row>=0 {
                 next:=character_state_of(sim.character_state(w,l.character))
+                next.height=sim.character_desc(w,l.character).height
+                next.cramped=next.height<l.height_asked-HEIGHT_EPSILON
                 if s.character_states.values[row]!=next {core.at(s.character_states,row)^=next}
             }
             body:=sim.character_body(w,l.character)

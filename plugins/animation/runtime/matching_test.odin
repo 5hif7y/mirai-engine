@@ -696,6 +696,31 @@ a_jump_nothing_forces_waits_the_hold_after_the_one_before :: proc(t:^testing.T) 
     testing.expectf(t,last>=0 && gap!=max(int) && f32(gap)*dt>=info.hold-1e-4,"jumps come at least %.2f s apart, not %d ticks",info.hold,gap)
 }
 
+// With stationary_speed, a body that turns around passes through rest for a tick: it goes on
+// with the clips that travel. One that pushes into a wall goes nowhere and stands.
+@(test)
+a_body_that_turns_around_does_not_stand_midway_and_one_against_a_wall_stands :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    f.graphs.matches[0].profile.info.stationary_speed=.15
+    dt:=f32(1.0/60)
+    idle:=base.name_hash("idle")
+    speed:=f32(1.4)
+    for _ in 0..<60 {testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,speed},desired={0,0,speed}))}
+    rested:=false
+    for tick in 0..<30 {
+        speed=max(speed-20*dt,-1.4)
+        rested||=abs(speed)<.15
+        testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,speed},desired={0,0,-1.4}))
+        value,_:=animation_match(&f.playback,f.rig)
+        testing.expectf(t,value.clip!=idle,"tick %d at %.2f m/s: a body that turns around walks on, not %v",tick,speed,value)
+    }
+    testing.expect(t,rested,"the turn passes through rest")
+    for _ in 0..<30 {testing.expect(t,match_step(&f,dt,GROUND,desired={0,0,1.4},wall={0,0,-1}))}
+    value,_:=animation_match(&f.playback,f.rig)
+    testing.expectf(t,value.clip==idle,"a body that pushes into a wall stands: %v",value)
+}
+
 @(test)
 the_root_of_the_pose_follows_a_body_that_stops_within_its_lag_out_of_a_wall_and_closes_as_it_walks :: proc(t:^testing.T) {
     for blocked in ([2]bool{false,true}) {

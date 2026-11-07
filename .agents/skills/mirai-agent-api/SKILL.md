@@ -58,10 +58,11 @@ difference with the catalog, it rules.
 
 1. Open it with `mirai edit` (window or manual mode and port per
    [arguments](../mirai-editor/references/editor.md#arguments)) or, without a window and in the
-   background, with `mirai session start [project] --dev`; `mirai rpc --project <project>` finds
-   the port. If the user's windowed editor holds the project, `--copy` opens a session on a fresh
-   copy under its `.mirai/tmp/`, whose path it prints, on a free port that is never 7940;
-   `mirai session stop <copy>` deletes it.
+   background, with `mirai session start [project] --dev`, on a free port that is never 7940
+   unless `--api-port` names one; `mirai rpc --project <project>` finds the port. If the user's
+   windowed editor holds the project, `--copy` opens a session on a fresh copy under its
+   `.mirai/tmp/`, whose path it prints; `mirai session stop <copy>` deletes it, and the next
+   `--copy` (or `stop --orphans <project>`) deletes the copies a killed run left behind.
 2. `mirai rpc describe` lists the methods by plugin and says which plugins exist and which the
    project uses; `mirai rpc describe <plugin>` gives those of an area. Before calling a method for
    the first time, `mirai rpc describe <method|prefix>` (several methods at once:
@@ -168,8 +169,9 @@ difference with the catalog, it rules.
   live.
 - `mirai image` and the measure of `mirai capture`: `mirai test cook/image`; `mirai capture`
   against a project with GPU and `mirai test tools/mirai` if the CLI changes.
-- `mirai session`: `mirai test tools/mirai` covers options, discarding copies of `.mirai/tmp/` and
-  process roles (`tools/mirai/session_test.odin`); `restart`, the build with an open session and
+- `mirai session`: `mirai test tools/mirai` covers options, the free API port, discarding copies
+  of `.mirai/tmp/`, sweeping the copies whose editor ended and process roles
+  (`tools/mirai/session_test.odin`); `restart`, the build with an open session and
   `stop --orphans` are tested with a real editor.
 - `mirai rpc` (`--select`, `--wait-until`, `describe`): `mirai test tools/mirai` and
   `mirai test editor/api the_rpc_and_mcp_commands_drive_the_server`, which runs the tool against

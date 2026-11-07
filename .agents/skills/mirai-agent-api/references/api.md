@@ -9,9 +9,10 @@ Code: `editor/api/` (package `api`: server, JSON-RPC, MCP, schemas, client),
 - It listens on `127.0.0.1:api.DEFAULT_PORT`; `--api-port N` chooses another and `--no-api` does
   not open it. Without `--api-port`, a busy port makes it choose a free one, which the editor
   prints on stderr; with a busy `--api-port`, or another failure, it continues without an API and
-  says so. `--api-port 0` takes a free one and never the default: a `mirai session start --copy`
-  passes it, so the default port stays that of the user's editor. If a method does not fit in the registry it does not open the API and names
-  `API_METHOD_CAPACITY`.
+  says so. `--api-port 0` takes a free one and never the default: every `mirai session start`
+  passes it unless its arguments name a port or `--no-api`, so the default port stays that of
+  the user's editor and a tool reaches a session only through its project's `api.json`. If a
+  method does not fit in the registry it does not open the API and names `API_METHOD_CAPACITY`.
 - When it opens it writes `<project>/.mirai/api.json` (`api.Port_File`) and deletes it on close:
   `rpc`, `mcp` and `capture` take the port from there, and `session` knows which binaries and
   library it runs.
@@ -91,6 +92,10 @@ named by `.mirai/session.json` (pid, mode and arguments) and `api.json`; its log
 - **Orphans**: editors that run from the checkout's `.mirai/engine/` and that the `api.json` of
   their project does not name. `status` (0 if the session responds) lists them and
   `stop --orphans [project]` closes the headless ones, never one with a window.
+- **Orphan copies**: a run killed after `start --copy` leaves its copy. `start --copy` and
+  `stop --orphans <project>` delete the project's copies that no start is making or opening
+  (`SESSION_COPY_LOCK`, held from the copy's first file until its editor answers) and whose port
+  file and record name no running process that opens them.
 
 ## `mirai capture`
 

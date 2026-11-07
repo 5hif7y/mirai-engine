@@ -20,7 +20,7 @@ import mm "mirai:std/math"
 // there.
 
 MATCH_KIND :: asset.Fourcc(u32('A')|u32('M')<<8|u32('T')<<16|u32('C')<<24)
-MATCH_VERSION :: 6
+MATCH_VERSION :: 7
 MATCH_CLIPS :: 64
 MATCH_GOAL_CAPACITY :: 4096 // rigs told in one tick
 // Share of the speed the pose walks at that its root closes on the body by, with a lag.
@@ -32,7 +32,7 @@ Match_Info :: struct {
     interval:f32 `mirai:"unit=s"`,     // between searches
     blend:f32 `mirai:"unit=s"`,        // of the inertial blend of a jump
     bias:f32,                          // of cost a jump has to save over playing on
-    min_rate,max_rate:f32,             // of the speed a clip that travels plays at to follow the body
+    min_rate,max_rate:f32,             // of the speed a clip that travels plays at to follow the body, unless its source has its own
     memory:u32 `mirai:"unit=KiB"`,     // most the database of one skeleton keeps
     left_foot,right_foot,hips:Bone_Ref,
     foot_position,foot_velocity,hip_velocity,body_velocity,trajectory_position,trajectory_direction:f32, // weights
@@ -64,7 +64,9 @@ MATCH_SAMPLES :: 128
 // in phase (the same share of each is the same moment of the step), and each Match_Sample of it is
 // searched as a clip of its own, measured from their pose blended at its weights, and played as
 // those clips together at its weights. A blend loops, is no entry and takes its speeds per sample.
-Match_Source :: struct {clip:[64]u8 `mirai:"text"`,animation:base.Asset_Id,modes:u32,loop,entry:bool,speed:f32 `mirai:"unit=m/s"`,blend:[MATCH_BLEND-1][64]u8 `mirai:"text"`}
+// min_rate and max_rate, when positive, replace those of the .match for it and its samples: a set
+// authored slower than the body moves in it (a crouch), or a jog kept from beating a sprint.
+Match_Source :: struct {clip:[64]u8 `mirai:"text"`,animation:base.Asset_Id,modes:u32,loop,entry:bool,speed:f32 `mirai:"unit=m/s"`,blend:[MATCH_BLEND-1][64]u8 `mirai:"text"`,min_rate,max_rate:f32}
 // A point of a blended source (its index in clips): the weight of its clip, then of each clip of
 // its blend, each in 0..1 with a positive sum, played as shares of that sum; speed, when positive,
 // the m/s it travels at instead of the one measured from its blended feet.
@@ -89,7 +91,7 @@ match_check :: proc(profile:Match_Profile) -> bool {
     if !blend_text_valid(info.landing_marker[:],true) || info.landing_rates[0]<=0 || info.landing_rates[0]>info.landing_rates[1] {return false}
     for bone in ([3]Bone_Ref{info.left_foot,info.right_foot,info.hips}) {if !profile_bone(bone) || bone.path[0]==0 {return false}}
     for &clip,i in profile.clips {
-        if !blend_text_valid(clip.clip[:],false) || clip.modes==0 || clip.entry && clip.loop || !finite(clip.speed) || clip.speed<0 {return false}
+        if !blend_text_valid(clip.clip[:],false) || clip.modes==0 || clip.entry && clip.loop || !finite(clip.speed) || clip.speed<0 || !lib.match_rates_valid({clip.min_rate,clip.max_rate}) {return false}
         for other in profile.clips[:i] {if other.clip==clip.clip && other.animation==clip.animation {return false}}
         ended:=false
         for &other,k in clip.blend {
@@ -380,9 +382,10 @@ match_database :: proc(content:^Match_Content,library:^host.Content_Animation,st
             }
         }
         if !found {break}
-        if members==1 {clips[at]={clips={0=handles[0]},modes=clip.modes,entry=clip.entry,speed=clip.speed};at+=1;continue}
+        rates:=[2]f32{clip.min_rate,clip.max_rate}
+        if members==1 {clips[at]={clips={0=handles[0]},modes=clip.modes,entry=clip.entry,speed=clip.speed,rates=rates};at+=1;continue}
         for sample in content.profile.samples {
-            if int(sample.source)==i {clips[at]={clips=handles,weights=sample.weights,modes=clip.modes,speed=sample.speed};at+=1}
+            if int(sample.source)==i {clips[at]={clips=handles,weights=sample.weights,modes=clip.modes,speed=sample.speed,rates=rates};at+=1}
         }
     }
     if found {
@@ -657,8 +660,9 @@ match_output :: proc(state:^Playing,output:^Program_Output,content:^Match_Conten
     m.rate=1
     // A loop follows the speed of the root of the pose; a clip that plays once (a jump, a landing)
     // keeps its own rate, or a body standing still would hold it, frozen, at min_rate.
-    if m.phase!=.Play && m.range>=0 && m.loop && m.speed>lib.MATCH_STILL && has_goal {
-        m.rate=clamp(linalg.length(velocity)/m.speed,info.min_rate,info.max_rate)
+    if m.phase!=.Play && m.range>=0 && m.loop && m.speed>lib.MATCH_STILL && has_goal && db!=nil && int(m.range)<len(db.ranges) {
+        least,most:=lib.match_range_rates(db.ranges[m.range],info.min_rate,info.max_rate)
+        m.rate=clamp(linalg.length(velocity)/m.speed,least,most)
     }
     // A clip toward its landing marker follows each tick the time to land physics predicts.
     if m.phase==.Landing && db!=nil && m.range>=0 && int(m.range)<len(db.ranges) && has_goal && goal.time_to_land>0 {

@@ -90,7 +90,9 @@ automatic plugin `animation_physics` feeds the locomotion of each `Character`.
    `animation_physics` tells it on each tick the mode, the velocity and the request: the game writes
    nothing. Without physics, the game calls `match_goal`.
 2. **Few clips:** idle and walk are enough; a run or jog widens the range. The rate of a clip
-   (`min_rate`..`max_rate`) covers the velocities between those of its clips and the warping of
+   (`min_rate`..`max_rate` of the `.match`, or of its source: a crouch authored slower than it is
+   played, a jog kept below the sprint) covers the velocities between those of its clips and the
+   warping of
    `Animation.motion` stretches the stride to that of the body. A mode without clips of its own
    keeps the clip that is playing; a jump or landing is an `entry` clip of its mode, not a state. A
    livelier turn or start asks for turn or start clips, not transitions.

@@ -164,7 +164,8 @@ Per tick:
   stays on the body.
 - Every `interval` (0: every tick) it searches the lowest-cost row among the clips of the mode; a
   clip that travels is compared with the trajectory scaled by the rate at which it would play
-  (`min_rate`..`max_rate`), so a few clips cover the velocities between theirs. The trajectory does
+  (`min_rate`..`max_rate`, those of its `Match_Source` when it has them), so a few clips cover the
+  velocities between theirs. The trajectory does
   not go into the wall of the goal. It jumps only if it saves `bias` over continuing, and not
   sooner than `hold` after the last jump unless something forces it. It does not jump to rows of
   the clip that plays within `reselect` seconds of its row (around the seam of a loop), nor to

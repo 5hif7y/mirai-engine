@@ -610,7 +610,7 @@ match_assets_roundtrip_refuse_no_memory_or_looping_entries_and_report_a_database
     // of a source that does not blend, or a blend that does not loop, is refused.
     blended:=make([]Match_Source,len(profile.clips));defer delete(blended);copy(blended,profile.clips)
     base.text_set(blended[1].blend[0][:],"idle")
-    samples:=[2]Match_Sample{{source=1,weights={1,0,0,0}},{source=1,weights={.5,.5,0,0},speed=.8}}
+    samples:=[2]Match_Sample{{source=1,weights={0=1}},{source=1,weights={0=.5,1=.5},speed=.8}}
     changed=profile;changed.clips,changed.samples=blended,samples[:]
     if testing.expect(t,match_check(changed)) {
         blend_doc:asset.Document
@@ -626,7 +626,7 @@ match_assets_roundtrip_refuse_no_memory_or_looping_entries_and_report_a_database
         }
     }
     Refused :: struct {sample:Match_Sample,loop:bool}
-    for refused,i in ([?]Refused{{{source=1,weights={1.5,0,0,0}},true},{{source=1},true},{{source=1,weights={0,0,1,0}},true},{{source=0,weights={1,0,0,0}},true},{{source=1,weights={1,0,0,0}},false}}) {
+    for refused,i in ([?]Refused{{{source=1,weights={0=1.5}},true},{{source=1},true},{{source=1,weights={2=1}},true},{{source=0,weights={0=1}},true},{{source=1,weights={0=1}},false}}) {
         wrong:=samples;wrong[0]=refused.sample;blended[1].loop=refused.loop
         changed.samples=wrong[:]
         testing.expectf(t,!match_check(changed),"blend %d is refused",i)
@@ -648,7 +648,7 @@ a_blended_sample_plays_its_clips_together_at_its_weights_in_phase :: proc(t:^tes
     // walk blended with idle, half and half: it travels at half the 1.5 m/s of the walk.
     content:=&f.graphs.matches[0]
     base.text_set(content.profile.clips[1].blend[0][:],"idle")
-    samples:=make([]Match_Sample,1);samples[0]={source=1,weights={.25,.25,0,0}}
+    samples:=make([]Match_Sample,1);samples[0]={source=1,weights={0=.25,1=.25}}
     content.profile.samples=samples
     if !testing.expect(t,match_check(content.profile)) {return}
     dt:=f32(1.0/60)
@@ -671,11 +671,31 @@ a_blended_sample_plays_its_clips_together_at_its_weights_in_phase :: proc(t:^tes
     g:Match_Fixture;defer match_fixture_free(&g)
     if !testing.expect(t,match_fixture(t,&g)) {return}
     base.text_set(g.graphs.matches[0].profile.clips[1].blend[0][:],"vault")
-    long:=make([]Match_Sample,1);long[0]={source=1,weights={.5,.5,0,0}}
+    long:=make([]Match_Sample,1);long[0]={source=1,weights={0=.5,1=.5}}
     g.graphs.matches[0].profile.samples=long
     _=match_step(&g,dt,GROUND)
     problem:=core.problem_find(&g.problems,g.rig,"animation.match_blend")
     testing.expect(t,problem!=nil && strings.contains(core.problem_text(problem),"walk (1.000 s) with vault (2.000 s)"),"a blend of a clip of 1 s and one of 2 s is reported")
+}
+
+// A source with rates of its own follows the body between them, past those of the .match: the walk
+// of 1.5 m/s, let up to 1.5 times its speed, plays at 1.5 for a body at 2.25 m/s where the .match
+// stops the rest at their own speed; rates out of order are refused.
+@(test)
+a_source_with_rates_of_its_own_follows_the_body_between_them :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    content:=&f.graphs.matches[0]
+    content.profile.clips[1].min_rate,content.profile.clips[1].max_rate=.5,1.5
+    if !testing.expect(t,match_check(content.profile)) {return}
+    dt:=f32(1.0/60)
+    for _ in 0..<60 {testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,2.25},desired={0,0,2.25}))}
+    value,_:=animation_match(&f.playback,f.rig)
+    testing.expectf(t,value.clip==base.name_hash("walk") && abs(value.rate-1.5)<.01,"the walk plays at 1.5: %v",value)
+    for refused in ([3][2]f32{{1.5,.5},{0,1},{-1,1}}) {
+        content.profile.clips[1].min_rate,content.profile.clips[1].max_rate=refused[0],refused[1]
+        testing.expectf(t,!match_check(content.profile),"rates %v are refused",refused)
+    }
 }
 
 @(test)

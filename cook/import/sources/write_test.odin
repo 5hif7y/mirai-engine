@@ -261,6 +261,77 @@ a_humanoid_skeleton_is_written_with_its_body_and_keeps_what_a_person_set :: proc
     testing.expectf(t,weapon==1,"a socket of its own stays once, on its bone and offset: %d",weapon)
 }
 
+// The bone above the pelvis carries the motion of the body (the root of an Unreal skeleton): a
+// clip that moves or turns it gets it as its root, which a character whose capsule moves it keeps
+// in place, and one that leaves it still gets none. A root a person set stays on importing again.
+@(test)
+imported_clips_that_move_the_bone_above_the_pelvis_carry_it_as_their_root :: proc(t:^testing.T) {
+    folder:=temp_folder("write-root")
+    defer os.remove_all(folder)
+    options:=importer.Import_Options{ignore_stored=true,no_save=true}
+    options.max_texture_size=4
+    types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
+    roots_of :: proc(t:^testing.T,folder:string,options:importer.Import_Options,types:^asset.Types) -> (roots:map[string]asset.Animation_Root,path:string,armature:string) {
+        model,ok:=import_ok(t,DEMO+"models/mirai/mirai.glb",options)
+        if !ok {return}
+        defer importer.model_destroy(&model)
+        bones:=model.skeletons[0].bones
+        if !testing.expect(t,len(bones)>1 && base.text_get(bones[0].name[:])=="Armature" && base.text_get(bones[1].name[:])=="Hips" && bones[1].parent==0) {return}
+        armature=strings.clone(base.text_get(bones[0].path[:]),context.temp_allocator)
+        hips:=base.text_get(bones[1].path[:])
+        rise:=[2]anim.Keyframe{{value={0,0,0,0}},{time=1,value={0,1.5,1.2,0}}}
+        turn:=[2]anim.Keyframe{{value={0,0,0,1}},{time=1,value={0,.38,0,.92}}}
+        still:=[2]anim.Keyframe{{value={0,0,0,0}},{time=1,value={0,0,0,0}}}
+        bob:=[2]anim.Keyframe{{value={0,1,0,0}},{time=1,value={0,1.1,.5,0}}}
+        clips:=[4]asset.Animation_Clip_Desc{
+            {name="climb",tracks={{target=armature,property=.Position,keys=rise[:]}}},
+            {name="pivot",tracks={{target=armature,property=.Rotation,keys=turn[:]}}},
+            {name="stand",tracks={{target=armature,property=.Position,keys=still[:]},{target=hips,property=.Position,keys=bob[:]}}},
+            {name="mixamo",tracks={{target=hips,property=.Position,keys=bob[:]}}},
+        }
+        brought:=model.animations;model.animations=clips[:]
+        report,error:=importer.import_write(&model,folder,options)
+        model.animations=brought
+        defer importer.report_destroy(&report)
+        testing.expect_value(t,error.code,importer.Error_Code.None)
+        written:importer.Written
+        for item in report.assets {if item.kind==asset.KIND_ANIMATION {written=item}}
+        if !testing.expect(t,written.id!={}) {return}
+        file,loaded:=read_asset(t,written,types)
+        if !loaded {return}
+        defer asset.asset_close(&file)
+        view,view_error:=asset.animation_view(&file,types)
+        if !testing.expect_value(t,view_error,asset.Error.None) {return}
+        roots=make(map[string]asset.Animation_Root,context.temp_allocator)
+        for &clip in view.clips {roots[strings.clone(base.text_get(clip.name[:]),context.temp_allocator)]=clip.root}
+        return roots,strings.clone(written.path,context.temp_allocator),armature
+    }
+    roots,path,armature:=roots_of(t,folder,options,&types)
+    if path=="" {return}
+    for name in ([2]string{"climb","pivot"}) {
+        root:=roots[name]
+        testing.expectf(t,base.text_get(root.bone[:])==armature && root.translation && root.rotation,"%s carries the root it moves: %v",name,root)
+    }
+    testing.expect(t,roots["stand"]==asset.Animation_Root{} && roots["mixamo"]==asset.Animation_Root{},"a clip that leaves the root still, or moves only the pelvis, carries none")
+
+    // A person keeps only the translation of the climb: importing again keeps it.
+    file:asset.Asset
+    if !testing.expect_value(t,asset.asset_load(&file,path),asset.Error.None) {return}
+    view,_:=asset.animation_view(&file,&types)
+    descs,ok:=asset.animation_descs(view,context.temp_allocator)
+    if !testing.expect(t,ok) {asset.asset_close(&file);return}
+    for &clip in descs {if clip.name=="climb" {clip.root.rotation=false}}
+    id:=file.blob.header.id
+    rewritten:=asset.animation_save(path,&types,{id=id,clips=descs,source=view.source})
+    asset.asset_close(&file)
+    testing.expect_value(t,rewritten,asset.Error.None)
+    options.rebuild=true
+    again,_,_:=roots_of(t,folder,options,&types)
+    climb:=again["climb"]
+    testing.expectf(t,base.text_get(climb.bone[:])==armature && climb.translation && !climb.rotation,"the root a person set stays: %v",climb)
+    testing.expect(t,again["pivot"].rotation)
+}
+
 @(test)
 importing_again_keeps_what_was_changed_in_a_material_and_takes_the_rest_from_the_source :: proc(t:^testing.T) {
     folder:=temp_folder("write-material-layers");defer os.remove_all(folder)

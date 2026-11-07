@@ -87,18 +87,23 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
 - A clip travels at the speed measured from its feet
   ([metrics](../../mirai-std/references/anim-body.md#metrics-metricsodin)); `speeds` sets that of a
   locomotion clip by hand and the `.match` keeps it.
-- `blends` puts [blends](animation.md#locomotion-by-motion-matching) in the `.match`: 2 to 4 looping
-  locomotion clips of one mode and one duration (within a row), and samples, each with four
-  `weights` (one per clip in order, 0 past them, a positive sum) and an optional `speed`. Its clips
-  leave the `.match` as clips of their own, and the result lists each blend with its mode and
-  samples. A clip that is not locomotion, a size, sum or weight out of place, no samples or clips
-  of different durations fail with their path and a `fix`.
+- `blends` puts [blends](animation.md#locomotion-by-motion-matching) in the `.match`: 2 to
+  `MATCH_BLEND` looping locomotion clips of one mode and one duration (within a row), as the eight
+  directions of a set, and samples, each with `MATCH_BLEND` `weights` (one per clip in order, 0
+  past them, a positive sum) and an optional `speed`. Its clips leave the `.match` as clips of their
+  own, and the result lists each blend with its mode and samples. A clip that is not locomotion, a
+  size, sum or weight out of place, no samples or clips of different durations fail with their
+  path and a `fix`.
 - `min_rate`, `max_rate` and `trajectory_direction`, when given, replace those defaults of the
   `.match`: the rates a clip plays at to follow the body, and the weight of where the trajectory
-  faces (0 for a body that never turns, as one that walks sideways). `landing_marker` (empty: no
-  landing) and `landing_rates` replace those of the [landing](animation.md#landing).
+  faces (0 for a body that never turns, as one that walks sideways). `rates` (per clip) and the
+  `min_rate` and `max_rate` of a blend replace those rates for that source: a crouch authored at
+  1.5 m/s and played at 2.25 m/s needs up to 1.5, which would let a jog beat the sprint.
+  `landing_marker` (empty: no landing) and `landing_rates` replace those of the
+  [landing](animation.md#landing).
 - Capabilities (`want`): locomotion (a `.match` with those clips and a warping `.motion`; the
-  `Animation` stays `In_Place` and `animation_physics` moves it; its loops keep their phase and a
+  `Animation` stays `In_Place` when a clip of its library has a root and `animation_physics` moves
+  it; its loops keep their phase and a
   body that does not move, also against a wall, plays the loops that do not travel), look-at and hands (off until
   requested), feet (grounding: needs physics) and gestures (`.action` on the upper body and per arm,
   in layers 1 to 3). The IK pole of each arm is a fixed point of the world: with the character

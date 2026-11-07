@@ -612,6 +612,12 @@ A node with `skin` produces its own mesh, without sharing it between nodes.
   finds any part; when importing again it keeps the `manual` parts and axes of the previous file
   whose bones still exist, and the sockets someone added (not those the import makes: named by the
   source, `bone.*`, grips) on bones that still exist.
+- The root of each clip (`Animation_Root`) is the parent bone of the pelvis of its skeleton, with
+  translation and rotation, when the clip moves or turns it (the root of an Unreal skeleton in a
+  clamber or a jump start), so a character whose capsule moves the body plays it in place. A
+  pelvis without a parent bone, or a clip that leaves that bone still, gives no root: the track of
+  the pelvis is the bob of the body. Importing again keeps the root someone set on a clip
+  (`animation.clip.set`) while its bone exists.
 
 ### glTF morph targets
 

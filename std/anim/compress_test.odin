@@ -57,8 +57,11 @@ compressed_chain_keeps_clip_data_and_moves_shell_points_within_precision :: proc
     for &parent,i in parents {parent=i32(i/3*3-3) if i>=3 else -1}
     stats,error:=library_compress(&lib,parents[:])
     testing.expect_value(t,error,Compress_Error.None)
-    testing.expect(t,stats.resident_bytes<stats.raw_bytes && stats.sampled_tracks==BONES*2 && stats.constant_tracks==BONES)
-    testing.expect_value(t,clip_data(&lib,clip),original)
+    testing.expectf(t,stats.resident_bytes<stats.raw_bytes && stats.sampled_tracks==BONES*2 && stats.default_tracks==BONES,"%v",stats)
+    compressed:=clip_data(&lib,clip)
+    testing.expect(t,compressed.stream_bytes>0)
+    compressed.stream,compressed.stream_bytes=0,0
+    testing.expect_value(t,compressed,original)
     testing.expect(t,clip_data(&lib,2).loop==.Loop && clip_tracks(&lib,clip)[0]==clip_tracks(&lib,2)[0])
     testing.expect_value(t,clip_markers(&lib,clip)[0],Marker{time=.2,id=11})
     for track,i in clip_tracks(&lib,clip) {testing.expectf(t,track.encoding==.Sampled && track.target==u64(i/3+11),"track %d: %v",i,track)}
@@ -120,16 +123,27 @@ compressed_library_keeps_keys_that_samples_would_not_follow :: proc(t:^testing.T
     eased:=[2]Keyframe{key(0,0),key(1,3,.Linear,.Back_Out)}
     step:=[3]Keyframe{key(0,1),key(1,3,.Step),key(2,2,.Step)}
     spline:=[3]Keyframe{rot_key(0,1,.Cubic),rot_key(1,math.quat_axis_angle({0,1,0},.4),.Cubic),rot_key(2,math.quat_axis_angle({0,1,0},.8),.Cubic)}
-    desc:=[4]Track_Desc{{property=.Float,keys=cubic[:]},{property=.Float,keys=eased[:]},{property=.Float,keys=step[:]},{target=3,property=.Rotation,keys=spline[:]}}
+    // Linear keys off the grid of the others: the stream holds them as they are.
+    off:=[4]Keyframe{key(0,0),key(.37,2),key(1.13,-1),key(2,4)}
+    turn:=[3]Keyframe{rot_key(0,1),rot_key(.7,math.quat_axis_angle({0,1,0},2.5)),rot_key(1.9,math.quat_axis_angle({1,0,0},-1))}
+    desc:=[6]Track_Desc{{property=.Float,keys=cubic[:]},{property=.Float,keys=eased[:]},{property=.Float,keys=step[:]},{target=3,property=.Rotation,keys=spline[:]},{target=4,property=.Position,keys=off[:]},{target=4,property=.Rotation,keys=turn[:]}}
+    for &k in off {k.value={k.value.x,1-k.value.x,.5,0}}
     lib:=make_library(t);defer library_destroy(&lib)
     clip,_:=clip_add(&lib,{tracks=desc[:]})
     stats,error:=library_compress(&lib)
     testing.expect_value(t,error,Compress_Error.None)
-    testing.expect_value(t,stats.raw_tracks,4)
+    testing.expect_value(t,stats.raw_tracks,6)
+    values:[6]math.Vec4
     for track,i in clip_tracks(&lib,clip) {
-        testing.expect_value(t,track.encoding,Key_Encoding.Raw)
-        for sample in 0..<101 {time:=f32(sample)/100*2;testing.expect_value(t,clip_evaluate(&lib,track,time),track_evaluate(desc[i].keys,track.property,time))}
+        testing.expect_value(t,track.encoding,Key_Encoding.Raw if i<4 else Key_Encoding.Sampled)
+        for sample in 0..<101 {
+            time:=f32(sample)/100*2
+            testing.expect(t,clip_sample(&lib,clip,time,values[:]))
+            testing.expect_value(t,clip_evaluate(&lib,track,time),track_evaluate(desc[i].keys,track.property,time))
+            testing.expect_value(t,values[i],track_evaluate(desc[i].keys,track.property,time))
+        }
     }
+    testing.expect(t,lib.key_count==len(cubic)+len(eased)+len(step)+len(spline))
     testing.expect(t,track_keys(&lib,clip_tracks(&lib,clip)[0])[1].out_slope==cubic[1].out_slope)
 }
 
@@ -142,7 +156,9 @@ compressed_library_holds_still_tracks_in_one_sample_without_changing_duration ::
     clip,_:=clip_add(&lib,{tracks={{property=.Float,keys=constant[:]},{property=.Float,keys=line[:]},{property=.Float,keys=one[:]},{property=.Float}}})
     _,error:=library_compress(&lib);testing.expect_value(t,error,Compress_Error.None)
     tracks:=clip_tracks(&lib,clip)
-    testing.expect(t,tracks[0].encoding==.Sampled && lib.sampled[tracks[0].first].count==1 && tracks[2].encoding==.Sampled && tracks[3].encoding==.Raw && tracks[3].count==0)
+    testing.expect(t,tracks[0].encoding==.Sampled && tracks[2].encoding==.Sampled && tracks[3].encoding==.Raw && tracks[3].count==0)
+    kind,_:=stream_code(lib.streams[tracks[0].first:],0)
+    testing.expect_value(t,kind,Stream_Kind.Constant)
     testing.expect_value(t,clip_duration(&lib,clip),f32(5))
     for sample in 0..<101 {
         time:=f32(sample)/20
@@ -153,36 +169,66 @@ compressed_library_holds_still_tracks_in_one_sample_without_changing_duration ::
 }
 
 @(test)
-sampled_tracks_load_into_another_library_and_reject_corrupt_bytes :: proc(t:^testing.T) {
-    keys:[40]Keyframe
-    for &key,k in keys {key=Keyframe{time=f32(k)/30,value={cmath.sin(f32(k)*.3),f32(k)*.01,cmath.cos(f32(k)*.2),0}}}
-    lib:=make_library(t);defer library_destroy(&lib)
-    clip,_:=clip_add(&lib,{tracks={{target=5,property=.Position,keys=keys[:]}}})
+streams_load_into_another_library_and_reject_corrupt_bytes :: proc(t:^testing.T) {
+    position,rotation:[80]Keyframe
+    for k in 0..<len(position) {
+        position[k]={time=f32(k)/30,value={cmath.sin(f32(k)*.3),f32(k)*.01,cmath.cos(f32(k)*.2),0}}
+        rotation[k]={time=f32(k)/30,value=quat_vec4(math.quat_axis_angle(linalg.normalize(math.Vec3{1,2,f32(k)*.1}),f32(k)*.05))}
+    }
+    still:=[2]Keyframe{{time=0,value={0,0,0,1}},{time=1,value={0,0,0,1}}}
+    lib:=make_library(t,keys=200,tracks=4,clips=1,markers=0);defer library_destroy(&lib)
+    clip,_:=clip_add(&lib,{tracks={{target=5,property=.Position,keys=position[:]},{target=5,property=.Rotation,keys=rotation[:]},{target=6,property=.Rotation,keys=still[:]},{target=7,property=.Float}}})
     _,error:=library_compress(&lib);testing.expect_value(t,error,Compress_Error.None)
-    track:=clip_tracks(&lib,clip)[0];testing.expect_value(t,track.encoding,Key_Encoding.Sampled)
-    s:=lib.sampled[track.first]
-    bytes,_,ok:=sampled_walk(s,.Position,lib.samples);testing.expect(t,ok && bytes>0)
-    data:=make([]u8,bytes);defer delete(data)
-    copy(data,lib.samples[s.data:][:bytes])
+    data:=clip_data(&lib,clip)
+    testing.expect(t,data.stream_bytes>0)
+    stream:=make([]u8,data.stream_bytes);defer delete(stream)
+    copy(stream,lib.streams[data.stream:][:data.stream_bytes])
+    descs:[4]Track_Desc
+    for track,i in clip_tracks(&lib,clip) {descs[i]={target=track.target,property=track.property,encoding=track.encoding}}
+    testing.expect(t,descs[0].encoding==.Sampled && descs[1].encoding==.Sampled && descs[2].encoding==.Sampled && descs[3].encoding==.Raw)
     other:Library
-    testing.expect(t,library_init(&other,{max_keys=1,max_tracks=2,max_clips=2,max_sampled=1,max_segments=4,max_samples=bytes}))
+    testing.expect(t,library_init(&other,{max_keys=1,max_tracks=8,max_clips=2,max_stream_bytes=len(stream)}))
     defer library_destroy(&other)
-    loaded,added:=clip_add(&other,{tracks={{target=5,property=.Position,sampled={s,data}}}})
+    loaded,added:=clip_add(&other,{tracks=descs[:],stream=stream})
     testing.expect_value(t,added,Clip_Error.None)
     testing.expect_value(t,clip_duration(&other,loaded),clip_duration(&lib,clip))
-    for sample in 0..<200 {time:=f32(sample)/150;testing.expect_value(t,clip_evaluate(&other,clip_tracks(&other,loaded)[0],time),clip_evaluate(&lib,track,time))}
-    Corruption :: struct {at:[2]int,value:[2]u8}
-    for c in ([?]Corruption{{{0,0},{25,25}},{{1,4},{200,100}}}) {
-        saved:=[2]u8{data[c.at[0]],data[c.at[1]]}
-        data[c.at[0]]=c.value[0];data[c.at[1]]=c.value[1]
-        _,refused:=clip_add(&other,{tracks={{property=.Position,sampled={s,data}}}});testing.expect_value(t,refused,Clip_Error.Invalid)
-        data[c.at[0]]=saved[0];data[c.at[1]]=saved[1]
+    values:[4]math.Vec4
+    for sample in 0..<300 {
+        time:=f32(sample)/100
+        testing.expect(t,clip_sample(&other,loaded,time,values[:]))
+        for track,i in clip_tracks(&other,loaded) {
+            single:=clip_evaluate(&other,track,time)
+            testing.expect_value(t,single,clip_evaluate(&lib,clip_tracks(&lib,clip)[i],time))
+            testing.expect_value(t,values[i],single)
+        }
     }
-    _,refused:=clip_add(&other,{tracks={{property=.Position,sampled={s,data[:bytes-1]}}}});testing.expect_value(t,refused,Clip_Error.Invalid)
-    bad:=s;bad.rate=-1
-    _,refused=clip_add(&other,{tracks={{property=.Position,sampled={bad,data}}}});testing.expect_value(t,refused,Clip_Error.Invalid)
-    bad=s;bad.extent.x=transmute(f32)u32(0x7f800000)
-    _,refused=clip_add(&other,{tracks={{property=.Position,sampled={bad,data}}}});testing.expect_value(t,refused,Clip_Error.Invalid)
+    // Every byte changed to every value: refused or still read inside the stream.
+    h:=stream_load(Stream_Header,stream,0)
+    for at in 0..<len(stream) {
+        saved:=stream[at]
+        for value in ([?]u8{0,1,7,31,32,33,200,255}) {
+            stream[at]=value
+            _,refused:=clip_add(&other,{tracks=descs[:],stream=stream})
+            if refused==.None {
+                // Accepted: it decodes without leaving the stream, whatever it holds.
+                for sample in 0..<8 {_=clip_sample(&other,Clip(other.clip_count),f32(sample)*.4,values[:])}
+                other.clip_count-=1;other.track_count-=4;other.stream_bytes-=len(stream)
+            } else {testing.expect(t,refused==.Invalid || refused==.Full)}
+        }
+        stream[at]=saved
+    }
+    _,refused:=clip_add(&other,{tracks=descs[:],stream=stream[:len(stream)-1]});testing.expect_value(t,refused,Clip_Error.Invalid)
+    _,refused=clip_add(&other,{tracks=descs[:3],stream=stream});testing.expect_value(t,refused,Clip_Error.Invalid)
+    wrong:=descs;wrong[0].property=.Float
+    _,refused=clip_add(&other,{tracks=wrong[:],stream=stream});testing.expect_value(t,refused,Clip_Error.Invalid)
+    _,refused=clip_add(&other,{tracks=descs[:]});testing.expect_value(t,refused,Clip_Error.Invalid)
+    rate:=h;rate.rate=-1
+    bytes:=transmute([size_of(Stream_Header)]u8)rate
+    copy(stream,bytes[:])
+    _,refused=clip_add(&other,{tracks=descs[:],stream=stream});testing.expect_value(t,refused,Clip_Error.Invalid)
+    infinite:=transmute([4]u8)u32(0x7f800000)
+    copy(stream[h.ranges+12:],infinite[:])
+    _,refused=clip_add(&other,{tracks=descs[:],stream=stream});testing.expect_value(t,refused,Clip_Error.Invalid)
 }
 
 @(private) Compress_Allocation_Failure :: struct {owner:runtime.Allocator,remaining:int}
@@ -205,7 +251,7 @@ compression_rolls_back_every_allocation_failure_and_rejects_hostile_data :: proc
         _,error:=library_compress(&lib)
         if error==.None {success=true;library_destroy(&lib);break}
         testing.expect_value(t,error,Compress_Error.Out_Of_Memory)
-        testing.expect(t,raw_data(lib.keys)==old_keys && raw_data(lib.tracks)==old_tracks && lib.key_count==old_count && !lib.prepared && lib.sampled==nil)
+        testing.expect(t,raw_data(lib.keys)==old_keys && raw_data(lib.tracks)==old_tracks && lib.key_count==old_count && !lib.prepared && lib.streams==nil)
         testing.expect(t,near(clip_evaluate(&lib,clip_tracks(&lib,clip)[0],.5).x,.5))
         library_destroy(&lib)
     }
@@ -250,7 +296,7 @@ compressed_random_curves_stay_within_precision_between_samples :: proc(t:^testin
             switch property {
             case .Position:error=linalg.length(after.xyz-before.xyz)
             case .Rotation:error=math.quat_angle(vec4_quat(linalg.normalize0(before)),vec4_quat(after))*COMPRESS_DEFAULT.shell
-            case .Scale:error=linalg.length((after.xyz/before.xyz-1)*COMPRESS_DEFAULT.shell)
+            case .Scale:ratio:=linalg.abs(after.xyz/before.xyz-1);error=max(ratio.x,ratio.y,ratio.z)*COMPRESS_DEFAULT.shell
             case .Float:error,limit=abs(after.x-before.x),COMPRESS_DEFAULT.float_precision
             case .Vector:error,limit=max(abs(after.x-before.x),abs(after.y-before.y),abs(after.z-before.z),abs(after.w-before.w)),COMPRESS_DEFAULT.vector_precision
             }

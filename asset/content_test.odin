@@ -291,11 +291,12 @@ animation_cooks_its_clips_into_samples_that_play_as_the_runtime_compresses_them 
             }
         }
     }
-    // A sampled row that contradicts itself does not open.
-    sampled:=slice.clone(cooked_view.sampled,context.temp_allocator)
-    sampled[0].rate=transmute(f32)u32(0x7fc00000)
-    broken:=cooked_view;broken.sampled=sampled
+    // A stream that contradicts itself or lacks its padding does not open.
+    streams:=slice.clone(cooked_view.streams,context.temp_allocator)
+    rate:=transmute([4]u8)u32(0x7fc00000)
+    copy(streams[cooked_view.clips[0].stream+8:],rate[:])
+    broken:=cooked_view;broken.streams=streams
     testing.expect(t,!animation_check(broken))
-    broken.sampled=cooked_view.sampled;broken.samples=cooked_view.samples[:len(cooked_view.samples)-anim.SAMPLED_PADDING]
+    broken.streams=cooked_view.streams[:len(cooked_view.streams)-anim.STREAM_PADDING]
     testing.expect(t,!animation_check(broken))
 }

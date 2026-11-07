@@ -487,6 +487,13 @@ row.
   `content_animation_wait` waits and takes it, for whoever needs the library now (an API call,
   between frames). Unloading, reloading again or ending the application waits for the job; a
   compression that ended is still written.
+- **A world does not start playing while its animations compress.** `content_animations_start`
+  starts the first load of every `.anim` some ids name, directly or through the assets they
+  depend on in the registry (a spawner's prefab, its `.match`), without following scenes, and
+  `content_animations_pending` says whether one still compresses or waits for them. A
+  [scene load](../../mirai-gameplay/references/libraries.md#scene) ends once those of its World
+  are loaded; the [editor](../../mirai-editor/references/editor.md#play) starts those of a scene
+  when it opens it and Play waits for them before its first tick.
 - **What a job loads changes only at the start of a frame**, never on a lookup: a frame sees the
   same content from start to end. `Frame_Record.content` keeps `Content.generations` when the frame
   began, and a frame played again (`app_game_frame` with `replay`) finds pending a first load a job

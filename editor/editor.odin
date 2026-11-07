@@ -794,6 +794,7 @@ play_start :: proc(s:^Session,simulate:=false,owner:int=0) -> bool {
     // The game of the user is shown: the scene comes to the front.
     if owner==0 {asset_document_activate(s,-1)}
     if owner==0 {tools_release(s)}
+    play_animations_load(s,wait=true)
     r:=run_create(s,owner,0)
     if r==nil {return false}
     if owner!=0 {
@@ -812,6 +813,17 @@ play_start :: proc(s:^Session,simulate:=false,owner:int=0) -> bool {
     s.mode=simulate?.Simulate:.Play
     log.info("Play")
     return true
+}
+
+// The .anim the edited world can play, directly or through its prefabs and other assets, start
+// their first load; with wait, Play waits for them so that no entity of its world holds a rest
+// pose while its .anim compresses (once per input: later ones come from the project cache).
+play_animations_load :: proc(s:^Session,wait:bool) {
+    ids:=make([dynamic]base.Asset_Id,context.temp_allocator)
+    host.world_asset_ids(edited_world(s),&ids)
+    animations:=make([dynamic]base.Asset_Id,context.temp_allocator)
+    host.content_animations_start(s.app,ids[:],&animations)
+    if wait {_=host.content_animations_pending(s.app,animations[:],wait=true)}
 }
 
 // The editor shows the run of the user: what Stop puts back is kept.

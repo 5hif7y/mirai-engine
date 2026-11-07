@@ -528,6 +528,8 @@ document_opened :: proc(s:^Session) {
     if s.viewport.exposure_source==.Camera {s.viewport.exposure_source=.Scene}
     s.view_cut=true
     document_source_stamp(s)
+    // What Play will play compresses meanwhile.
+    play_animations_load(s,wait=false)
     if s.ai!=nil {for &task in s.ai.tasks[:s.ai.task_count] {ai_review_reconcile(s,s.ai,&task)}}
     // A scene a merge waits for shows the choices made.
     if s.git!=nil && s.git.merge.loaded {git_merge_preview(s)}

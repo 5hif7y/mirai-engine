@@ -68,6 +68,42 @@ content_animation_wait :: proc(app:^App,id:base.Asset_Id) -> ^Content_Animation 
     return content_animation(app,id)
 }
 
+// Starts the first load of each .anim that ids name, directly or through the assets they depend
+// on in the registry, and appends them to out: what a world that starts playing with those ids
+// can play. Scenes are not followed: they load apart.
+content_animations_start :: proc(app:^App,ids:[]base.Asset_Id,out:^[dynamic]base.Asset_Id) {
+    a:=app.assets
+    if a==nil {return}
+    seen:=make(map[base.Asset_Id]bool,context.temp_allocator)
+    pending:=make([dynamic]base.Asset_Id,context.temp_allocator)
+    append(&pending,..ids)
+    for len(pending)>0 {
+        id:=pop(&pending)
+        if id=={} || id in seen {continue}
+        seen[id]=true
+        file,found:=asset.registry_find(&a.registry,id)
+        if !found || file.kind==asset.KIND_SCENE {continue}
+        if file.kind==asset.KIND_ANIMATION {
+            _=content_animation(app,id)
+            append(out,id)
+            continue
+        }
+        append(&pending,..asset.registry_dependencies(&a.registry,file))
+    }
+}
+
+// Whether the first load of one of ids still compresses (content_animation_pending). With wait,
+// it waits for them and takes them, between frames, for a world that must not start without
+// them; false then.
+content_animations_pending :: proc(app:^App,ids:[]base.Asset_Id,wait:=false) -> bool {
+    for id in ids {
+        if !content_animation_pending(app,id) {continue}
+        if !wait {return true}
+        _=content_animation_wait(app,id)
+    }
+    return false
+}
+
 // Takes the loads whose jobs ended, at the start of the frame of the application: what a job
 // loads changes only there, so a frame sees the same content from its start to its end and the
 // generations a Frame_Record keeps say what it saw.

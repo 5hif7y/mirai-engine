@@ -83,6 +83,9 @@ Editor steps, in order; a plugin step orders itself against them with `after`
   does not advance it) and keeps camera and selection for Stop. Document and history stay in
   `edit_world`. If it cannot write the recovery or create the world, memory included, it does not
   start ([recovery](document.md#recovery-and-failures)).
+- Opening a scene starts the first compression of the `.anim` its world can play, and
+  `play_start` waits for any that has not ended: no entity of a run plays a library still
+  compressing ([content](../../mirai-core/references/host.md#content)).
 - Bounds checks stay active; a native failure can end the editor, which does not continue on
   possibly corrupt memory.
 - A Build with the same layout reloads the functions and keeps both worlds; another layout

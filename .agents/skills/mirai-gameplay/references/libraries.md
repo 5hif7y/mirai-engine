@@ -76,7 +76,9 @@ the name of their type) and a world (handles and tables).
   it names that are not loaded, and what the other assets it names take (the meshes of a foliage
   source; not those of a scene, which is another section), each after what it takes, and
   `load_step` hands them to the renderer with the part of the frame the load has
-  ([budget](../../mirai-core/references/host.md#loaded-assets)). That of a section, in a world
+  ([budget](../../mirai-core/references/host.md#loaded-assets)); it also waits for the first
+  loads of the `.anim` its World can play, through its prefabs and other assets
+  ([content](../../mirai-core/references/host.md#content)). That of a section, in a world
   with `Load_Waits`, then waits for the libraries (`Load_Phase.Waiting`): each frame a library
   names there the assets the load names and it still prepares (`load_wait`, reading them from
   `loads_waiting`), and the load ends once a frame passes without anyone naming theirs.

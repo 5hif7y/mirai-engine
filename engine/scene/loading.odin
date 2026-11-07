@@ -23,7 +23,8 @@ import "mirai:std/jobs"
 // in each frame (host.Load_Budget): a texture larger than the bytes of a
 // frame with its small levels, and the others over the frames that follow,
 // and a mesh larger than them with all its geometry over those frames, which
-// the load waits for. What the jobs read is freed in jobs
+// the load waits for, as for the first load of the .anim it can play
+// (host.content_animations_start). What the jobs read is freed in jobs
 // (host.app_assets_release). Between two frames that World trades its
 // contents with the world, or joins it under the reference of a section.
 // Scene_Loading and Section_Loading tell a loading screen how far it got.
@@ -103,6 +104,7 @@ Load_Job :: struct {
     error:Error,
     counter:jobs.Counter,
     names:[dynamic]base.Asset_Id, // what the World names, once instantiated
+    animations:[dynamic]base.Asset_Id, // the .anim it can play: it ends once they are loaded
     // Warming.
     limits:host.Assets_Limits,
     items:[]Load_Item, // the meshes, textures and materials it names that are not loaded, each after what it takes
@@ -133,6 +135,7 @@ load_begin :: proc(app:^host.App,id:base.Asset_Id,request:Scene_Request={},salt:
     job.wanted=make([dynamic]base.Asset_Id,heap)
     job.documents=make(map[base.Asset_Id]^asset.Asset,heap)
     job.names=make([dynamic]base.Asset_Id,heap)
+    job.animations=make([dynamic]base.Asset_Id,heap)
     asset.types_init(&job.types,heap)
     source,known:=host.assets_source(a,id,heap)
     if !known {
@@ -175,7 +178,7 @@ load_free :: proc(job:^Load_Job) {
     delete(job.documents)
     for &item in job.items {host.app_assets_release(job.app,&item.prepared)}
     asset.piece_decoders_destroy(&job.pieces)
-    delete(job.items,heap);delete(job.names)
+    delete(job.items,heap);delete(job.names);delete(job.animations)
     asset.types_destroy(&job.types)
     free(job,heap)
 }
@@ -339,6 +342,7 @@ load_named :: proc(job:^Load_Job) {
         }
     }
     job.items=job.items[:count]
+    host.content_animations_start(app,job.names[:],&job.animations)
     // A section loads ahead, far away: its textures come with their smallest
     // levels, and their distance asks for the others once it shows them.
     job.limits=host.assets_limits(a,tail=job.salt!=0)
@@ -405,6 +409,8 @@ load_warm :: proc(job:^Load_Job,all:bool,start:time.Tick,taken:^int) -> bool {
     if jobs.pending(&job.counter) {jobs.wait(&app.jobs,jobs.OWNER,&job.counter)}
     // The levels of the textures and the geometry of the meshes that go over frames are there before it ends.
     if !all && host.app_assets_uploading(app) {return false}
+    // Nothing it can play holds a rest pose while its .anim compresses.
+    if host.content_animations_pending(app,job.animations[:],wait=all) {return false}
     if job.gated && !all {
         job.phase=.Waiting
         return false

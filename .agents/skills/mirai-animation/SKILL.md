@@ -134,8 +134,10 @@ automatic plugin `animation_physics` feeds the locomotion of each `Character`.
 - The project's `.anim` keeps exact keys, which the editor edits; the editor and the game play
   them compressed into a stream per clip, and a shipped game carries only those streams
   ([storage](../mirai-std/references/anim-storage.md)). A compression is kept in the project
-  cache and a first one runs in a job: until it ends the entity does not animate (a rig holds its
-  rest pose) and nothing is reported ([content](../mirai-core/references/host.md#content)).
+  cache and a first one runs in a job; a scene load and Play wait for those of the `.anim` their
+  world can play, so only an entity outside them (an edit, a preview) does not animate meanwhile
+  (a rig holds its rest pose) and nothing is reported
+  ([content](../mirai-core/references/host.md#content)).
 - Skinning runs on the GPU; morphs are deformed in the same pass.
 - A part of another skeleton follows the finished pose of its rig by bone name, paired once per
   bind, and keeps its own animation on the bones only it has; a face is curves over poses and

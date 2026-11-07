@@ -263,7 +263,7 @@ setup :: proc(s:^editor.Session,call:^api.Call) {
     if rigged {
         ok:bool
         w,e,ok=subject(s,call,p.id);if !ok {return}
-        if shared,present:=editor.entity_get(w,e,anim.Pose_Source);present {e=shared.rig}
+        e=pose_owner(s,w,e)
         skeleton_id=rig_skeleton(s,w,e)
         if skeleton_id=={} {authoring_failure(call,"id","Missing_Skeleton","an entity that shows a skinned mesh","none","A character needs a skeleton",fix="Pass the id of the rig: the entity with the Mesh_Renderer of a skinned mesh");return}
         if value,present:=editor.entity_get(w,e,anim.Animation);present {animation=value}

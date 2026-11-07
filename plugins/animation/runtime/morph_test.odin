@@ -63,6 +63,16 @@ morph_weights_compose_the_mesh_the_default_the_curve_and_the_overrides_without_a
     imported:=Playing{seen=4,curves_ready=true};defer delete(imported.curves)
     append(&imported.curves,Curve_Output{target=base.name_hash("Armature/Body/@morph/Smile"),property=.Float,value={.6,0,0,0},weight=1})
     testing.expect(t,morph_bind(&named,&rig,{},"",1) && named.by_name && morph_compose(&named,&rig,{},&imported,nil,&content) && abs(named.current[0]-.6)<1e-6)
+    // A curve named as the target, as face captures and curve drives name them, and the
+    // final curves of a rig with drives, which replace those of its animation.
+    face:=Playing{seen=4,curves_ready=true,driven_ready=true,curve_layout=9};defer delete(face.curves);defer delete(face.driven)
+    append(&face.curves,Curve_Output{target=base.name_hash("Smile"),property=.Float,value={.1,0,0,0},weight=1})
+    append(&face.driven,Curve_Output{target=base.name_hash("Smile"),property=.Float,value={.3,0,0,0},weight=1})
+    testing.expect(t,morph_compose(&named,&rig,{},&face) && abs(named.current[0]-.3)<1e-6)
+    face.driven[0].value.x=.7
+    testing.expect(t,morph_compose(&named,&rig,{},&face) && abs(named.current[0]-.7)<1e-6)
+    pathed:=Morph_Playing{curve_count=-1};defer morph_playing_free(&pathed)
+    testing.expect(t,morph_bind(&pathed,&rig,{},"Face",1) && !pathed.by_name && morph_compose(&pathed,&rig,{},&face) && abs(pathed.current[0]-.7)<1e-6,"a mesh bound by path takes the curve of the target's name too")
     full:Morph_Weights
     for i in 0..<asset.MORPH_WEIGHTS {testing.expect(t,morph_weight_set(&full,fmt.tprintf("Shape %d",i),1))}
     testing.expect(t,!morph_weight_set(&full,"One more",1) && morph_weight_set(&full,"Shape 3",2))

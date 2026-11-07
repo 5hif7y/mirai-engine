@@ -838,6 +838,23 @@ fbx_animations :: proc(f:^Fbx) -> bool {
                 fbx_weight_tracks(f,channel,keys,&tracks) or_return
             }
         }
+        // A number property a user added to a node and the stack animates (a custom attribute)
+        // is a Float curve of its name: animation tools export the curves of faces so.
+        curves:=make(map[string]bool,context.temp_allocator)
+        for &element in baked.elements {
+            if int(element.element_id)>=len(scene.elements) || scene.elements[element.element_id].type!=.NODE {continue}
+            owner:=scene.elements[element.element_id]
+            for &prop in element.props {
+                found:=ufbx.find_prop_len(&owner.props,cstring(raw_data(prop.name)),uint(len(prop.name)))
+                if found==nil || found.flags&ufbx.PROP_FLAG_USER_DEFINED==0 || found.type!=.NUMBER && found.type!=.INTEGER && found.type!=.BOOLEAN {continue}
+                if prop.name=="" || len(prop.name)>=asset.NODE_PATH_CAPACITY {importer.warn(r,"FBX curve %s has a name longer than %d bytes and is left out",prop.name,asset.NODE_PATH_CAPACITY-1);continue}
+                if prop.name in curves {importer.warn(r,"FBX animation %s animates curve %s on two nodes; the first is kept",name,prop.name);continue}
+                curves[prop.name]=true
+                keys:=vec3_keys(r,prop.keys[:],name,end,&total_keys) or_return
+                for &key in keys {key.value.yzw={}}
+                append(&tracks,asset.Animation_Track_Desc{target=importer.own(r,prop.name),property=.Float,keys=keys})
+            }
+        }
         // A stack without curves, as the Take 001 of Mixamo, is no clip.
         if len(tracks)==0 {continue}
         total_tracks+=len(tracks)

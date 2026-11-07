@@ -1,8 +1,9 @@
 # Rigs and chain modifiers
 
-The tables `chain_ik`, `twist`, `springs`, `multi_ik`, `retarget_chains`, `spline_ik`, `correctives`
-and `follow` extend the [`.pose` profile](animation.md#components-and-shared-data): they are rows
-of a shared definition, without components per operation. A `.pose` of another `POSE_VERSION` is
+The tables `chain_ik`, `twist`, `springs`, `multi_ik`, `retarget_chains`, `spline_ik`, `correctives`,
+`follow`, `curve_poses`, `curve_drives` and `curve_materials` extend the
+[`.pose` profile](animation.md#components-and-shared-data): they are rows of a shared definition,
+without components per operation. A `.pose` of another `POSE_VERSION` is
 rejected and written again. Math: [std/anim](../../mirai-std/references/anim-rigs.md).
 
 Each row has a name, a weight and an activation; the name is unique in its table and is what an
@@ -56,13 +57,56 @@ other way to name it.
   source in `Animation.source`, like the bone retarget. It admits different topologies, keeps
   translations and scale of the destination and separates the placement of both actors.
 
+## Curve poses and drives
+
+The face of a character is poses that Float curves weigh, as a pose asset of other engines, over
+its body animation; no solver evaluates it.
+
+- **Curve pose**: a row per bone of a pose (`curve`, `bone`, `delta`): at the value of its curve,
+  from 0 to 1, the bone moves by `delta` over its pose, in the space of its parent with its scale
+  a factor. With `full` the row is the transform of the bone itself: the full poses of a bone blend
+  by their weights, normalized past 1 so that only they count, before the additive ones (a pose
+  library of hands or props). The additive poses of a bone are summed (rotations by their
+  logarithms) and applied once, so the order of the rows does not change the pose. A curve can
+  name a pose, a phoneme or a corrective; `pose.profile.poses` makes the rows from the frames of a
+  clip.
+- **Curve drive**: `to` receives what it reads of `from` (with `combine`, the product, least or
+  most of `from` and `with`: a combination shape that two curves bring together), times `scale`
+  plus `offset`, clamped to `low`..`high` with `clamp`; `mode` adds it, replaces the curve or keeps
+  the most, and `weight` blends from the curve before. Rows apply in order: the 52 curves of a
+  face capture (ARKit) become the curves of the poses of a face, and a curve named
+  as a morph target of the mesh moves it ([morphs](animation-morphs.md)). There are no free
+  expressions.
+- The curves come from the animation of the rig (clips, layers, actions, programs) and, in a
+  follower, from its [leader](animation.md#following-a-rig-of-another-skeleton). The drives make
+  the final curves of the rig (`Playing.driven`), which lookups and morphs read; the poses move the
+  bones before the other operations of the profile.
+- The final curves of a rig are laid out once, when its curves, its leader's, its profile or its
+  skeleton change: its own, its leader's and those its drives write, each once in `curve_order`
+  (name hash, property, slot), with where each curve and each drive goes. A tick only copies values
+  by those places; curve materials take their names hashed and their curves found by the tick, so
+  the drawing searches nothing.
+- **Curve material**: a value of the material of the meshes of the rig (`parameter`: a value of the
+  material or of its program, in `slot` or in every slot) is `offset` plus `scale` times the
+  curve, rounded to multiples of `step` when it is positive: the frame of a flipbook face, a
+  switch, a blush. `animation_skin` draws it over the `Material_Override` of each mesh of the rig
+  (the rig and those that share its pose) without writing the component, whose writers stay the
+  game and the editor; past the capacity of the override it is the problem
+  `animation.curve_material`.
+- Each distinct material value is a derived material of the renderer, freed when no drawing uses
+  it: a stepped curve costs a few; one that changes in every frame makes one per frame and mesh,
+  which suits a few characters, not crowds (there are no per-instance parameters in the shader).
+- A face of a rig evaluator or of a control rig is baked to curves and poses or to morphs: the plugin has
+  no rig evaluator. Poses driven by bone rotations are correctives (inverse distance), not an RBF
+  solver.
+
 The capacities are fixed contracts, not growing per frame: a path that does not form a parent-child
 chain, a topology that is too long or an incompatible target is a bind failure or a residual.
 
 ## Order and state
 
 - Order: retarget of bones and chains (from `Playing.sampled`, before their constraints), removal of
-  root motion, grounding, contacts and IK/look-at, Chain IK, Multi IK, twist, springs, Spline IK,
+  root motion, the follow of a leader, curve drives and curve poses, grounding, contacts and IK/look-at, Chain IK, Multi IK, twist, springs, Spline IK,
   correctives, Follow and, at the end, limits and attachments.
 - `Modifier_Runtime` stores tables, bindings and spring state; `core.value_copy` copies it for Play
   and rollback and the assets stay shared. The rows are not components nor another owner of
@@ -123,7 +167,9 @@ maps.
 
 - `rig_profiles_roundtrip_typed_operations_and_reject_invalid_capacities` and the cases of
   `rig_shapes_test.odin` (spline, correctives, spatial targets, Follow, aligned IK, Look with an up
-  axis, targets by name after reordering the profile)
+  axis, targets by name after reordering the profile, curve poses and drives)
+- Curve drives and poses over a follower, combinations, full poses in any order of the rows, the
+  final curves laid out again only when they change, and curve materials: `follow_test.odin`
 - `chain_and_spring_modifiers_reuse_bind_buffers_copy_snapshots_and_retire_controls`
 - `semantic_retarget_bindings_ignore_actor_placement_and_replay_without_allocations`
 - `multi_ik_modifiers_accept_named_goals_keep_effectors_independent_and_clone_solver_scratch`
@@ -139,6 +185,7 @@ maps.
 - `baking_retargets_clips_once_and_preserves_curves_markers_and_root_metadata` and the two
   `baking_semantic_chains_*`.
 - `rig_modifier_api_discovers_named_operations_effectors_and_retarget_without_pose_modifiers`.
+- `curve_poses_are_made_from_the_frames_of_a_clip_and_replace_those_of_their_curves`.
 
 The CPU cases verify neither the GPU nor the visual quality of a model: that requires a build and a
 run of the editor or the player.

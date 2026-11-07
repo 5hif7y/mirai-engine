@@ -8,13 +8,14 @@ import "mirai:std/base"
 import "mirai:std/serial"
 import anim "plugins:animation/runtime"
 
-Profile_Table :: enum u8 {IK,Look,Limit,Contact,Grounding,Retarget,Chain_IK,Twist,Spring,Multi_IK,Chain_Retarget,Spline_IK,Corrective,Follow}
-Profile_Counts :: struct {IK,Look,Limit,Contact,Grounding,Retarget,Chain_IK,Twist,Spring,Multi_IK,Chain_Retarget,Spline_IK,Corrective,Follow:u32}
+Profile_Table :: enum u8 {IK,Look,Limit,Contact,Grounding,Retarget,Chain_IK,Twist,Spring,Multi_IK,Chain_Retarget,Spline_IK,Corrective,Follow,Curve_Pose,Curve_Drive,Curve_Material}
+Profile_Counts :: struct {IK,Look,Limit,Contact,Grounding,Retarget,Chain_IK,Twist,Spring,Multi_IK,Chain_Retarget,Spline_IK,Corrective,Follow,Curve_Pose,Curve_Drive,Curve_Material:u32}
 Profile_Inspect_Result :: struct {
     asset:base.Asset_Id,path:[1024]u8 `mirai:"text"`,table:Profile_Table,counts:Profile_Counts,
     ik:[256]Authoring_Page(anim.IK_Constraint),look:[256]Authoring_Page(anim.Look_Constraint),limits:[256]Authoring_Page(anim.Rotation_Constraint),contacts:[256]Authoring_Page(anim.Foot_Contact_Constraint),grounding:[1]Authoring_Page(Profile_Grounding_Params),retarget:[256]Authoring_Page(anim.Retarget_Mapping),
     chain_ik:[256]Authoring_Page(Profile_Chain_Params),twist:[256]Authoring_Page(Profile_Twist_Params),springs:[256]Authoring_Page(Profile_Spring_Params),multi_ik:[256]Authoring_Page(Profile_Multi_Params),retarget_chains:[256]Authoring_Page(anim.Chain_Retarget_Constraint),
     spline_ik:[256]Authoring_Page(Profile_Spline_Params),correctives:[256]Authoring_Page(Profile_Corrective_Params),follow:[256]Authoring_Page(Profile_Follow_Params),
+    curve_poses:[256]Authoring_Page(anim.Curve_Pose),curve_drives:[256]Authoring_Page(anim.Curve_Drive),curve_materials:[256]Authoring_Page(anim.Curve_Material),
 }
 Profile_Inspect_Params :: struct {
     asset:base.Asset_Id,
@@ -25,7 +26,7 @@ Profile_Inspect_Params :: struct {
 Profile_Set_Params :: struct {
     asset:base.Asset_Id,
     table:Profile_Table `mirai:"label=The table; the field named after it holds the value and the lengths of its arrays are its counts"`,
-    index:u32 `mirai:"label=Existing row or the row count of the table to append; a table holds 256 rows and Grounding one rig of up to 16 legs"`,
+    index:u32 `mirai:"label=Existing row or the row count of the table to append; a table holds 256 rows; Curve_Pose, Curve_Drive and Curve_Material 4096; Grounding one rig of up to 16 legs"`,
     ik:anim.IK_Constraint `mirai:"optional"`,
     look:anim.Look_Constraint `mirai:"optional"`,
     limit:anim.Rotation_Constraint `mirai:"optional"`,
@@ -40,6 +41,9 @@ Profile_Set_Params :: struct {
     spline_ik:Profile_Spline_Params `mirai:"optional"`,
     corrective:Profile_Corrective_Params `mirai:"optional"`,
     follow:Profile_Follow_Params `mirai:"optional"`,
+    curve_pose:anim.Curve_Pose `mirai:"optional,label=A bone that a Float curve moves by delta at its value; a pose of a face is a row per bone"`,
+    curve_drive:anim.Curve_Drive `mirai:"optional,label=A Float curve that adds scale times its value to another; rows apply in order"`,
+    curve_material:anim.Curve_Material `mirai:"optional,label=A material value of the meshes of the rig that a Float curve moves; step rounds it to frames"`,
     remove:bool `mirai:"optional"`,
     dry_run:bool `mirai:"optional,label=Validates and answers without writing"`,
 }
@@ -50,8 +54,12 @@ authoring_profile_register :: proc(s:^editor.Session) {
     set:=new(Profile_Set_Params,context.temp_allocator);if set==nil {return}
     set.ik,set.look,set.limit,set.contact=anim.IK_CONSTRAINT_DEFAULT,anim.LOOK_CONSTRAINT_DEFAULT,anim.ROTATION_CONSTRAINT_DEFAULT,anim.FOOT_CONTACT_CONSTRAINT_DEFAULT
     set.retarget,set.retarget_chain=anim.RETARGET_MAPPING_DEFAULT,anim.CHAIN_RETARGET_CONSTRAINT_DEFAULT;profile_constraints_defaults(set)
+    set.curve_pose,set.curve_drive,set.curve_material=anim.CURVE_POSE_DEFAULT,anim.CURVE_DRIVE_DEFAULT,anim.CURVE_MATERIAL_DEFAULT
+    poses:=new(Profile_Poses_Params,context.temp_allocator);if poses==nil {return}
+    poses.tolerance=PROFILE_POSES_TOLERANCE
     authoring_method_register(s,{name="pose.profile.create",summary="Creates an empty .pose profile of rig operations; pose.profile.set fills its tables.",params=Authoring_Create_Params,params_info=type_info_of(Authoring_Create_Params),run=authoring_profile_create},Authoring_Write_Result,type_info_of(Authoring_Write_Result))
     authoring_method_register(s,{name="pose.profile.set",summary="Replaces, appends or removes one row of a table of a .pose profile.",params=Profile_Set_Params,params_info=type_info_of(Profile_Set_Params),defaults=set,run=authoring_profile_set},Authoring_Write_Result,type_info_of(Authoring_Write_Result))
+    authoring_method_register(s,{name="pose.profile.poses",summary="Makes the curve poses of a .pose from the frames of a clip, each a pose that a Float curve of its name brings, measured from the pose at base: the poses of a face from an animation of them. One step of undo.",params=Profile_Poses_Params,params_info=type_info_of(Profile_Poses_Params),defaults=poses,run=authoring_profile_poses},Profile_Poses_Result,type_info_of(Profile_Poses_Result))
 }
 
 @(private)
@@ -71,7 +79,7 @@ authoring_profile_inspect :: proc(s:^editor.Session,call:^api.Call) {
     out:=call.out
     serial.text_write_raw(out,"{");authoring_result(call,p.asset,file.path)
     api.write_key(out,"counts");serial.text_write_raw(out,"{")
-    api.write_uint(out,"IK",u64(len(profile.ik)),true);api.write_uint(out,"Look",u64(len(profile.look)));api.write_uint(out,"Limit",u64(len(profile.limits)));api.write_uint(out,"Contact",u64(len(profile.contacts)));api.write_uint(out,"Grounding",u64(len(profile.grounding)));api.write_uint(out,"Retarget",u64(len(profile.retarget)));api.write_uint(out,"Chain_IK",u64(len(profile.chain_ik)));api.write_uint(out,"Twist",u64(len(profile.twist)));api.write_uint(out,"Spring",u64(len(profile.springs)));api.write_uint(out,"Multi_IK",u64(len(profile.multi_ik)));api.write_uint(out,"Chain_Retarget",u64(len(profile.retarget_chains)));api.write_uint(out,"Spline_IK",u64(len(profile.spline_ik)));api.write_uint(out,"Corrective",u64(len(profile.correctives)));api.write_uint(out,"Follow",u64(len(profile.follow)));serial.text_write_raw(out,"}")
+    api.write_uint(out,"IK",u64(len(profile.ik)),true);api.write_uint(out,"Look",u64(len(profile.look)));api.write_uint(out,"Limit",u64(len(profile.limits)));api.write_uint(out,"Contact",u64(len(profile.contacts)));api.write_uint(out,"Grounding",u64(len(profile.grounding)));api.write_uint(out,"Retarget",u64(len(profile.retarget)));api.write_uint(out,"Chain_IK",u64(len(profile.chain_ik)));api.write_uint(out,"Twist",u64(len(profile.twist)));api.write_uint(out,"Spring",u64(len(profile.springs)));api.write_uint(out,"Multi_IK",u64(len(profile.multi_ik)));api.write_uint(out,"Chain_Retarget",u64(len(profile.retarget_chains)));api.write_uint(out,"Spline_IK",u64(len(profile.spline_ik)));api.write_uint(out,"Corrective",u64(len(profile.correctives)));api.write_uint(out,"Follow",u64(len(profile.follow)));api.write_uint(out,"Curve_Pose",u64(len(profile.curve_poses)));api.write_uint(out,"Curve_Drive",u64(len(profile.curve_drives)));api.write_uint(out,"Curve_Material",u64(len(profile.curve_materials)));serial.text_write_raw(out,"}")
     api.write_key(out,"table");authoring_write_value(call,&p.table,type_info_of(Profile_Table))
     program_rows(call,"ik",profile.ik if p.table==.IK else nil,p.offset,p.limit)
     program_rows(call,"look",profile.look if p.table==.Look else nil,p.offset,p.limit)
@@ -87,6 +95,9 @@ authoring_profile_inspect :: proc(s:^editor.Session,call:^api.Call) {
     profile_constraint_rows(call,"spline_ik",profile.spline_ik if p.table==.Spline_IK else nil,p.offset,p.limit)
     profile_constraint_rows(call,"correctives",profile.correctives if p.table==.Corrective else nil,p.offset,p.limit)
     profile_constraint_rows(call,"follow",profile.follow if p.table==.Follow else nil,p.offset,p.limit)
+    program_rows(call,"curve_poses",profile.curve_poses if p.table==.Curve_Pose else nil,p.offset,p.limit)
+    program_rows(call,"curve_drives",profile.curve_drives if p.table==.Curve_Drive else nil,p.offset,p.limit)
+    program_rows(call,"curve_materials",profile.curve_materials if p.table==.Curve_Material else nil,p.offset,p.limit)
     serial.text_write_raw(out,"}")
 }
 
@@ -108,7 +119,7 @@ authoring_profile_create :: proc(s:^editor.Session,call:^api.Call) {
 authoring_profile_set :: proc(s:^editor.Session,call:^api.Call) {
     p:=api.call_params(call,Profile_Set_Params)
     if !authoring_editable(s,call) {return}
-    fields:=[Profile_Table]string{.IK="ik",.Look="look",.Limit="limit",.Contact="contact",.Grounding="grounding",.Retarget="retarget",.Chain_IK="chain_ik",.Twist="twist",.Spring="spring",.Multi_IK="multi_ik",.Chain_Retarget="retarget_chain",.Spline_IK="spline_ik",.Corrective="corrective",.Follow="follow"}
+    fields:=[Profile_Table]string{.IK="ik",.Look="look",.Limit="limit",.Contact="contact",.Grounding="grounding",.Retarget="retarget",.Chain_IK="chain_ik",.Twist="twist",.Spring="spring",.Multi_IK="multi_ik",.Chain_Retarget="retarget_chain",.Spline_IK="spline_ik",.Corrective="corrective",.Follow="follow",.Curve_Pose="curve_pose",.Curve_Drive="curve_drive",.Curve_Material="curve_material"}
     if p.table>max(Profile_Table) || !p.remove && !authoring_field_present(call,fields[p.table]) {authoring_failure(call,"table","Required","the constraint field selected by table","missing or invalid table","Supply the constraint field selected by table");return}
     file:Authoring_File;defer asset.asset_close(&file.file)
     profile,ok:=authoring_profile_open(s,call,p.asset,&file);if !ok {return}
@@ -128,6 +139,9 @@ authoring_profile_set :: proc(s:^editor.Session,call:^api.Call) {
     case .Spline_IK: profile.spline_ik,replaced=authoring_replace_row(profile.spline_ik,int(p.index),profile_spline_value(p.spline_ik),p.remove,anim.POSE_CONSTRAINTS,call.allocator)
     case .Corrective: profile.correctives,replaced=authoring_replace_row(profile.correctives,int(p.index),profile_corrective_value(call,p.corrective),p.remove,anim.POSE_CONSTRAINTS,call.allocator)
     case .Follow: profile.follow,replaced=authoring_replace_row(profile.follow,int(p.index),profile_follow_value(p.follow),p.remove,anim.POSE_CONSTRAINTS,call.allocator)
+    case .Curve_Pose: profile.curve_poses,replaced=authoring_replace_row(profile.curve_poses,int(p.index),p.curve_pose,p.remove,anim.POSE_CURVE_ROWS,call.allocator)
+    case .Curve_Drive: profile.curve_drives,replaced=authoring_replace_row(profile.curve_drives,int(p.index),p.curve_drive,p.remove,anim.POSE_CURVE_ROWS,call.allocator)
+    case .Curve_Material: profile.curve_materials,replaced=authoring_replace_row(profile.curve_materials,int(p.index),p.curve_material,p.remove,anim.POSE_CURVE_ROWS,call.allocator)
     }
     if !replaced {authoring_failure(call,"index","Invalid_Edit","an existing constraint or append after the last row",fmt.tprintf("%d; remove=%t",p.index,p.remove),"The constraint edit cannot be prepared within capacity");return}
     authoring_profile_save(s,call,file,p.asset,profile)

@@ -11,7 +11,8 @@
 - skinned.fbx (binary): Y up and meters. A skeleton of two bones under Armature, named in the
   namespace rig as Maya writes it, a quad skinned to them with a blend shape Smile, an empty stack
   Take 001 as Mixamo writes it, and the stack Wave: Tip turns 90 degrees about Z in a second, steps
-  0.25 along X at half a second, and Smile goes from 0 to 100 percent.
+  0.25 along X at half a second, Smile goes from 0 to 100 percent and the custom attribute jawOpen
+  of Root, a curve as animation tools export them, from 0 to 0.8.
 - inherit.fbx (binary) and inherit-ascii.fbx (the same scene in ASCII): Y up and meters. Stretch,
   turned 90 degrees about Z, scales (1, 0.5, 1) and in the stack Squash its X goes from 1 to 3 in
   a second and its Z steps to 2 at half a second. Under it Segment (a bone of the skinned Body) and Still do not inherit its scale
@@ -43,7 +44,7 @@ class Node:
         self.name, self.props, self.children = name, list(props), list(children)
 
 
-def P(name, kind, *values):
+def P(name, kind, *values, flags="A"):
     typed = []
     for v in values:
         if isinstance(v, (I, L, D, S)):
@@ -56,7 +57,7 @@ def P(name, kind, *values):
             typed.append(S(v))
         else:
             typed.append(D(v))
-    return Node("P", S(name), S(kind), S(""), S("A"), *typed)
+    return Node("P", S(name), S(kind), S(""), S(flags), *typed)
 
 
 def props70(*entries):
@@ -279,7 +280,7 @@ def skinned():
     ])
     objects = Node("Objects", children=[
         model(100, "Armature", "Null"),
-        model(101, "rig:Root", "LimbNode"),
+        model(101, "rig:Root", "LimbNode", P("jawOpen", "Number", 0, flags="A+U")),
         model(102, "rig:Tip", "LimbNode", P("Lcl Translation", "Lcl Translation", 0, 1, 0)),
         model(103, "Body", "Mesh"),
         Node("NodeAttribute", L(110), Name("NodeAttribute", ""), S("LimbNode"), children=[Node("TypeFlags", S("Skeleton"))]),
@@ -316,6 +317,8 @@ def skinned():
         curve(505, [0, SECOND // 2], [0, 0.25], [CONSTANT, LINEAR]),
         curve_node(506, "DeformPercent", ("DeformPercent", 0)),
         curve(507, [0, SECOND], [0, 100], [LINEAR]),
+        curve_node(508, "jawOpen", ("jawOpen", 0)),
+        curve(509, [0, SECOND], [0, 0.8], [LINEAR]),
     ])
     connections = Node("Connections", children=[
         C("OO", 100, 0), C("OO", 101, 100), C("OO", 102, 101), C("OO", 103, 100),
@@ -327,6 +330,7 @@ def skinned():
         C("OO", 502, 501), C("OP", 502, 102, "Lcl Rotation"), C("OP", 503, 502, "d|Z"),
         C("OO", 504, 501), C("OP", 504, 102, "Lcl Translation"), C("OP", 505, 504, "d|X"),
         C("OO", 506, 501), C("OP", 506, 401, "DeformPercent"), C("OP", 507, 506, "d|DeformPercent"),
+        C("OO", 508, 501), C("OP", 508, 101, "jawOpen"), C("OP", 509, 508, "d|jawOpen"),
     ])
     return [header(), settings(1, 1, 2, 1, 0, 100.0), objects, connections]
 

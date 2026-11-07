@@ -17,7 +17,8 @@ Components (`@(component)` of `plugins/animation/runtime`):
 - **`Animation`**: clip, `.match` or graph, parameters by name, layers and playback; alternative
   library, mirroring, root motion, live retarget and profiles of actions and motion.
   **`Animation_Progress`** stores where its clip is ([storages](#storages)).
-- **`Pose_Source`**: another mesh shares the evaluated pose of a rig.
+- **`Pose_Source`**: another mesh shares the evaluated pose of a rig of its skeleton, or, with a
+  skeleton of its own, [follows it](#following-a-rig-of-another-skeleton).
 - **`Pose_Modifiers`**: activates a shared `.pose` profile on its rig.
 - **`Bone_Attachment`**: on each equipped object, references a socket of the skeleton.
 - **`Keyframe_Path`** ([sequences](animation-sequence.md)), **`Animation_Budget`**
@@ -32,9 +33,9 @@ Components (`@(component)` of `plugins/animation/runtime`):
 
 Rigs:
 
-- A rig is the entity with `Mesh_Renderer` whose mesh references a `.skeleton`, without
-  `Pose_Source`; it does not need `Animation` for a procedural pose. Each rig has its own pose even
-  if it shares mesh, skeleton, clips and profile.
+- A rig is the entity with `Mesh_Renderer` whose mesh references a `.skeleton`, without a
+  `Pose_Source` to a rig of that skeleton; it does not need `Animation` for a procedural pose. Each
+  rig has its own pose even if it shares mesh, skeleton, clips and profile.
 - The skin (weights, joints and inverse binds of the `.mesh`) is a static link; `Pose_Source`
   references a dynamic pose and stores neither weights nor bones. The prefab creates no entities per
   bone.
@@ -87,6 +88,26 @@ Targets and controls:
   allocate, do not resolve bones again and do not walk the controls of other rigs.
 - An OOM when loading or reloading profiles or skeletons keeps the previous runtime, does not
   publish empty tables and retries.
+
+### Following a rig of another skeleton
+
+A mesh whose `Pose_Source` names a rig of another skeleton (a head with the neck of the body and
+the bones of its face) is a rig of its own that follows it: `Rig.leader`.
+
+- Its bones take the finished pose of the rig's bones of their name (after its constraints, IK and
+  grounding), or of their path where a name repeats; the bones only it has keep its own animation,
+  its `Animation` and its profile, under the parents that now move. The pairs are made when either
+  binds its skeleton, never per tick.
+- The curves that the leader animates replace those of the follower's animation; the others stay.
+  Its morphs read the follower's curves (`source_kind` `Own`).
+- In `animation_finish` a follower goes after its leader, which may follow another, in one pass:
+  `rigs_update` orders the followers by how many leaders are above them when the rigs change
+  (`Playback.follow_order`), and a loop goes last and is the problem `animation.follow_rig`. Skeletons without a common name are `animation.follow_bones`.
+  The finished pose of a leader in the world is made once per tick for all of its followers
+  (`Playing.world_final`).
+- Its own profile applies after the follow: [curve poses](animation-rigs.md#curve-poses-and-drives)
+  of its face, its sockets and its rigs. It lies where its leader is in the world: its entity may
+  sit anywhere.
 
 Sockets:
 
@@ -347,7 +368,8 @@ Root motion:
 Queries and events:
 
 - `animation_curve` and `animation_vector` query a curve by name after programs and layers, with
-  defaults in contributions without a track.
+  defaults in contributions without a track; after `animation_advance`, with those of its leader and
+  its curve drives (`playing_curves`).
 - `Animation_Events` brings the markers with weight, source, group, `.anim` and `fraction` (where in
   the advance of the tick it was crossed). Dominant emits the greatest contribution, Weighted
   filters by `event_threshold` and Always leaves all the positive ones; zero weight does not emit.
@@ -383,8 +405,8 @@ Editor and skinning:
   does not.
 - A rig whose palette leaves each vertex at its bind (`palette_at_bind`) is drawn with the world's
   shared mesh: a still character or one without animation copies no geometry or BLAS. The copy is
-  created the first time the palette leaves the bind and stays until the rig goes away; with morphs,
-  from the start. A copy larger than what one frame uploads goes
+  created the first time the palette leaves the bind and stays until the rig goes away; with morphs
+  or [curve materials](animation-rigs.md#curve-poses-and-drives), from the start. A copy larger than what one frame uploads goes
   [over several frames](../../mirai-rendering/references/scene.md#geometry-over-several-frames): the
   entity is not drawn (no shadow, rays or outline) until it went up whole and appears already posed,
   without `Hidden` or anything the game does.
@@ -440,6 +462,9 @@ message that says how to fix it; `engine.diagnostics` lists them and `animation.
   not bound or not resolved (`rig_*`, `constraint_*`, `grounding_*`, `retarget_*`, `motion_*`,
   `morph_*`) and rejected requests (`action_*`, `modifier_*`, `distance`, `match_busy`,
   `match_goal`).
+- A rig that cannot follow its leader (`follow_rig`, `follow_bones`, `follow_pose`), curve poses
+  of bones its skeleton lacks or with curves that are not finite (`curve_pose_bone`,
+  `curve_pose_value`) and curve materials past the capacity of the override (`curve_material`).
 - Lost markers or events (`markers_lost`, `play_events`, `action_events`), values that do not fit in
   the pose (`animation.pose_full`, with what `std/anim` counted in `Pose.failed`) and lack of memory
   (`animation.memory`: the entity keeps its last pose and retries).
@@ -478,8 +503,13 @@ message that says how to fix it; `engine.diagnostics` lists them and `animation.
   - `retarget_constraints_read_frozen_source_pose_and_preserve_target_lengths`
   - `live_retarget_profile_changes_compare_full_asset_ids_and_preserve_source_identity`
   - `retarget_paths_*`
+- `a_head_of_its_own_skeleton_follows_the_body_and_its_curves_pose_its_face_without_stable_allocations`
+  (`follow_test.odin`): shared bones over the body's wherever both entities sit, own bones, leader
+  curves, drives and poses, loops, missing names and values that are not finite;
+  `followers_finish_after_their_leaders_in_the_order_found_once`: chains and loops of followers.
 - Rigs, actions, motion, budget, grounding, authoring and storage: their references.
 - `rigs_at_the_bind_pose_share_their_mesh_until_a_pose_leaves_it` (`skin_bind_test.odin`, GPU): rigs
-  at the bind without copies and the copy of the one that is posed.
+  at the bind without copies, the copy of the one that is posed and that of one with curve
+  materials.
 - CPU tests do not vouch for the visual integration: compile and run the project; GPU skinning
   requires graphics validation.

@@ -159,7 +159,7 @@ Body:
   leg at its target) and by `max_drop`/`max_rise`. If the limits are incompatible, an infeasible
   target keeps its residual: weights are not lowered to hide it.
 - The animated pole keeps the flexion of the pose recomposed after the body adjustment
-  ([`two_bone_pole_from_pose`](../../mirai-std/references/anim.md#adaptation-ikodin-retargetodin)):
+  ([`two_bone_pole_from_pose`](../../mirai-std/references/anim.md#adaptation-ikodin-retargetodin-followodin)):
   raising the foot does not invert the plane when passing near the source knee.
 - It is geometric adaptation, not physical balance or full-body IK; the game moves the actor.
 

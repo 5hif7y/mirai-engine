@@ -277,7 +277,7 @@ preview :: proc(s:^editor.Session,call:^api.Call) {
     p:=api.call_params(call,Preview_Params)
     source,e,ok:=subject(s,call,p.id);if !ok {return}
     skeleton_id:=rig_skeleton(s,source,e)
-    if shared,present:=editor.entity_get(source,e,anim.Pose_Source);present {e=shared.rig}
+    e=pose_owner(s,source,e)
     if !editor.entity_has(source,e,anim.Animation) && skeleton_id=={} {authoring_failure(call,"id","Missing_Component","Animation or a mesh with a skeleton","missing both","The entity has no Animation and shows no mesh with a skeleton");return}
     clone:=preview_world_clone(s,call,source)
     if clone==nil {return}

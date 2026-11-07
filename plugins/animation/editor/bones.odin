@@ -28,15 +28,28 @@ bone_inspector_rig :: proc(c:editor.Inspector_Context) -> core.Entity {
     return owner
 }
 
-// The skeleton a rig poses: that of the mesh it shows, or of the rig its Pose_Source follows.
+// The skeleton a rig poses: that of the mesh it shows, or of the rig whose pose its Pose_Source shares.
 @(private)
 rig_skeleton :: proc(s:^editor.Session,w:core.World_Ref,rig:core.Entity) -> base.Asset_Id {
-    rig:=rig
-    if skin,has:=editor.entity_get(w,rig,anim.Pose_Source);has {rig=skin.rig}
-    shown,has:=editor.entity_get(w,rig,erender.Mesh_Renderer)
+    return mesh_skeleton(s,w,pose_owner(s,w,rig))
+}
+
+@(private)
+mesh_skeleton :: proc(s:^editor.Session,w:core.World_Ref,e:core.Entity) -> base.Asset_Id {
+    shown,has:=editor.entity_get(w,e,erender.Mesh_Renderer)
     if !has || shown.mesh=={} || s.app==nil || s.app.assets==nil {return {}}
     mesh:=host.assets_mesh(s.app.assets,shown.mesh)
     return mesh.skeleton if mesh!=nil && !mesh.failed else {}
+}
+
+// The rig whose pose an entity shows: the rig of its Pose_Source when it shares that rig's
+// skeleton, else itself. A mesh of another skeleton is a rig of its own that follows that one.
+@(private)
+pose_owner :: proc(s:^editor.Session,w:core.World_Ref,e:core.Entity) -> core.Entity {
+    skin,has:=editor.entity_get(w,e,anim.Pose_Source)
+    if !has || skin.rig==core.NONE || skin.rig==e {return e}
+    own,theirs:=mesh_skeleton(s,w,e),mesh_skeleton(s,w,skin.rig)
+    return e if own!={} && theirs!={} && own!=theirs else skin.rig
 }
 
 @(private)

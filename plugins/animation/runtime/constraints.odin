@@ -357,6 +357,8 @@ constraints_apply :: proc(state:^Playing,playback:^Playback,inputs:Constraint_In
             return
         }
     }
+    followed:=state.leader!=core.NONE && leader_follow(state,playback,inputs,transforms,parents,parent_world)
+    curve_poses_apply(state,playback,rig_runtime,followed,problems)
     if !lib.pose_world(skeleton.parents,state.local[:],state.world[:],parent_world) {pose_problem(problems,state.entity);return}
     if motion!=nil {
         if instance:=motion_instance(motion,state.entity);instance!=nil {

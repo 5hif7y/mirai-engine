@@ -10,7 +10,7 @@ import lib "mirai:std/anim"
 import mm "mirai:std/math"
 
 POSE_KIND :: asset.Fourcc(u32('P')|u32('O')<<8|u32('S')<<16|u32('E')<<24)
-POSE_VERSION :: 4
+POSE_VERSION :: 5
 POSE_CONSTRAINTS :: 256
 
 @(component,description="Applies a pose profile with IK, aiming, joint limits or foot grounding. Gameplay supplies the dynamic targets.")
@@ -45,6 +45,9 @@ Pose_Profile :: struct {
     spline_ik:[]Spline_IK_Constraint,
     correctives:[]Pose_Corrective,
     follow:[]Follow_Constraint,
+    curve_poses:[]Curve_Pose,
+    curve_drives:[]Curve_Drive,
+    curve_materials:[]Curve_Material,
 }
 
 pose_profile_check :: proc(profile:Pose_Profile) -> bool {
@@ -73,7 +76,7 @@ pose_profile_check :: proc(profile:Pose_Profile) -> bool {
         if value.mode>.Paths || value.translation>max(type_of(value.translation)) || !profile_bone(value.source_bone) || !profile_bone(value.target_bone) {return false}
         if value.mode==.Paths {if paths {return false};paths=true}
     }
-    return rig_profiles_check(profile)
+    return rig_profiles_check(profile) && curve_poses_check(profile)
 }
 @(private) profile_bone :: proc(value:Bone_Ref) -> bool {_,ok:=bone_ref_hash(value);return ok}
 @(private) profile_weight :: proc "contextless" (value:f32) -> bool {return finite(value) && value>=0 && value<=1}
@@ -103,6 +106,9 @@ pose_profile_tables :: proc(doc:^asset.Document,types:^asset.Types,profile:Pose_
     asset.document_put(doc,types,"spline_ik",profile.spline_ik) or_return
     asset.document_put(doc,types,"correctives",profile.correctives) or_return
     asset.document_put(doc,types,"follow",profile.follow) or_return
+    asset.document_put(doc,types,"curve_poses",profile.curve_poses) or_return
+    asset.document_put(doc,types,"curve_drives",profile.curve_drives) or_return
+    asset.document_put(doc,types,"curve_materials",profile.curve_materials) or_return
     return .None
 }
 pose_profile_save :: proc(path:string,types:^asset.Types,id:base.Asset_Id,profile:Pose_Profile,allocator:=context.allocator) -> asset.Error {
@@ -127,6 +133,9 @@ pose_profile_view :: proc(file:^asset.Asset,types:^asset.Types) -> (profile:Pose
     profile.spline_ik=asset.asset_rows(file,types,"spline_ik","",Spline_IK_Constraint) or_return
     profile.correctives=asset.asset_rows(file,types,"correctives","",Pose_Corrective) or_return
     profile.follow=asset.asset_rows(file,types,"follow","",Follow_Constraint) or_return
+    profile.curve_poses=asset.asset_rows(file,types,"curve_poses","",Curve_Pose) or_return
+    profile.curve_drives=asset.asset_rows(file,types,"curve_drives","",Curve_Drive) or_return
+    profile.curve_materials=asset.asset_rows(file,types,"curve_materials","",Curve_Material) or_return
     if !pose_profile_check(profile) {return {},.Corrupt}
     return profile,.None
 }
@@ -137,7 +146,7 @@ Pose_Assets :: struct {allocator:mem.Allocator,contents:[dynamic]Pose_Content}
 
 pose_profile_free :: proc(profile:^Pose_Profile) {
     delete(profile.chain_ik);delete(profile.twist);delete(profile.springs);delete(profile.multi_ik);delete(profile.retarget_chains)
-    delete(profile.spline_ik);delete(profile.correctives);delete(profile.follow)
+    delete(profile.spline_ik);delete(profile.correctives);delete(profile.follow);delete(profile.curve_poses);delete(profile.curve_drives);delete(profile.curve_materials)
     delete(profile.ik);delete(profile.look);delete(profile.limits);delete(profile.contacts);delete(profile.grounding);delete(profile.retarget);profile^={}
 }
 pose_assets_free :: proc(cache:^Pose_Assets) {
@@ -190,6 +199,9 @@ pose_profile_read :: proc(app:^host.App,id:base.Asset_Id) -> (profile:Pose_Profi
     profile.spline_ik,ok=clone(view.spline_ik,app.allocator);if !ok {pose_profile_free(&profile);return {},.Out_Of_Memory}
     profile.correctives,ok=clone(view.correctives,app.allocator);if !ok {pose_profile_free(&profile);return {},.Out_Of_Memory}
     profile.follow,ok=clone(view.follow,app.allocator);if !ok {pose_profile_free(&profile);return {},.Out_Of_Memory}
+    profile.curve_poses,ok=clone(view.curve_poses,app.allocator);if !ok {pose_profile_free(&profile);return {},.Out_Of_Memory}
+    profile.curve_drives,ok=clone(view.curve_drives,app.allocator);if !ok {pose_profile_free(&profile);return {},.Out_Of_Memory}
+    profile.curve_materials,ok=clone(view.curve_materials,app.allocator);if !ok {pose_profile_free(&profile);return {},.Out_Of_Memory}
     return profile,.None
 }
 
@@ -243,9 +255,14 @@ Modifier_Runtime :: struct {
     spline_ik:core.Table(Spline_IK_Constraint),
     correctives:core.Table(Pose_Corrective),
     follow:core.Table(Follow_Constraint),
+    curve_poses:core.Table(Curve_Pose),
+    curve_drives:core.Table(Curve_Drive),
+    curve_materials:core.Table(Curve_Material),
     spline_states:[dynamic]Spline_IK_Binding,
     corrective_states:[dynamic]Pose_Corrective_Binding,
     follow_states:[dynamic]Follow_Binding,
+    curve_pose_states,curve_drive_states,curve_material_states:[dynamic]Curve_Binding,
+    curve_full:[dynamic]lib.Pose_Accumulator, // by bone of the rig being evaluated: the full poses of its curves
     chain_states:[dynamic]Chain_IK_Binding,
     twist_states:[dynamic]Twist_Binding,
     spring_states:[dynamic]Spring_Binding,
@@ -264,6 +281,7 @@ Modifier_Runtime :: struct {
 }
 modifier_runtime_free :: proc(runtime:^Modifier_Runtime) {
     core.table_destroy(&runtime.spline_ik);core.table_destroy(&runtime.correctives);core.table_destroy(&runtime.follow)
+    core.table_destroy(&runtime.curve_poses);core.table_destroy(&runtime.curve_drives);core.table_destroy(&runtime.curve_materials);delete(runtime.curve_pose_states);delete(runtime.curve_drive_states);delete(runtime.curve_material_states);delete(runtime.curve_full)
     for &binding in runtime.spline_states {rig_binding_free(&binding)};delete(runtime.spline_states)
     for &binding in runtime.follow_states {rig_binding_free(&binding)};delete(runtime.follow_states)
     delete(runtime.corrective_states)
@@ -378,6 +396,9 @@ modifier_prepare :: proc(runtime:^Modifier_Runtime,configs:core.Read(Pose_Modifi
         for value in content.profile.spline_ik {value:=value;value.rig=entity;value.weight*=config.weight;value.enabled &&=config.enabled;appended &&=modifier_append(&next.spline_ik,entity,value)}
         for value in content.profile.correctives {value:=value;value.rig=entity;value.weight*=config.weight;value.enabled &&=config.enabled;appended &&=modifier_append(&next.correctives,entity,value)}
         for value in content.profile.follow {value:=value;value.rig=entity;value.weight*=config.weight;value.enabled &&=config.enabled;appended &&=modifier_append(&next.follow,entity,value)}
+        for value in content.profile.curve_poses {value:=value;value.rig=entity;value.weight*=config.weight;value.enabled &&=config.enabled;appended &&=modifier_append(&next.curve_poses,entity,value)}
+        for value in content.profile.curve_drives {value:=value;value.rig=entity;value.weight*=config.weight;value.enabled &&=config.enabled;appended &&=modifier_append(&next.curve_drives,entity,value)}
+        for value in content.profile.curve_materials {value:=value;value.rig=entity;value.enabled &&=config.enabled;appended &&=modifier_append(&next.curve_materials,entity,value)}
         if !appended {memory_problem(problems,entity,"its pose profile");return false}
     }
     for row in 0..<core.count(animations) {

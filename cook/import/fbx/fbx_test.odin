@@ -196,6 +196,10 @@ a_skinned_fbx_imports_its_skeleton_skin_blend_shape_and_stack :: proc(t:^testing
     if testing.expect(t,morphs && len(weights)>=2,"the weight of Smile is animated") {
         testing.expectf(t,abs(weights[len(weights)-1].value.x-1)<1e-5,"100 percent is a weight of one: %v",weights[len(weights)-1].value.x)
     }
+    jaw,curved:=find_track(clip,"jawOpen",.Float)
+    if testing.expect(t,curved && len(jaw)>=2,"an animated custom attribute is a curve of its name") {
+        testing.expectf(t,abs(jaw[0].value.x)<1e-5 && abs(jaw[len(jaw)-1].value.x-.8)<1e-5 && abs(jaw[len(jaw)-1].time-1)<1e-4,"jawOpen goes from 0 to 0.8: %v",jaw)
+    }
 }
 
 // The world transform of each node at a time of a clip, composed by the engine from the root down.

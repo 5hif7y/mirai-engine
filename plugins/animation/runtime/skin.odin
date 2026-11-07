@@ -213,7 +213,7 @@ animation_skin :: proc(
     offsets:core.Read(erender.Draw_Offset),cache:^Skin_Runtime,state:^Skin_Instances,app:^host.App,time:core.Time,frame:core.Frame_Time,playback:core.Ref(Playback),
     morphs:core.Ref(Morph_Playback),problems:^core.Problems,
     policies:core.Read(Animation_Budget),budget:^Budget_Runtime,config:Animation_Budget_Config,parts:core.Read(Skin_Part),
-    locals:core.Read(core.Transform),cameras:core.Read(erender.Camera),
+    locals:core.Read(core.Transform),cameras:core.Read(erender.Camera),modifiers:core.Ref(Modifier_Runtime),
 ) {
     if state==nil || app.renderer==nil || app.assets==nil {return}
     context.allocator=app.allocator
@@ -231,7 +231,10 @@ animation_skin :: proc(
         entity,owner:core.Entity
         switch {
         case row<len(rigs): entity=rigs[row].entity;owner=entity
-        case !rigid: entity=core.entity_at(skins,row-len(rigs));owner=core.at(skins,row-len(rigs)).rig
+        case !rigid:
+            entity=core.entity_at(skins,row-len(rigs));owner=core.at(skins,row-len(rigs)).rig
+            // A mesh of another skeleton than its rig's is a rig that follows it, drawn above.
+            if playback.ptr!=nil && rig_find(playback.ptr,entity)>=0 {continue}
         case: entity=morphing[row-posed].entity
         }
         static,has_mesh:=core.get(meshes,entity)
@@ -282,6 +285,15 @@ animation_skin :: proc(
         tint:=erender.TINT_DEFAULT
         if value,exists:=core.get(tints,entity);exists {tint=value}
         override,_:=core.get(overrides,entity)
+        // The material values the curves of its rig move, drawn over its own.
+        materialed:=false
+        if !rigid && modifiers.ptr!=nil {
+            mesh:=host.assets_mesh(app.assets,static.mesh)
+            fits:bool
+            if fits,materialed=curve_materials_apply(modifiers.ptr,pose,int(mesh.slot_count) if mesh!=nil else 1,&override);!fits {
+                core.report(problems,entity,"animation.curve_material","the curve materials of the pose profile of the rig of this entity, with its Material_Override, set more than %d material values, so some are not drawn; move fewer values, or fewer slots",erender.MATERIAL_OVERRIDE_CAPACITY)
+            }
+        }
         anchor,transform:=erender.instance_place(world,frame,offsets,parents,worlds,locals,cameras,entity)
         shown,usable:=erender.mesh_instance(app.assets,static,transform,tint,override)
         if !usable {continue}
@@ -310,6 +322,8 @@ animation_skin :: proc(
             // Morphs deform from their first weights; a pose waits for a palette off the bind.
             if (rigid || len(rig.morphs)>0) && !skin_copy(app,instance,rig,problems,entity) {skin_instance_free(app,instance);continue}
         }
+        // Curve materials are drawn with the copy: the mesh of the world shared at the bind has none.
+        if materialed && !instance.copied && !skin_copy(app,instance,rig,problems,entity) {skin_instance_free(app,instance);continue}
         if !rigid && (instance.pose!=owner || instance.bound!=pose.bound) {
             instance.pose=owner;instance.bound=pose.bound;instance.reset=true
         }

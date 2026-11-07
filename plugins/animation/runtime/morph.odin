@@ -12,7 +12,8 @@ import "mirai:std/base"
 // by its weight, plus the correctives of its rig that name the target, then
 // the entity's Override or Additive. Without a path (none in Morph_Weights and
 // no Animation_Target) a target takes the first curve of the animation that
-// ends in "/@morph/<target>", whatever its path.
+// ends in "/@morph/<target>", whatever its path. Without either curve it
+// takes the curve named as the target.
 Morph_Weight_Mode :: enum u8 {Default,Override,Additive}
 
 @(component,description="Morph target weights this entity sets by name over those of its mesh. Default is the weight at rest, which animation replaces; Override replaces the animated weight; Additive adds to it.")
@@ -68,6 +69,7 @@ Morph_Playing :: struct {
     curve_asset:base.Asset_Id,
     curve_generation:u32,
     curve_count:int,       // of the source when curve_rows were found; -1: find them again
+    curve_layout:u64,      // of the source when curve_rows were found
     tracks:[dynamic]u64,   // the curve of each target
     names:[dynamic]u64,    // base.name_hash of the name of each target, which correctives name
     entries:[dynamic]i8,   // the entry of Morph_Weights of each target; -1: none
@@ -182,10 +184,12 @@ morph_rig_read :: proc(rig:^Skin_Rig,view:asset.Mesh_View,allocator:mem.Allocato
     return true
 }
 
-// Whose animation drives the weights of an entity: the one named, the rig of
-// its Pose_Source, or its nearest animated ancestor.
-morph_source :: proc(entity:core.Entity,config:Morph_Weights,animations:core.Read(Animation),sources:core.Read(Pose_Source),parents:core.Read(core.Parent)) -> core.Entity {
+// Whose animation drives the weights of an entity: the one named, itself
+// when it is a rig that follows another, the rig of its Pose_Source, or its
+// nearest animated ancestor.
+morph_source :: proc(entity:core.Entity,config:Morph_Weights,animations:core.Read(Animation),sources:core.Read(Pose_Source),parents:core.Read(core.Parent),playback:^Playback=nil) -> core.Entity {
     if config.source!=core.NONE {return config.source}
+    if playback!=nil {if own:=constraint_playing(playback,entity);own!=nil && own.leader!=core.NONE {return entity}}
     if source,has:=core.get(sources,entity);has {return source.rig}
     return core.ancestor_with(parents,animations,entity)
 }
@@ -280,7 +284,7 @@ animation_morph :: proc(
             if !morph_bind(&playing,rig,config,path,stamp) {playing.stamp=0;morph_problem(problems,playing.entity,playing.error,playing.unknown);continue}
             if playing.error!=.None {morph_problem(problems,playing.entity,playing.error,playing.unknown)}
         }
-        playing.source=morph_source(playing.entity,config,animations,sources,parents)
+        playing.source=morph_source(playing.entity,config,animations,sources,parents,playback.ptr)
         copy(playing.previous[:],playing.current[:])
         source:=constraint_playing(playback.ptr,playing.source)
         if source!=nil && (source.seen!=playback.ptr.frame || !source.curves_ready) {source=nil}
@@ -292,18 +296,22 @@ animation_morph :: proc(
 
 @(private)
 morph_compose :: proc(playing:^Morph_Playing,rig:^Skin_Rig,config:Morph_Weights,source:^Playing,modifiers:^Modifier_Runtime=nil,content:^host.Content_Animation=nil) -> bool {
-    if source!=nil && (playing.curve_asset!=source.asset || playing.curve_generation!=source.generation || playing.curve_count!=len(source.curves)) {
+    curves:=playing_curves(source) if source!=nil else nil
+    layout:=source.curve_layout if source!=nil && source.driven_ready else 0
+    if source!=nil && (playing.curve_asset!=source.asset || playing.curve_generation!=source.generation || playing.curve_count!=len(curves) || playing.curve_layout!=layout) {
         find :: proc(curves:[]Curve_Output,target:u64) -> i32 {
             for curve,c in curves {if curve.property==.Float && curve.slot==0 && curve.target==target {return i32(c)}}
             return -1
         }
         for &row,t in playing.curve_rows {
             row=-1
-            if !playing.by_name {row=find(source.curves[:],playing.tracks[t]);continue}
-            if content==nil {continue}
-            for morph in content.morphs {if morph.target==playing.names[t] {if row=find(source.curves[:],morph.curve);row>=0 {break}}}
+            if !playing.by_name {row=find(curves,playing.tracks[t])} else if content!=nil {
+                for morph in content.morphs {if morph.target==playing.names[t] {if row=find(curves,morph.curve);row>=0 {break}}}
+            }
+            // Else a curve named as the target, as faces, their captures and curve drives name them.
+            if row<0 {row=find(curves,playing.names[t])}
         }
-        playing.curve_asset,playing.curve_generation,playing.curve_count=source.asset,source.generation,len(source.curves)
+        playing.curve_asset,playing.curve_generation,playing.curve_count,playing.curve_layout=source.asset,source.generation,len(curves),layout
     }
     ok:=true
     for &target,t in rig.morphs {
@@ -311,7 +319,7 @@ morph_compose :: proc(playing:^Morph_Playing,rig:^Skin_Rig,config:Morph_Weights,
         entry:=int(playing.entries[t])
         if entry>=0 && config.modes[entry]==.Default {value=config.values[entry]}
         if source!=nil {
-            if row:=int(playing.curve_rows[t]);row>=0 && row<len(source.curves) {curve:=source.curves[row];value=curve.value.x+value*(1-curve.weight)}
+            if row:=int(playing.curve_rows[t]);row>=0 && row<len(curves) {curve:=curves[row];value=curve.value.x+value*(1-curve.weight)}
         }
         value+=animation_corrective_curve(modifiers,playing.source,playing.names[t])
         if entry>=0 {

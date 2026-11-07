@@ -337,7 +337,7 @@ animation_bind_is_transactional_when_allocations_fail_and_stops_at_nested_player
     testing.expect(t,succeeded)
     testing.expect_value(t,state.rest[1],old_rest)
     core.remove(&animations,nested);core.table_settle(&animations,&entities)
-    append(&playback.rigs,Rig{nested,{1,2}})
+    append(&playback.rigs,Rig{entity=nested,skeleton={1,2}})
     testing.expect(t,bind(&playback,&state,&content,core.ref(&hierarchy),&transforms,core.read(&names),core.read(&targets),core.read(&animations),nil))
     testing.expect_value(t,len(state.bindings),2)
     testing.expect_value(t,len(state.previous),len(state.local))

@@ -193,11 +193,25 @@ Playing :: struct {
     skeleton_revision:u64,
     changed:u64,               // Playback.frame of the last tick whose pose differed from previous
     pose_ready:bool,
+    finished:u64,              // Playback.frame of the last tick its modifiers ran
+    leader:core.Entity,        // the rig of another skeleton whose pose it follows (Pose_Source); NONE: none
+    follow:[dynamic]lib.Follow_Bone,       // by bone: the bone of the leader it takes
+    world_final:u64,                       // Playback.frame whose finished pose world holds, in the world, for its followers
+    follow_bound:[2]u64,                   // the bound of the leader and its own the follow was paired for
+    driven:[dynamic]Curve_Output,          // its curves after those of its leader and the drives of its profile, while driven_ready
+    driven_own,driven_leader:[dynamic]i32, // where each of its curves and of its leader's goes in driven
+    driven_key:Driven_Key,                 // what driven was laid out for
+    driven_ready:bool,
+    curve_layout:u64,                      // changes when the curves a lookup reads change place
 }
 
 // An entity whose Mesh_Renderer shows a mesh with a skeleton and that does
-// not follow the pose of another through Pose_Source: it poses that skeleton.
-Rig :: struct {entity:core.Entity,skeleton:base.Asset_Id}
+// not share the pose of another of that skeleton through Pose_Source: it poses
+// that skeleton. One whose Pose_Source names a rig of another skeleton follows
+// it: leader is that rig.
+Rig :: struct {entity:core.Entity,skeleton:base.Asset_Id,leader:core.Entity}
+// A rig that follows another, and how many leaders are above it (max: it is in a loop).
+Rig_Follow :: struct {entity:core.Entity,depth:u32}
 
 Stats :: struct {
     skipped:u64, // writes left out because another component owns the transform
@@ -209,6 +223,7 @@ Playback :: struct {
     states:[dynamic]Playing,
     rows:[dynamic]i32, // by entity index: state+1
     rigs:[dynamic]Rig,
+    follow_order:[dynamic]Rig_Follow, // the rigs that follow another, each after the rig it follows
     rigs_stamp:u64,
     rigs_inputs:[5]u64,
     pose:lib.Pose,
@@ -234,7 +249,7 @@ animation_tick :: proc(
         memory_problem(problems,core.NONE,"the animation requests, so nothing is animated in this tick")
         return
     }
-    if app.assets==nil || !finite(time.dt) || time.dt<0 {for &state in playback.states {clear(&state.curves);state.curves_ready=false;state.motion=ROOT_DELTA_DEFAULT;state.root_enabled=false};return}
+    if app.assets==nil || !finite(time.dt) || time.dt<0 {for &state in playback.states {clear(&state.curves);state.curves_ready=false;state.driven_ready=false;state.motion=ROOT_DELTA_DEFAULT;state.root_enabled=false};return}
     // The editor runs this once a frame with dt 0: a preview advances by the frame.
     tick_dt:=time.dt
     if !time.playing {tick_dt=frame.dt if finite(frame.dt) && frame.dt>0 else 0}
@@ -317,6 +332,7 @@ animation_tick :: proc(
             if !skeletal {state.hierarchy_stamp=0}
         }
         if skeletal {
+            state.leader=playback.rigs[row].leader
             skeleton:=playback.rigs[row].skeleton
             definition:=skeleton_content(skeleton_assets,app,skeleton)
             if definition==nil {
@@ -331,6 +347,7 @@ animation_tick :: proc(
             copy(state.local[:],state.rest[:])
             if root,ok:=core.get(core.read(transforms),e);ok {state.local[0]=core.to_math(root)}
         } else if state.skeleton!={} || state.hierarchy_stamp!=stamp {
+            state.leader=core.NONE
             if !bind(playback,state,content,hierarchy,transforms,names,targets,animations,problems) {
                 core.report(problems,e,"animation.bind","the entities below this animated entity could not be bound: memory ran out; free memory, or animate fewer entities below it")
                 continue
@@ -341,6 +358,7 @@ animation_tick :: proc(
         if programmed && len(state.program.from)!=len(state.local) && resize(&state.program.from,len(state.local))!=nil {memory_problem(problems,e,"its animation program");continue}
 
         state.motion=ROOT_DELTA_DEFAULT;state.root_enabled=false;state.has_action_root=false
+        state.driven_ready=false
         // One store per value until odin-lang/Odin#7937 (see ODIN_WORKAROUNDS).
         state.base_root={}
         state.has_base_root=false;state.clips_in_place=false
@@ -488,37 +506,75 @@ animation_valid :: proc "contextless" (animation:Animation) -> bool {
     return true
 }
 
-// The rigs of the world, found again when its meshes or skins change.
+// The rigs of the world, found again when its meshes or skins change. A mesh
+// with a Pose_Source shares the pose of its rig when both have one skeleton,
+// and is a rig that follows it when they have two.
 @(private)
 rigs_update :: proc(playback:^Playback,meshes:core.Read(erender.Mesh_Renderer),skins:core.Read(Pose_Source),app:^host.App) -> bool {
-    if meshes.table==nil {if len(playback.rigs)>0 {clear(&playback.rigs);playback.rigs_stamp+=1};playback.rigs_inputs={};return true}
+    if meshes.table==nil {if len(playback.rigs)>0 {clear(&playback.rigs);clear(&playback.follow_order);playback.rigs_stamp+=1};playback.rigs_inputs={};return true}
     inputs:=[5]u64{core.layout(meshes),core.version(meshes),core.layout(skins) if skins.table!=nil else 0,core.version(skins) if skins.table!=nil else 0,assets_stamp(app)}
     if inputs==playback.rigs_inputs {return true}
+    skeleton_of :: proc(meshes:core.Read(erender.Mesh_Renderer),app:^host.App,e:core.Entity) -> base.Asset_Id {
+        static,has:=core.get(meshes,e)
+        if !has || static.mesh=={} {return {}}
+        mesh:=host.assets_mesh(app.assets,static.mesh)
+        return mesh.skeleton if mesh!=nil && !mesh.failed else {}
+    }
+    rig_of :: proc(meshes:core.Read(erender.Mesh_Renderer),skins:core.Read(Pose_Source),app:^host.App,row:int) -> (rig:Rig,ok:bool) {
+        e:=core.entity_at(meshes,row)
+        skeleton:=skeleton_of(meshes,app,e)
+        if skeleton=={} {return}
+        rig={entity=e,skeleton=skeleton}
+        if skins.table!=nil {
+            if source,has:=core.get(skins,e);has {
+                leader:=skeleton_of(meshes,app,source.rig)
+                if leader=={} || leader==skeleton || source.rig==e {return}
+                rig.leader=source.rig
+            }
+        }
+        return rig,true
+    }
     changed:=false;count:=0
     for row in 0..<core.count(meshes) {
-        e:=core.entity_at(meshes,row)
-        id:=meshes.table.values[row].mesh
-        if id=={} || (skins.table!=nil && core.has(skins,e)) {continue}
-        mesh:=host.assets_mesh(app.assets,id)
-        if mesh==nil || mesh.failed || mesh.skeleton=={} {continue}
+        rig,ok:=rig_of(meshes,skins,app,row)
+        if !ok {continue}
         count+=1
-        known:=rig_find(playback,e)
-        changed ||= known<0 || playback.rigs[known].skeleton!=mesh.skeleton
+        known:=rig_find(playback,rig.entity)
+        changed ||= known<0 || playback.rigs[known]!=rig
     }
     if changed || count!=len(playback.rigs) {
         next,error:=make([dynamic]Rig,0,count)
         if error!=nil {return false}
         for row in 0..<core.count(meshes) {
-            e:=core.entity_at(meshes,row);id:=meshes.table.values[row].mesh
-            if id=={} || skins.table!=nil && core.has(skins,e) {continue}
-            mesh:=host.assets_mesh(app.assets,id)
-            if mesh==nil || mesh.failed || mesh.skeleton=={} {continue}
-            append(&next,Rig{e,mesh.skeleton})
+            if rig,ok:=rig_of(meshes,skins,app,row);ok {append(&next,rig)}
         }
         slice.sort_by(next[:],proc(a,b:Rig) -> bool {return a.entity<b.entity})
         delete(playback.rigs);playback.rigs=next;playback.rigs_stamp+=1
+        if !follow_order_update(playback) {return false}
     }
     playback.rigs_inputs=inputs
+    return true
+}
+
+// The rigs that follow another, by how many leaders are above them, so that
+// animation_finish takes each after its leader in one pass; those of a loop go
+// last. It runs when the rigs change, not in every tick.
+@(private)
+follow_order_update :: proc(playback:^Playback) -> bool {
+    clear(&playback.follow_order)
+    for rig in playback.rigs {
+        if rig.leader==core.NONE {continue}
+        depth:=u32(1)
+        at:=rig.leader
+        for {
+            found:=rig_find(playback,at)
+            if found<0 || playback.rigs[found].leader==core.NONE {break}
+            if int(depth)>len(playback.rigs) {depth=max(u32);break}
+            depth+=1;at=playback.rigs[found].leader
+        }
+        if append(&playback.follow_order,Rig_Follow{rig.entity,depth})!=1 {return false}
+    }
+    slice.sort_by(playback.follow_order[:],proc(a,b:Rig_Follow) -> bool {return a.depth<b.depth || a.depth==b.depth && a.entity<b.entity})
     return true
 }
 
@@ -939,7 +995,7 @@ animation_stop :: proc(animation:^Animation,layer:int,fade:f32=-1) -> bool {
 
 playback_free :: proc(playback:^Playback) {
     for &state in playback.states {playing_free(&state)}
-    delete(playback.states);delete(playback.rows);delete(playback.rigs);delete(playback.mask);delete(playback.rig_rotations);delete(playback.final_rows)
+    delete(playback.states);delete(playback.rows);delete(playback.rigs);delete(playback.follow_order);delete(playback.mask);delete(playback.rig_rotations);delete(playback.final_rows)
     lib.pose_destroy(&playback.pose)
     playback^={}
 }
@@ -949,6 +1005,7 @@ playing_free :: proc(state:^Playing) {
     delete(state.curves);delete(state.bindings);delete(state.parents);delete(state.targets);delete(state.aliases);delete(state.previous)
     delete(state.mirror_pairs);delete(state.mirror_corrections);delete(state.mirror_scratch);delete(state.regions)
     delete(state.rest);delete(state.local);delete(state.world);delete(state.sampled)
+    delete(state.follow);delete(state.driven);delete(state.driven_own);delete(state.driven_leader)
     state^={}
 }
 
@@ -989,14 +1046,29 @@ pose_space :: proc(playback:^Playback,entity:core.Entity,allocator:=context.allo
 
 animation_finish :: proc(playback:^Playback,inputs:Constraint_Inputs,constraints:^Animation_Constraints,transforms:^core.Table(core.Transform),parents:core.Read(core.Parent),dt:f32,grounding:^Grounding_Runtime,ground_inputs:Grounding_Inputs,rig_runtime:^Modifier_Runtime=nil,motion:^Motion_Runtime=nil,motion_assets:^Motion_Assets=nil,final_poses:[]Pose_Request=nil,paces:core.Read(core.Own_Pace)={},clock:=core.CLOCK_DEFAULT) {
     grounding_prepare(grounding,ground_inputs.configs,ground_inputs.problems)
-    for &state in playback.states {
-        if state.seen!=playback.frame {continue}
+    finish :: proc(state:^Playing,playback:^Playback,inputs:Constraint_Inputs,constraints:^Animation_Constraints,transforms:^core.Table(core.Transform),parents:core.Read(core.Parent),dt:f32,grounding:^Grounding_Runtime,ground_inputs:Grounding_Inputs,rig_runtime:^Modifier_Runtime,motion:^Motion_Runtime,motion_assets:^Motion_Assets,final_poses:[]Pose_Request,paces:core.Read(core.Own_Pace),clock:core.Clock) {
         if state.skeleton!={} {if root,ok:=core.get(core.read(transforms),state.entity);ok {state.local[0]=core.to_math(root)}}
-        constraints_apply(&state,playback,inputs,constraints,transforms,parents,dt*core.pace_of(clock,paces,state.entity),grounding,ground_inputs,rig_runtime,motion,motion_assets,final_poses)
-        pose_write(playback,&state,transforms)
+        constraints_apply(state,playback,inputs,constraints,transforms,parents,dt*core.pace_of(clock,paces,state.entity),grounding,ground_inputs,rig_runtime,motion,motion_assets,final_poses)
+        pose_write(playback,state,transforms)
         if !state.pose_ready || !slice.equal(state.local[:],state.previous[:]) {state.changed=playback.frame}
         if !state.pose_ready {copy(state.previous[:],state.local[:])}
         state.pose_ready=true
+        state.finished=playback.frame
+    }
+    for &state in playback.states {
+        if state.seen!=playback.frame || state.leader!=core.NONE {continue}
+        finish(&state,playback,inputs,constraints,transforms,parents,dt,grounding,ground_inputs,rig_runtime,motion,motion_assets,final_poses,paces,clock)
+    }
+    // Each follower after the rig it follows, in the order rigs_update found;
+    // then those it does not list (a leader set by hand), and those of a loop.
+    for follow in playback.follow_order {
+        state:=constraint_playing(playback,follow.entity)
+        if state==nil || state.seen!=playback.frame || state.leader==core.NONE || state.finished==playback.frame {continue}
+        finish(state,playback,inputs,constraints,transforms,parents,dt,grounding,ground_inputs,rig_runtime,motion,motion_assets,final_poses,paces,clock)
+    }
+    for &state in playback.states {
+        if state.seen!=playback.frame || state.leader==core.NONE || state.finished==playback.frame {continue}
+        finish(&state,playback,inputs,constraints,transforms,parents,dt,grounding,ground_inputs,rig_runtime,motion,motion_assets,final_poses,paces,clock)
     }
     #reverse for &state,i in playback.states {
         if state.seen==playback.frame {continue}

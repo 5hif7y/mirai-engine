@@ -46,6 +46,11 @@ automatic plugin `animation_physics` feeds the locomotion of each `Character`.
 - Rigs, spatial targets and chain modifiers: [animation-rigs.md](references/animation-rigs.md).
 - Morph targets, `Morph_Weights` and their deformation:
   [animation-morphs.md](references/animation-morphs.md).
+- Faces: poses that curves weigh, drives from a face capture (ARKit), material values that curves
+  move (flipbook faces) and the poses made from a clip:
+  [curve poses](references/animation-rigs.md#curve-poses-and-drives); a head or another part
+  of its own skeleton that follows the body:
+  [following](references/animation.md#following-a-rig-of-another-skeleton).
 - Supports, clip adaptation and gait without clips (the ground is the `core.World_Query` of
   physics): [animation-grounding.md](references/animation-grounding.md).
 - `Animation_Budget` and parallel execution: [animation-budget.md](references/animation-budget.md);
@@ -132,6 +137,9 @@ automatic plugin `animation_physics` feeds the locomotion of each `Character`.
   cache and a first one runs in a job: until it ends the entity does not animate (a rig holds its
   rest pose) and nothing is reported ([content](../mirai-core/references/host.md#content)).
 - Skinning runs on the GPU; morphs are deformed in the same pass.
+- A part of another skeleton follows the finished pose of its rig by bone name, paired once per
+  bind, and keeps its own animation on the bones only it has; a face is curves over poses and
+  morphs, with no rig evaluator in the plugin.
 - What the runtime cannot do is a problem of the entity (`core.report` with an `animation.*` code
   and how to fix it), never a counter ([problems](references/animation.md#problems)). The functions
   and helpers receive `^core.Problems`; `Constraint_Inputs` and `Grounding_Inputs` carry it.

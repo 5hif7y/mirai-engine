@@ -167,6 +167,14 @@ detected unsaved one) and a clip library (by default, the one it plays). With `s
   The definition stores bones and configuration; targets and fades belong to the instance. The
   quantities come from the lists, without counters or padding. Types: [rigs](animation-rigs.md) and
   [grounding](animation-grounding.md).
+- `pose.profile.poses` makes the `curve_poses` of a face from a clip with a frame per pose (as
+  faces and pose assets are exported): each pose is the frame at its time measured from `base`, a
+  row per bone that moves past `tolerance`, and replaces the rows of its curve; with `full` each
+  row keeps the frame of its bone. Without `poses`, each marker of the clip is a pose of its name.
+  A Float curve of the clip with a value at the frame of a pose is a drive from the pose's curve to
+  it (what a pose asset carries, such as the ARKit remap), and replaces the drives from that pose.
+  Other drives and curve materials are rows of `pose.profile.set`
+  ([curve poses](animation-rigs.md#curve-poses-and-drives)).
 - `animation.retarget.bake` bakes a new `.anim` from animation, source and destination skeletons and
   profile ([bake](animation-rigs.md#bake)).
 

@@ -743,8 +743,10 @@ this path. FBX 6 files are rejected with their version.
   clip is the stack's range: keys outside are cropped with a key at each edge they cross. A
   constant span is a `Step` key; if another channel of the same property moves up to the jump, a
   key one float before stores the value it arrives at. `DeformPercent` of a channel is the `@morph`
-  track of each node that shows its mesh, in weight (percentage / 100). A stack without curves,
-  like Mixamo's `Take 001`, is not a clip.
+  track of each node that shows its mesh, in weight (percentage / 100). A number property that a
+  user added to a node (a custom attribute) and the stack animates is a Float curve of its name,
+  as animation tools export the curves of faces; the same name on two nodes keeps the first. A stack
+  without curves, like Mixamo's `Take 001`, is not a clip.
 - **Rejected**: NURBS, trimmed and procedural surfaces, several skins in a mesh and bones of a skin
   under nodes other than the root. Lights and cameras are empty nodes with a warning (FBX gives
   the light no unit), and so are curves.

@@ -11,8 +11,9 @@ import "mirai:std/base"
 import mm "mirai:std/math"
 import lib "mirai:std/anim"
 
-// A mesh with a skeleton that follows the pose of the rig instead of posing its own.
-@(component,description="Uses another entity's evaluated pose to deform this mesh. Useful for clothing and multiple meshes sharing one rig.")
+// A mesh that shows the pose of a rig of its skeleton instead of posing its own;
+// with a skeleton of its own it is a rig that follows that one (Rig.leader).
+@(component,description="Uses another entity's evaluated pose to deform this mesh: clothing and meshes that share one rig. A mesh of another skeleton, as a head, follows it on the bones of the same name and keeps its own animation on the rest.")
 Pose_Source :: struct {rig:core.Entity}
 
 // A bone by its path, or by its name when no other bone has it. A text that

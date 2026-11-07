@@ -239,6 +239,75 @@ pose_profile_authoring_edits_typed_rows_independently_and_rejects_invalid_values
 }
 
 @(test)
+curve_poses_are_made_from_the_frames_of_a_clip_and_replace_those_of_their_curves :: proc(t:^testing.T) {
+    f:=new(Authoring_Test);defer free(f);if !authoring_test_init(f,t,"poses") {return};defer authoring_test_destroy(f)
+    authoring_test_register(f,t,"skeleton",Skeleton_Create_Params,authoring_skeleton_create)
+    authoring_test_register(f,t,"clip",Clip_Create_Params,authoring_clip_create)
+    authoring_test_register(f,t,"track",Track_Set_Params,authoring_track_set)
+    authoring_test_register(f,t,"marker",Marker_Set_Params,authoring_marker_set)
+    authoring_test_register(f,t,"profile",Authoring_Create_Params,authoring_profile_create)
+    poses:=Profile_Poses_Params{tolerance=PROFILE_POSES_TOLERANCE}
+    authoring_test_register(f,t,"poses",Profile_Poses_Params,authoring_profile_poses,&poses)
+    json:=`{"path":"face.skeleton","bones":[{"name":"root","path":"root","parent":-1,"position":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},{"name":"jaw","path":"root/jaw","parent":0,"position":[0,1,0],"rotation":[0,0,0,1],"scale":[1,1,1]}]}`
+    if !testing.expect_value(t,authoring_test_execute(f,"skeleton",json).code,0) {return}
+    if !testing.expect_value(t,authoring_test_execute(f,"clip",`{"path":"poses.anim","name":"poses"}`).code,0) {return}
+    if !testing.expect_value(t,authoring_test_execute(f,"profile",`{"path":"face.pose"}`).code,0) {return}
+    clip:=authoring_test_id_text(authoring_test_id(f,"poses.anim"))
+    skeleton:=authoring_test_id_text(authoring_test_id(f,"face.skeleton"))
+    profile:=authoring_test_id_text(authoring_test_id(f,"face.pose"))
+    // Frame 0 at rest, frame 1 the jaw open, frame 2 at rest again.
+    open:=mm.quat_axis_angle({1,0,0},.5)
+    json=fmt.tprintf(`{{"asset":"%s","clip":"poses","target":"root/jaw","property":"Rotation","keys":[{{"time":0,"value":[0,0,0,1],"interpolation":"Step"}},{{"time":1,"value":[%v,%v,%v,%v],"interpolation":"Step"}},{{"time":2,"value":[0,0,0,1],"interpolation":"Step"}}]}}`,clip,open.x,open.y,open.z,open.w)
+    if !testing.expect_value(t,authoring_test_execute(f,"track",json).code,0) {return}
+    json=fmt.tprintf(`{{"asset":"%s","animation":"%s","clip":"poses","skeleton":"%s","poses":[{{"time":1,"curve":"jaw_open"}},{{"time":2,"curve":"rest"}}]}}`,profile,clip,skeleton)
+    result:=authoring_test_execute(f,"poses",json)
+    if !testing.expect(t,result.code==0,result.message) {return}
+    testing.expect(t,strings.contains(string(serial.writer_bytes(&f.out)),`"poses":1,"rows":1,"still":1`),string(serial.writer_bytes(&f.out)))
+    // Again: the rows of its curves are replaced, not added.
+    if !testing.expect_value(t,authoring_test_execute(f,"poses",json).code,0) {return}
+    file:asset.Asset;testing.expect_value(t,authoring_test_load(f,"face.pose",&file),asset.Error.None)
+    view,error:=anim.pose_profile_view(&file,&f.assets.types)
+    testing.expect_value(t,error,asset.Error.None)
+    if testing.expect_value(t,len(view.curve_poses),1) {
+        row:=view.curve_poses[0]
+        testing.expect(t,base.text_get(row.curve[:])=="jaw_open" && base.text_get(row.bone.path[:])=="root/jaw" && mm.quat_angle(row.delta.rotation,open)<1e-4 && row.weight==1 && row.enabled)
+    }
+    asset.asset_close(&file)
+    // Full: the row keeps the frame of the bone.
+    json=fmt.tprintf(`{{"asset":"%s","animation":"%s","clip":"poses","skeleton":"%s","full":true,"poses":[{{"time":1,"curve":"jaw_open"}}]}}`,profile,clip,skeleton)
+    if !testing.expect_value(t,authoring_test_execute(f,"poses",json).code,0) {return}
+    testing.expect_value(t,authoring_test_load(f,"face.pose",&file),asset.Error.None)
+    view,error=anim.pose_profile_view(&file,&f.assets.types)
+    testing.expect(t,error==.None && len(view.curve_poses)==1 && view.curve_poses[0].full && mm.quat_angle(view.curve_poses[0].delta.rotation,open)<1e-4 && view.curve_poses[0].delta.position==mm.Vec3{0,1,0})
+    asset.asset_close(&file)
+    // Without a list the markers are the poses, and the Float curves at their frames the drives they bring.
+    json=fmt.tprintf(`{{"asset":"%s","clip":"poses","index":0,"marker":{{"time":1,"name":"jaw_open"}}}}`,clip)
+    if !testing.expect_value(t,authoring_test_execute(f,"marker",json).code,0) {return}
+    json=fmt.tprintf(`{{"asset":"%s","clip":"poses","target":"jawOpen","property":"Float","keys":[{{"time":0,"value":[0,0,0,0],"interpolation":"Step"}},{{"time":1,"value":[0.8,0,0,0],"interpolation":"Step"}},{{"time":2,"value":[0,0,0,0],"interpolation":"Step"}}]}}`,clip)
+    if !testing.expect_value(t,authoring_test_execute(f,"track",json).code,0) {return}
+    json=fmt.tprintf(`{{"asset":"%s","animation":"%s","clip":"poses","skeleton":"%s"}}`,profile,clip,skeleton)
+    result=authoring_test_execute(f,"poses",json)
+    if !testing.expect(t,result.code==0,result.message) {return}
+    testing.expect(t,strings.contains(string(serial.writer_bytes(&f.out)),`"poses":1,"rows":1,"still":0,"drives":1`),string(serial.writer_bytes(&f.out)))
+    testing.expect_value(t,authoring_test_load(f,"face.pose",&file),asset.Error.None)
+    view,error=anim.pose_profile_view(&file,&f.assets.types)
+    if testing.expect(t,error==.None && len(view.curve_poses)==1 && len(view.curve_drives)==1) {
+        drive:=view.curve_drives[0]
+        testing.expect(t,base.text_get(drive.from[:])=="jaw_open" && base.text_get(drive.to[:])=="jawOpen" && abs(drive.scale-.8)<1e-5 && !view.curve_poses[0].full)
+    }
+    asset.asset_close(&file)
+    revision:=authoring_test_revision(f,"face.pose")
+    for bad in ([3]string{
+        fmt.tprintf(`{{"asset":"%s","animation":"%s","skeleton":"%s","poses":[{{"time":1,"curve":"a"}},{{"time":2,"curve":"a"}}]}}`,profile,clip,skeleton),
+        fmt.tprintf(`{{"asset":"%s","animation":"%s","skeleton":"%s","poses":[{{"time":9,"curve":"a"}}]}}`,profile,clip,skeleton),
+        fmt.tprintf(`{{"asset":"%s","animation":"%s","skeleton":"%s","base":9}}`,profile,clip,skeleton),
+    }) {
+        testing.expect(t,authoring_test_execute(f,"poses",bad).code!=0,bad)
+    }
+    testing.expect_value(t,authoring_test_revision(f,"face.pose"),revision)
+}
+
+@(test)
 retarget_bake_api_publishes_a_new_valid_clip_and_keeps_its_sources :: proc(t:^testing.T) {
     f:=new(Authoring_Test);defer free(f);if !authoring_test_init(f,t,"bake") {return};defer authoring_test_destroy(f)
     authoring_test_register(f,t,"skeleton",Skeleton_Create_Params,authoring_skeleton_create)

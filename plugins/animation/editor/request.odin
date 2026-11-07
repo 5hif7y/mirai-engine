@@ -134,7 +134,7 @@ request :: proc(s:^editor.Session,call:^api.Call) {
         }
     }
     w,e,ok:=subject(s,call,p.id);if !ok {return}
-    if shared,present:=editor.entity_get(w,e,anim.Pose_Source);present {e=shared.rig}
+    e=pose_owner(s,w,e)
     applied:=make([dynamic]Request_Applied,call.allocator)
     if !edit_begin(s,call,"Animation request") {return}
     if !request_apply(s,call,w,e,p,0,&applied) {
@@ -492,7 +492,7 @@ request_source_check :: proc(s:^editor.Session,call:^api.Call,world:core.World_R
 // rig. False, with the call failed, when the copy cannot run or each says so.
 preview_run :: proc(s:^editor.Session,call:^api.Call,id:base.Entity_Id,p:^$T,time:f32,ticks:u32,dt:f32,each:proc(s:^editor.Session,call:^api.Call,world:core.World_Ref,entity:core.Entity,tick:u32,data:rawptr) -> bool,data:rawptr) -> bool {
     source,e,ok:=subject(s,call,id);if !ok {return false}
-    if shared,present:=editor.entity_get(source,e,anim.Pose_Source);present {e=shared.rig}
+    e=pose_owner(s,source,e)
     if !editor.entity_has(source,e,anim.Animation) && rig_skeleton(s,source,e)=={} {authoring_failure(call,"id","Missing_Component","Animation or a mesh with a skeleton","missing both","The entity has no Animation and shows no mesh with a skeleton");return false}
     clone:=preview_world_clone(s,call,source);if clone==nil {return false}
     defer host.app_world_free(s.app,clone)

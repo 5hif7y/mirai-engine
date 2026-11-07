@@ -64,7 +64,7 @@ authoring_pose_bake :: proc(s:^editor.Session,call:^api.Call) {
         created:bool;destination,output_id,created=authoring_create_target(s,call,base.text_get(p.path[:]),".anim");if !created {return}
     }
     source,entity,found:=subject(s,call,p.id);if !found {return}
-    if shared,present:=editor.entity_get(source,entity,anim.Pose_Source);present {entity=shared.rig}
+    entity=pose_owner(s,source,entity)
     if !editor.entity_has(source,entity,anim.Animation) && rig_skeleton(s,source,entity)=={} {authoring_failure(call,"id","Missing_Component","Animation or a mesh with a skeleton","missing both","The entity has no evaluable pose");return}
     preview:=new(Preview_Params,call.allocator)
     if preview==nil {authoring_failure(call,"bake","Out_Of_Memory","memory for bake requests","allocation failed","The bake requests could not be prepared",api.SERVER_ERROR);return}

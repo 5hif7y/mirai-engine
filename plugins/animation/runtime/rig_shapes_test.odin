@@ -38,7 +38,9 @@ rig_shapes_spline :: proc(points:[4]mm.Vec3) -> Spline_IK_Constraint {
 rig_shape_profiles_roundtrip_and_refuse_repeated_samples_and_degenerate_splines :: proc(t:^testing.T) {
     follow:=FOLLOW_CONSTRAINT_DEFAULT;base.text_set(follow.name[:],"hand");follow.bone=bone_ref("joint3")
     follow.target.kind=.Socket;base.text_set(follow.target.socket[:],"grip")
-    profile:=Pose_Profile{spline_ik={rig_shapes_spline({{0,0,0},{0,1,0},{1,2,0},{1,3,0}})},correctives={rig_shapes_corrective()},follow={follow}}
+    pose:=CURVE_POSE_DEFAULT;base.text_set(pose.curve[:],"jaw_open_pose");pose.bone=bone_ref("jaw");pose.delta.rotation=mm.quat_axis_angle({1,0,0},.5)
+    drive:=CURVE_DRIVE_DEFAULT;base.text_set(drive.from[:],"jawOpen");base.text_set(drive.to[:],"jaw_open_pose");drive.scale=.8
+    profile:=Pose_Profile{spline_ik={rig_shapes_spline({{0,0,0},{0,1,0},{1,2,0},{1,3,0}})},correctives={rig_shapes_corrective()},follow={follow},curve_poses={pose},curve_drives={drive}}
     types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
     doc:asset.Document;defer asset.document_destroy(&doc)
     if !testing.expect_value(t,pose_profile_document(&doc,&types,{3,4},profile),asset.Error.None) {return}
@@ -52,6 +54,34 @@ rig_shape_profiles_roundtrip_and_refuse_repeated_samples_and_degenerate_splines 
     view,read:=pose_profile_view(&file,&types)
     testing.expect_value(t,read,asset.Error.None)
     testing.expect(t,len(view.spline_ik)==1 && view.spline_ik[0].controls[3].position==mm.Vec3{1,3,0} && view.correctives[0].samples[1].curve_value==1 && view.follow[0].target.kind==.Socket)
+    testing.expect(t,len(view.curve_poses)==1 && view.curve_poses[0]==pose && len(view.curve_drives)==1 && view.curve_drives[0]==drive)
+    nan:=f32(0);nan/=nan
+    bad_drive:=drive;bad_drive.to=drive.from
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}),"a curve that drives itself")
+    bad_drive=drive;bad_drive.scale=nan
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}))
+    bad_drive=drive;bad_drive.from={}
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}))
+    bad_drive=drive;bad_drive.combine=.Product
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}),"a product without its second curve")
+    bad_drive=drive;base.text_set(bad_drive.with[:],"mouthClose")
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}),"a second curve read by nothing")
+    bad_drive.combine=.Min;bad_drive.with=bad_drive.to
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}),"a curve that drives itself through with")
+    bad_drive=drive;bad_drive.clamp,bad_drive.low,bad_drive.high=true,1,0
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}))
+    bad_drive=drive;bad_drive.offset=nan
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}))
+    bad_drive=drive;bad_drive.weight=2
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}))
+    bad_drive=drive;bad_drive.mode=Curve_Drive_Mode(7)
+    testing.expect(t,!pose_profile_check({curve_drives={bad_drive}}))
+    bad_pose:=pose;bad_pose.delta.rotation={}
+    testing.expect(t,!pose_profile_check({curve_poses={bad_pose}}))
+    bad_pose=pose;bad_pose.weight=2
+    testing.expect(t,!pose_profile_check({curve_poses={bad_pose}}))
+    bad_pose=pose;bad_pose.curve={}
+    testing.expect(t,!pose_profile_check({curve_poses={bad_pose}}))
     invalid:=rig_shapes_corrective();invalid.samples[1].rotation=-invalid.samples[0].rotation
     testing.expect(t,!pose_profile_check({correctives={invalid}}),"two samples of one rotation")
     invalid=rig_shapes_corrective();invalid.sample_count=RIG_POSE_SAMPLES+1

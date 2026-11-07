@@ -18,7 +18,7 @@ Morph_Set_Params :: struct {
     mode:anim.Morph_Weight_Mode `mirai:"optional"`,
     remove:bool `mirai:"optional,label=Gives the target back to the mesh and the animation; it also clears a weight that names no target"`,
 }
-Morph_Source_Kind :: enum u8 {None,Explicit,Pose_Source,Ancestor}
+Morph_Source_Kind :: enum u8 {None,Explicit,Pose_Source,Ancestor,Own} // Own: a rig that follows another of another skeleton, whose curves it takes
 Morph_Target_Result :: struct {
     name:[64]u8 `mirai:"text"`,
     mesh_default,default_value,final_weight:f32,
@@ -55,9 +55,10 @@ morph_entity_id :: proc(w:core.World_Ref,e:core.Entity) -> base.Entity_Id {value
 morph_instance_source :: proc(w:core.World_Ref,e:core.Entity,config:anim.Morph_Weights) -> (core.Entity,Morph_Source_Kind) {
     animations,sources,parents:=core.world_table_of(w,anim.Animation),core.world_table_of(w,anim.Pose_Source),core.world_table_of(w,core.Parent)
     if animations==nil || sources==nil || parents==nil {return core.NONE,.None}
-    source:=anim.morph_source(e,config,core.read(animations),core.read(sources),core.read(parents))
+    source:=anim.morph_source(e,config,core.read(animations),core.read(sources),core.read(parents),core.world_storage_of(w,anim.Playback))
     if source==core.NONE {return source,.None}
     if config.source!=core.NONE {return source,.Explicit}
+    if source==e {return source,.Own}
     return source,.Pose_Source if core.has(core.read(sources),e) else .Ancestor
 }
 

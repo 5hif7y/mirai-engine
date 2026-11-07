@@ -100,10 +100,11 @@ rigs_at_the_bind_pose_share_their_mesh_until_a_pose_leaves_it :: proc(t:^testing
         if !testing.expect(t,pose!=nil && skeleton_bind(&playback,pose,definition,nil,&transforms)) {return}
         copy(pose.previous[:],pose.local[:]);pose.pose_ready=true
     }
-    tick :: proc(app:^host.App,cache:^Skin_Runtime,state:^Skin_Instances,playback:^Playback,meshes:^core.Table(erender.Mesh_Renderer),skins:^core.Table(Pose_Source),parents:^core.Table(core.Parent),worlds:^core.Table(core.World_Transform),tints:^core.Table(erender.Tint),overrides:^core.Table(erender.Material_Override),hidden:^core.Table(erender.Hidden),elsewhere:^core.Table(erender.Drawn_Elsewhere),highlights:^core.Table(erender.Highlight),offsets:^core.Table(erender.Draw_Offset),problems:^core.Problems) {
+    modifiers:Modifier_Runtime;defer modifier_runtime_free(&modifiers)
+    tick :: proc(app:^host.App,cache:^Skin_Runtime,state:^Skin_Instances,playback:^Playback,meshes:^core.Table(erender.Mesh_Renderer),skins:^core.Table(Pose_Source),parents:^core.Table(core.Parent),worlds:^core.Table(core.World_Transform),tints:^core.Table(erender.Tint),overrides:^core.Table(erender.Material_Override),hidden:^core.Table(erender.Hidden),elsewhere:^core.Table(erender.Drawn_Elsewhere),highlights:^core.Table(erender.Highlight),offsets:^core.Table(erender.Draw_Offset),problems:^core.Problems,modifiers:^Modifier_Runtime=nil) {
         app.extras.instance_count=0
         outlines:core.Table(erender.Outline);defer core.table_destroy(&outlines)
-        animation_skin(core.read(meshes),core.read(skins),core.read(parents),core.read(worlds),core.read(tints),core.read(overrides),core.read(hidden),core.read(elsewhere),core.read(highlights),core.read(&outlines),core.read(offsets),cache,state,app,{},core.FRAME_TIME_DEFAULT,core.Ref(Playback){ptr=playback},{},problems,{},nil,ANIMATION_BUDGET_CONFIG_DEFAULT,{},{},{})
+        animation_skin(core.read(meshes),core.read(skins),core.read(parents),core.read(worlds),core.read(tints),core.read(overrides),core.read(hidden),core.read(elsewhere),core.read(highlights),core.read(&outlines),core.read(offsets),cache,state,app,{},core.FRAME_TIME_DEFAULT,core.Ref(Playback){ptr=playback},{},problems,{},nil,ANIMATION_BUDGET_CONFIG_DEFAULT,{},{},{},core.Ref(Modifier_Runtime){ptr=modifiers})
     }
     measure :: proc(renderer:^gpu.Renderer,label:string) -> int {
         s:=&renderer.scene
@@ -132,5 +133,19 @@ rigs_at_the_bind_pose_share_their_mesh_until_a_pose_leaves_it :: proc(t:^testing
     testing.expect(t,rhi.buffer_read_slice(device,renderer.scene.vertex_buffer,u64(record.posed_word)*4,result[:]))
     testing.expect_value(t,result[0].position,vertices[0].position+[3]f32{0,0.5,0})
     testing.expect_value(t,problems.count,0)
+
+    // A rig at the bind whose curves move a material value is drawn with its copy, which has it.
+    still:=constraint_playing(&playback,roots[1])
+    append(&still.curves,Curve_Output{target=base.name_hash("blush"),property=.Float,value={1,0,0,0},weight=1})
+    blush:=CURVE_MATERIAL_DEFAULT;blush.rig,blush.every,blush.scale=roots[1],true,{1,0,0,0}
+    base.text_set(blush.curve[:],"blush");base.text_set(blush.parameter[:],"base_color")
+    testing.expect(t,modifier_append(&modifiers.curve_materials,roots[1],blush))
+    tick(&app,&cache,&state,&playback,&meshes,&skins,&parents,&worlds,&tints,&overrides,&hidden,&elsewhere,&highlights,&offsets,&problems,&modifiers)
+    testing.expect_value(t,measure(renderer,"one rig posed and one with curve materials"),2)
+    testing.expect_value(t,len(host.app_instances(&app)),2)
+    instance:=core.entity_map_get(&state.instances,draws[1])
+    testing.expect(t,instance!=nil && instance.copied,"the still rig with curve materials has its copy")
+    testing.expect_value(t,problems.count,0)
+    testing.expectf(t,rhi.device_validation_errors(device)==0,"validation: %s",rhi.device_validation_message(device))
     testing.expectf(t,rhi.device_validation_errors(device)==0,"validation: %s",rhi.device_validation_message(device))
 }

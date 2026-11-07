@@ -144,7 +144,7 @@ equal length, at least one bone, finite transforms and unit quaternions. No proc
 - [Inertialization and motion adaptation](anim-motion.md). Named clocks, events, transition
   policies and layers: [animation plugin](../../mirai-animation/references/animation.md).
 
-## Adaptation (`ik.odin`, `retarget.odin`)
+## Adaptation (`ik.odin`, `retarget.odin`, `follow.odin`)
 
 - `two_bone_ik` receives three transforms in the same space, target and pole. It keeps the lengths
   also with intermediate weight, clamps targets out of reach, keeps the rotation of the end and
@@ -167,6 +167,17 @@ equal length, at least one bone, finite transforms and unit quaternions. No proc
   the length of the destination bones; translations are kept, copied or scaled
   (`Retarget_Translation`), and a source index `-1` keeps the reference. The work buffers and the
   references do not overlap the output. It does not infer names or solve full-body IK.
+- `follow_prepare` pairs the bones of a follower skeleton with those of a leader by name, or by path
+  where a name repeats in either; `follow_pose` gives each paired bone the leader's pose: its local
+  transform as is when its parent is paired with the leader's parent, else its place in the world
+  carried under its own parent. Unpaired bones keep their local transform under a parent that now
+  moves (`follow.odin`).
+- `Pose_Accumulator` sums the poses of a bone so that their order does not matter:
+  `pose_accumulate` adds a full pose by weight (rotations on one side) and `pose_delta_accumulate`
+  an additive one by a weight clamped to 0..1 (a delta in the space of the parent of the bone, its
+  scale a factor, as a face's poses are stored: translations summed, rotations by their
+  logarithms, scales multiplied). `pose_accumulated_apply` blends the bone to the average of the
+  full poses by their total, normalized past 1, and adds the additive ones over it.
 - [Chains and modifiers](anim-rigs.md): retarget between chains of different topology, Multi IK,
   twist and springs. The definition is shared among characters; each parallel evaluation receives
   its state and its scratch.
@@ -215,6 +226,7 @@ is no physical balance solver, self-collision between legs or full-body IK.
 section: [rigs](anim-rigs.md#verification), [motion](anim-motion.md#verification),
 [storage](anim-storage.md#verification).
 
+- Follow and pose deltas in any order, with hostile inputs: `follow_test.odin`.
 - Hostile cases: `ANIM_HOSTILE_ROUNDS` (skeletons and solvers), `ANIM_BLEND_HOSTILE_ROUNDS` (blend
   spaces) and `ANIM_PROCEDURAL_HOSTILE_ROUNDS`; when changing validation or memory, `--release` and
   20000.

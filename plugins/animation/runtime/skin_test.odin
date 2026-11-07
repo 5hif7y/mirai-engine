@@ -98,7 +98,7 @@ skeletal_instances_use_independent_dense_poses_and_eighth_influence :: proc(t:^t
     tick :: proc(app:^host.App,cache:^Skin_Runtime,state:^Skin_Instances,playback:^Playback,meshes:^core.Table(erender.Mesh_Renderer),skins:^core.Table(Pose_Source),parents:^core.Table(core.Parent),worlds:^core.Table(core.World_Transform),tints:^core.Table(erender.Tint),overrides:^core.Table(erender.Material_Override),hidden:^core.Table(erender.Hidden),elsewhere:^core.Table(erender.Drawn_Elsewhere),highlights:^core.Table(erender.Highlight),offsets:^core.Table(erender.Draw_Offset),problems:^core.Problems,time:core.Time={},frame:=core.FRAME_TIME_DEFAULT) {
         app.extras.instance_count=0
         outlines:core.Table(erender.Outline);defer core.table_destroy(&outlines)
-        animation_skin(core.read(meshes),core.read(skins),core.read(parents),core.read(worlds),core.read(tints),core.read(overrides),core.read(hidden),core.read(elsewhere),core.read(highlights),core.read(&outlines),core.read(offsets),cache,state,app,time,frame,core.Ref(Playback){ptr=playback},{},problems,{},nil,ANIMATION_BUDGET_CONFIG_DEFAULT,{},{},{})
+        animation_skin(core.read(meshes),core.read(skins),core.read(parents),core.read(worlds),core.read(tints),core.read(overrides),core.read(hidden),core.read(elsewhere),core.read(highlights),core.read(&outlines),core.read(offsets),cache,state,app,time,frame,core.Ref(Playback){ptr=playback},{},problems,{},nil,ANIMATION_BUDGET_CONFIG_DEFAULT,{},{},{},{})
     }
     tick(&app,&cache,&state,&playback,&meshes,&skins,&parents,&worlds,&tints,&overrides,&hidden,&elsewhere,&highlights,&offsets,&problems)
     if !testing.expect_value(t,len(host.app_instances(&app)),2) {return}
@@ -230,7 +230,7 @@ a_skin_part_collapses_the_vertices_of_its_bone_into_it :: proc(t:^testing.T) {
     if !testing.expect(t,pose!=nil && skeleton_bind(&playback,pose,definition,nil,&transforms)) {return}
     pose.local[2].position={0.5,2,0}
     copy(pose.previous[:],pose.local[:]);pose.pose_ready=true
-    animation_skin(core.read(&meshes),core.read(&skins),core.read(&parents),core.read(&worlds),core.read(&empty_tints),core.read(&empty_overrides),core.read(&empty_hidden),core.read(&empty_elsewhere),core.read(&empty_highlights),core.read(&empty_outlines),core.read(&empty_offsets),&cache,&state,&app,{},core.FRAME_TIME_DEFAULT,core.Ref(Playback){ptr=&playback},{},&problems,{},nil,ANIMATION_BUDGET_CONFIG_DEFAULT,core.read(&parts),{},{})
+    animation_skin(core.read(&meshes),core.read(&skins),core.read(&parents),core.read(&worlds),core.read(&empty_tints),core.read(&empty_overrides),core.read(&empty_hidden),core.read(&empty_elsewhere),core.read(&empty_highlights),core.read(&empty_outlines),core.read(&empty_offsets),&cache,&state,&app,{},core.FRAME_TIME_DEFAULT,core.Ref(Playback){ptr=&playback},{},&problems,{},nil,ANIMATION_BUDGET_CONFIG_DEFAULT,core.read(&parts),{},{},{})
     testing.expect_value(t,problems.count,0)
     if !testing.expect_value(t,len(state.instances.values),1) {return}
     instance:=state.instances.values[0]

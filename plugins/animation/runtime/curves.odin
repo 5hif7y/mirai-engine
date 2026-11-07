@@ -1,5 +1,6 @@
 package anim
 
+import "core:slice"
 import "mirai:core"
 import "mirai:std/base"
 import "mirai:host"
@@ -18,6 +19,8 @@ curves_prepare :: proc(state:^Playing,content:^host.Content_Animation) -> bool {
         for curve in next {if curve.target==track.target && curve.property==track.property && curve.slot==track.slot {found=true;break}}
         if !found && append(&next,Curve_Output{target=track.target,property=track.property,slot=track.slot})!=1 {return false}
     }
+    // In curve_order, so the final curves of a rig are laid out by halves and lookups search by halves.
+    slice.sort_by(next[:],curve_order)
     delete(state.curves);state.curves=next;next=nil;state.curves_ready=true
     return true
 }
@@ -90,7 +93,7 @@ animation_curve :: proc(playback:^Playback,entity:core.Entity,name:string,slot:u
     state:=constraint_playing(playback,entity)
     if state==nil || state.seen!=playback.frame {return default_value}
     target:=base.name_hash(name)
-    for curve in state.curves {if curve.target==target && curve.property==.Float && curve.slot==slot {return curve.value.x+default_value*(1-curve.weight)}}
+    for curve in playing_curves(state) {if curve.target==target && curve.property==.Float && curve.slot==slot {return curve.value.x+default_value*(1-curve.weight)}}
     return default_value
 }
 
@@ -99,7 +102,7 @@ animation_vector :: proc(playback:^Playback,entity:core.Entity,name:string,slot:
     state:=constraint_playing(playback,entity)
     if state==nil || state.seen!=playback.frame {return default_value}
     target:=base.name_hash(name)
-    for curve in state.curves {if curve.target==target && curve.property==.Vector && curve.slot==slot {return curve.value+default_value*(1-curve.weight)}}
+    for curve in playing_curves(state) {if curve.target==target && curve.property==.Vector && curve.slot==slot {return curve.value+default_value*(1-curve.weight)}}
     return default_value
 }
 

@@ -102,14 +102,13 @@ probe_settle :: proc(data,shared,editor:rawptr) {
     core.entities_settle(&w.entities)
 }
 
-// The seats take their holds and no device, as engine/input runs them.
+// The seats take their holds and the devices of the tick, as engine/input runs them.
 @(private="file")
 probe_tick :: proc(data,shared,editor,app:rawptr) {
     w:=cast(^Probe_World)data
     input.input_holds(&w.seats,&w.holds,w.time,nil)
     for row in 0..<core.count(&w.seats) {
-        device:core.Input
-        input.seat_feed(core.at(&w.seats,row),&device,&w.bindings,false)
+        input.seat_feed(core.at(&w.seats,row),&w.input,&w.bindings,false)
     }
     w.score.points+=1
     for ping in core.take(&w.pings.queue) {w.score.points+=ping.amount}
@@ -274,7 +273,7 @@ a_step_gives_the_run_the_pointer_the_gamepads_and_the_text_of_its_ui :: proc(t:^
     step.gamepads[1]={connected=true,down={.South}}
     step.gamepads[1].axes[.Left_X]=0.5
     play_pause(&f.s,true)
-    api_step_tick(&f.s,0,0,&step,true)
+    api_step_tick(&f.s,0,0,&step,0)
     testing.expect(t,r.pointer_set && r.pointer==[2]f32{120,80})
     testing.expect(t,.Left in r.ui.pressed && r.ui.clicks==1 && r.ui.pointer==[2]f32{120,80})
     testing.expect_value(t,string(r.ui.text[:r.ui.text_count]),"go")
@@ -289,7 +288,7 @@ a_step_gives_the_run_the_pointer_the_gamepads_and_the_text_of_its_ui :: proc(t:^
     testing.expect(t,r.ui.pressed=={} && r.ui.text_count==0 && .Left in r.ui.down,"the edges of the UI last one tick")
     // The next step holds what it held: no edges.
     step.placed,step.text=false,""
-    api_step_tick(&f.s,0,0,&step,false)
+    api_step_tick(&f.s,0,0,&step,1)
     testing.expect(t,r.ui.pressed=={} && r.pointer==[2]f32{120,80})
     testing.expect(t,.South not_in r.input.gamepads[1].pressed && .South in r.input.gamepads[1].down)
     // Run until a condition: met before running runs nothing.
@@ -316,7 +315,7 @@ play_input_holds_actions_of_a_seat_by_name_for_the_ticks_that_run :: proc(t:^tes
     // One tick as play.step runs it, without the frame of a window.
     step :: proc(f:^Probe) {
         held:=Api_Step_Input{ticks=1}
-        api_step_tick(&f.s,0,0,&held,true)
+        api_step_tick(&f.s,0,0,&held,0)
         platform.frame_begin(f.p)
         play_input_update(&f.s)
         game_frame(&f.s)
@@ -362,13 +361,22 @@ probe_frame :: proc(s:^Session) -> bool {
 
 // What the game of a run took in each tick and the tick of each sample.
 @(private="file")
-Probe_Seen :: struct {keys:[16]core.Keys,deltas:[16][2]f32,ticks:[16]u64,count:int}
+Probe_Seen :: struct {
+    keys,pressed,released:[64]core.Keys,
+    deltas:[64][2]f32,
+    ticks:[64]u64,
+    seat:core.Entity, // whose jump it reads
+    jumps:[64]input.Action_State,
+    count:int,
+}
 
 @(private="file")
 probe_seen :: proc(s:^Session,data:rawptr,w:core.World_Ref,ran:int) -> string {
     seen:=cast(^Probe_Seen)data
     given:=core.world_storage_of(w,core.Input)
     seen.keys[seen.count],seen.deltas[seen.count]=given.keys_down,given.mouse_delta
+    seen.pressed[seen.count],seen.released[seen.count]=given.keys_pressed,given.keys_released
+    if seats:=core.world_table_of(w,input.Seat);seats!=nil && seen.seat!=core.NONE {seen.jumps[seen.count]=input.seat_action(core.read(seats),seen.seat,PROBE_JUMP)}
     seen.ticks[seen.count]=core.world_storage_of(w,core.Time).tick
     seen.count+=1
     return ""
@@ -379,25 +387,95 @@ a_step_holds_each_segment_for_its_ticks_in_order_with_its_edges_at_its_first :: 
     f:=new(Probe);defer free(f)
     if !probe_open(t,f) {return}
     defer probe_close(f)
-    seen:Probe_Seen
-    timeline:=[]Api_Step_Input{{ticks=2,keys={.Space},mouse_delta={3,0}},{ticks=1},{ticks=2,keys={.Enter}}}
-    run:=Api_Step_Run{timeline=timeline,sampler={every=1,take=probe_seen,data=&seen}}
+    seen:=new(Probe_Seen,context.temp_allocator)
+    seen.seat=f.seat
+    timeline:=[]Api_Step_Input{{ticks=2,keys={.Space},mouse_delta={3,0}},{ticks=1},{ticks=1,tap_keys={.Space}},{ticks=1,keys={.Enter}}}
+    run:=Api_Step_Run{timeline=timeline,sampler={every=1,take=probe_seen,data=seen}}
     ran,_,problem:=api_step_run(&f.s,&run,probe_frame)
     testing.expect_value(t,problem,"")
     testing.expect_value(t,ran,5)
     testing.expect_value(t,seen.count,5)
-    testing.expect(t,slice.equal(seen.keys[:5],[]core.Keys{{.Space},{.Space},{},{.Enter},{.Enter}}),"each segment for its ticks in order")
-    testing.expect(t,seen.deltas[0]==[2]f32{3,0} && seen.deltas[1]=={},"the motion is of the first tick of its segment")
+    testing.expect(t,slice.equal(seen.keys[:5],[]core.Keys{{.Space},{.Space},{},{},{.Enter}}),"each segment for its ticks in order")
+    testing.expect(t,seen.deltas[0]==[2]f32{1.5,0} && seen.deltas[1]==[2]f32{1.5,0} && seen.deltas[2]=={},"the motion is spread over the ticks of its segment")
+    testing.expect(t,.Space in seen.pressed[3] && .Space in seen.released[3] && .Space not_in seen.keys[3],"a tap is pressed and released inside its tick, never down")
+    // The keys reach the action as those of a person: a hold of two ticks, and a tap shorter than a tick.
+    j:=seen.jumps
+    testing.expect(t,j[0].pressed && j[1].down && !j[1].pressed && j[2].released && j[2].released_held==2,"held two ticks")
+    testing.expect(t,j[3].pressed && j[3].released && j[3].tapped && !j[3].down,"tapped inside one tick")
+    testing.expect(t,!j[4].down && !j[4].pressed,"let go")
+    // A hold given in seconds is the nearest whole ticks, and at least one.
+    call:=api.Call{allocator=context.temp_allocator}
+    given:[API_STEP_SEGMENTS]Api_Play_Segment
+    given[0].seconds,given[1].seconds=0.8,0.001
+    held,read:=api_segments_read(&call,given[:],`[{"seconds":0.8},{"seconds":0.001}]`,1.0/60)
+    testing.expect(t,read && len(held)==2 && held[0].ticks==48 && held[1].ticks==1,call.error.message)
+    error:api.Error
     refused:=[?]struct{params,says:string}{
         {`{"segments":[{"ticks":1}],"keys":["Space"]}`,"keys goes inside each of segments"},
         {`{"segments":[{"ticks":3000},{"ticks":1000}]}`,"segments run 4000 ticks"},
         {`{"segments":[]}`,"segments is empty"},
         {`{"segments":[{"ticks":1,"text":"a\tb"}]}`,"segments[0].text"},
+        {`{"segments":[{"ticks":1,"seconds":0.5}]}`,"both say how long"},
+        {`{"segments":[{"seconds":0}]}`,"segments[0].seconds takes"},
+        {`{"segments":[{"keys":["Space"]}]}`,"or seconds"},
+        {`{"segments":[{"ticks":1,"keys":["Space"],"tap_keys":["Space"]}]}`,"held or tapped"},
+        {`{"segments":[{"ticks":1,"gamepads":[{"slot":0,"buttons":["South"],"tapped":["South"]}]}]}`,"held or tapped"},
+        {`{"seconds":100}`,"seconds takes"},
+        {`{"ticks":2,"seconds":1}`,"both say how long"},
     }
     for c in refused {
-        error,_:=probe_call(f,"play.step",c.params)
+        error,_=probe_call(f,"play.step",c.params)
         testing.expectf(t,error.code==api.INVALID_PARAMS && strings.contains(error.message,c.says),"%s: %v",c.params,error)
     }
+}
+
+// The devices play.input schedules play out over the ticks the next steps
+// run, one tick at a time and through the path of real input: a tap shorter
+// than a tick, a press of 0.05 s and a hold of 0.8 s reach the action as a
+// person's, and nothing is held after them.
+@(test)
+play_input_schedules_the_devices_of_a_person_that_the_next_steps_play_tick_by_tick :: proc(t:^testing.T) {
+    f:=new(Probe);defer free(f)
+    if !probe_open(t,f) {return}
+    defer probe_close(f)
+    error,text:=probe_call(f,"play.input",`{"segments":[{"ticks":1,"tap_keys":["Space"]},{"ticks":2},{"seconds":0.05,"keys":["Space"]},{"ticks":2},{"seconds":0.8,"keys":["Space"]},{"ticks":1}]}`)
+    testing.expect(t,error.code==0 && strings.contains(text,`"scripted": 57`),text)
+    testing.expect(t,play_paused(&f.s),"the Play of the user waits for the steps")
+    refused:=[?]struct{method,params,says:string}{
+        {"play.step",`{"keys":["Space"]}`,"play.input scheduled 57 more ticks"},
+        {"play.step",`{"segments":[{"ticks":1,"tap_keys":["Enter"]}]}`,"play.input scheduled"},
+        {"play.input",`{"segments":[{"ticks":1}],"slot":0}`,"slot and seat name the seat of actions"},
+    }
+    for c in refused {
+        error,_=probe_call(f,c.method,c.params)
+        testing.expectf(t,error.code==api.INVALID_PARAMS && strings.contains(error.message,c.says),"%s %s: %v",c.method,c.params,error)
+    }
+    // One tick per step, looking at the game between them.
+    seen:=new(Probe_Seen,context.temp_allocator)
+    seen.seat=f.seat
+    for tick in 0..<58 {
+        run:=Api_Step_Run{timeline=[]Api_Step_Input{{ticks=1}},sampler={every=1,take=probe_seen,data=seen}}
+        ran,_,problem:=api_step_run(&f.s,&run,probe_frame)
+        if !testing.expectf(t,ran==1 && problem=="","tick %d: %s",tick,problem) {return}
+        if tick==9 {
+            error,text=probe_call(f,"play.status",`{}`)
+            testing.expect(t,strings.contains(text,`"scripted": 47`),text)
+        }
+    }
+    j:=seen.jumps
+    testing.expect(t,j[0].pressed && j[0].released && j[0].tapped && !j[0].down,"a tap inside the first tick")
+    testing.expect(t,!j[1].down && !j[2].down)
+    testing.expect(t,j[3].pressed && j[5].down && j[5].held_ticks==3 && j[6].released && j[6].tapped && j[6].released_held==3,"0.05 s is three ticks, a tap")
+    testing.expect(t,j[8].pressed && !j[36].holding && j[37].hold_started && j[55].holding,"0.8 s holds past the hold threshold")
+    testing.expect(t,j[56].released && !j[56].tapped && j[56].released_held==48,"let go after 48 ticks")
+    testing.expect(t,!j[57].down && !j[57].pressed && seen.keys[57]=={},"nothing is held after the segments")
+    error,text=probe_call(f,"play.status",`{}`)
+    testing.expect(t,strings.contains(text,`"scripted": 0`),text)
+    // Segments replace what is left, and release_all drops them.
+    error,text=probe_call(f,"play.input",`{"segments":[{"ticks":5,"keys":["Space"]}]}`)
+    testing.expect(t,strings.contains(text,`"scripted": 5`),text)
+    error,text=probe_call(f,"play.input",`{"release_all":true}`)
+    testing.expect(t,error.code==0 && strings.contains(text,`"scripted": 0`),text)
 }
 
 @(test)
@@ -480,7 +558,7 @@ a_filmstrip_cell_comes_before_the_first_tick_and_every_every_ticks_around_its_en
     testing.expect_value(t,ran,9)
     testing.expect(t,slice.equal(seen.ticks[:seen.count],[]u64{start,start+3,start+6,start+9}),"a cell every 3 ticks from the one before the first")
     // Where the entity shows and the cell around it, kept beside the image when it is far off.
-    camera:=gpu.Camera{position={0,0,10},forward={0,0,-1},up={0,1,0},fov_y=90,near=0.1}
+    camera:=core.View{position={0,0,10},rotation=1,fov=90*math.RAD_PER_DEG,near=0.1}
     at,shown:=api_view_project(camera,{100,50,200,100},{0,0,0})
     testing.expect(t,shown && abs(at.x-200)<1e-3 && abs(at.y-100)<1e-3,"the centre of the view")
     at,shown=api_view_project(camera,{100,50,200,100},{5,0,0})

@@ -265,3 +265,27 @@ view_ray :: proc "contextless" (v:View,pixel:[2]f32) -> (origin,direction:[3]f32
     local:=[3]f32{ndc.x*half*size.x/size.y,ndc.y*half,-1}
     return v.position,linalg.normalize(mm.quat_rotate(v.rotation,local))
 }
+
+// Where a world point shows in the view, in pixels of its size from the top
+// left, and how far ahead of the eye it is along where it looks. front is
+// false for a point behind the eye, whose pixel means nothing.
+view_project :: proc "contextless" (v:View,point:[3]f32) -> (pixel:[2]f32,depth:f32,front:bool) {
+    size:=[2]f32{max(v.size.x,1),max(v.size.y,1)}
+    local:=mm.quat_rotate(mm.quat_inverse(v.rotation),point-v.position)
+    depth=-local.z
+    ndc:[2]f32
+    switch v.projection {
+    case .Custom:
+        clip:=v.custom*[4]f32{local.x,local.y,local.z,1}
+        if !(clip.w>0) {return {},depth,false}
+        ndc=clip.xy/clip.w
+    case .Orthographic:
+        if !(v.height>0) {return {},depth,false}
+        ndc=[2]f32{2*local.x/(v.height*size.x/size.y),2*local.y/v.height}+v.shift
+    case .Perspective:
+        if !(depth>0) {return {},depth,false}
+        half:=math.tan((v.fov>0?v.fov:VIEW_DEFAULT.fov)*0.5)
+        ndc=[2]f32{local.x/(depth*half*size.x/size.y),local.y/(depth*half)}+v.shift
+    }
+    return {(ndc.x*0.5+0.5)*size.x,(0.5-ndc.y*0.5)*size.y},depth,depth>0
+}

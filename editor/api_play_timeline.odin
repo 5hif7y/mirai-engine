@@ -2,10 +2,12 @@ package editor
 
 import "core:encoding/json"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:strings"
 import "mirai:core"
 import "mirai:editor/api"
+import "mirai:platform"
 import "mirai:std/base"
 import "mirai:std/serial"
 import "mirai:ui"
@@ -22,11 +24,14 @@ API_TRACE_FIELDS :: 8
 API_TRACE_ROWS :: 256
 
 Api_Play_Segment :: struct {
-    ticks:int `mirai:"max=3600,label=Fixed ticks it holds this input; 1 or more"`,
+    ticks:int `mirai:"optional,max=3600,label=Fixed ticks it holds this input; 1 or more; in place of seconds"`,
+    seconds:f32 `mirai:"optional,label=Game time it holds this input in place of ticks: the nearest whole ticks and at least 1"`,
     keys:core.Keys `mirai:"optional,label=Keys held in every tick of the segment; they go to the local seat with the focus"`,
     mouse_buttons:core.Mouse_Buttons `mirai:"optional,label=Buttons held in every tick of the segment"`,
+    tap_keys:core.Keys `mirai:"optional,label=Keys pressed and released inside its first tick: a press shorter than a tick that is never down"`,
+    tap_buttons:core.Mouse_Buttons `mirai:"optional,label=Buttons pressed and released inside its first tick"`,
     mouse_position:[2]f32 `mirai:"optional,label=Where the pointer goes at its first tick in points of the window from its top left; it stays there after it"`,
-    mouse_delta:[2]f32 `mirai:"optional,label=Added to its first tick"`,
+    mouse_delta:[2]f32 `mirai:"optional,label=Relative motion of the mouse in points spread evenly over its ticks: a look that turns along the segment"`,
     wheel:[2]f32 `mirai:"optional,label=Added to its first tick"`,
     text:[ui.INPUT_TEXT_CAPACITY]u8 `mirai:"optional,text,label=Printable ASCII typed in its first tick"`,
     gamepads:[core.GAMEPAD_CAPACITY]Api_Play_Gamepad `mirai:"optional,label=The gamepads connected in every tick of the segment"`,
@@ -38,7 +43,8 @@ Api_Play_Trace :: struct {
     name:[128]u8 `mirai:"optional,text,label=The entities with this name; * stands for any run of characters"`,
     component:[64]u8 `mirai:"optional,text,label=Only the entities that have this component"`,
     storage:[64]u8 `mirai:"optional,text,label=A storage of the world in place of entities"`,
-    fields:[API_TRACE_FIELDS][128]u8 `mirai:"text,label=Paths inside the document of an entity as play.inspect writes it (or inside the storage): names joined by dots and [i] for element i as world_position or components.Motion.linear[1]"`,
+    view:bool `mirai:"optional,label=What the player sees as play.view writes it in place of entities or a storage: the entities named are its points"`,
+    fields:[API_TRACE_FIELDS][128]u8 `mirai:"text,label=Paths inside the document of an entity as play.inspect writes it (or inside the storage or the view): names joined by dots and [i] for element i as world_position or components.Motion.linear[1] or points[0].normalized"`,
     every:int `mirai:"optional,min=1,max=3600,label=Ticks between two rows"`,
     include_runtime:bool `mirai:"optional,label=Hidden fields and transient component state as play.inspect with include_runtime reads them"`,
 }
@@ -57,6 +63,7 @@ Api_Play_Step_Result :: struct {
     building:bool `mirai:"label=An Odin source changed since the last build: the build runs and the game starts once it stands"`,
     ran:int `mirai:"label=The ticks it ran"`,
     met:bool `mirai:"label=With until: whether they held when it stopped"`,
+    scripted:int `mirai:"label=Ticks left of the input play.input scheduled: the next steps without input play them"`,
     trace:Api_Play_Trace_Table `mirai:"optional,label=With trace: the values it read"`,
 }
 Api_Play_Trace_Table :: struct {
@@ -67,6 +74,7 @@ Api_Play_Trace_Column :: struct {
     entity:core.Entity `mirai:"optional,label=The handle of the entity"`,
     name:[64]u8 `mirai:"optional,text,label=The name of the entity"`,
     storage:[64]u8 `mirai:"optional,text,label=The storage in place of an entity"`,
+    view:bool `mirai:"optional,label=The view in place of an entity"`,
     field:[128]u8 `mirai:"text"`,
 }
 Api_Play_Trace_Row :: struct {
@@ -80,22 +88,42 @@ Api_Step_Input :: struct {
     ticks:int,
     keys:core.Keys,
     buttons:core.Mouse_Buttons,
+    tap_keys:core.Keys, // pressed and released inside the first tick
+    tap_buttons:core.Mouse_Buttons,
     mouse_position:[2]f32,
     placed:bool, // mouse_position was given
-    mouse_delta,wheel:[2]f32,
+    mouse_delta:[2]f32, // along all its ticks
+    wheel:[2]f32,
     text:string,
     gamepads:[core.GAMEPAD_CAPACITY]core.Gamepad,
+    pad_taps:[core.GAMEPAD_CAPACITY]platform.Gamepad_Buttons, // pressed and released inside the first tick
 }
 
-// A segment of the params; raw is its JSON object and at names it in errors.
+// A segment of the params; raw is its JSON object, at names it in errors and
+// tick_dt is the seconds of a tick.
 @(private)
-api_segment_read :: proc(call:^api.Call,segment:^Api_Play_Segment,raw:string,at:string) -> (step:Api_Step_Input,ok:bool) {
-    values:[2]string
-    api.object_values(call.allocator,raw,{"mouse_position","gamepads"},values[:])
-    step={ticks=segment.ticks,keys=segment.keys,buttons=segment.mouse_buttons,mouse_position=segment.mouse_position,placed=values[0]!="",mouse_delta=segment.mouse_delta,wheel=segment.wheel}
-    if step.ticks<1 {api.call_failf(call,api.INVALID_PARAMS,"%sticks: give the ticks it holds its input; 1 or more",at);return}
+api_segment_read :: proc(call:^api.Call,segment:^Api_Play_Segment,raw:string,at:string,tick_dt:f32) -> (step:Api_Step_Input,ok:bool) {
+    values:[4]string
+    api.object_values(call.allocator,raw,{"mouse_position","gamepads","ticks","seconds"},values[:])
+    step={ticks=segment.ticks,keys=segment.keys,buttons=segment.mouse_buttons,tap_keys=segment.tap_keys,tap_buttons=segment.tap_buttons,mouse_position=segment.mouse_position,placed=values[0]!="",mouse_delta=segment.mouse_delta,wheel=segment.wheel}
+    if values[3]!="" {
+        if values[2]!="" {api.call_failf(call,api.INVALID_PARAMS,"%sticks and %sseconds both say how long it holds: give one",at,at);return}
+        ticks:=f64(segment.seconds)/f64(max(tick_dt,1e-6))
+        if !rpc_finite(segment.seconds) || !(segment.seconds>0) || ticks>f64(API_STEP_LIMIT) {
+            api.call_failf(call,api.INVALID_PARAMS,"%sseconds takes a time above 0 and up to %d ticks of %g s",at,API_STEP_LIMIT,tick_dt)
+            return
+        }
+        step.ticks=max(int(math.round(ticks)),1)
+    }
+    if step.ticks<1 {api.call_failf(call,api.INVALID_PARAMS,"%sticks: give the ticks it holds its input (1 or more) or seconds",at);return}
+    if both:=step.keys&step.tap_keys;both!={} {api.call_failf(call,api.INVALID_PARAMS,"%stap_keys: %v are in keys too; a key is held or tapped",at,both);return}
+    if both:=step.buttons&step.tap_buttons;both!={} {api.call_failf(call,api.INVALID_PARAMS,"%stap_buttons: %v are in mouse_buttons too; a button is held or tapped",at,both);return}
     if step.placed && (!rpc_finite(step.mouse_position.x) || !rpc_finite(step.mouse_position.y)) {
         api.call_failf(call,api.INVALID_PARAMS,"%smouse_position takes two finite numbers: points of the window from its top left",at)
+        return
+    }
+    if !rpc_finite(step.mouse_delta.x) || !rpc_finite(step.mouse_delta.y) || !rpc_finite(step.wheel.x) || !rpc_finite(step.wheel.y) {
+        api.call_failf(call,api.INVALID_PARAMS,"%smouse_delta and wheel take finite numbers",at)
         return
     }
     step.text=base.text_get(segment.text[:])
@@ -105,8 +133,10 @@ api_segment_read :: proc(call:^api.Call,segment:^Api_Play_Segment,raw:string,at:
     for pad in segment.gamepads[:api_list_count(values[1])] {
         g:=&step.gamepads[pad.slot]
         if g.connected {api.call_failf(call,api.INVALID_PARAMS,"%sgamepads: slot %d is given twice; give each gamepad once",at,pad.slot);return}
+        if both:=pad.buttons&pad.tapped;both!={} {api.call_failf(call,api.INVALID_PARAMS,"%sgamepads: slot %d holds and taps %v; a button is held or tapped",at,pad.slot,both);return}
         g.connected,g.down=true,pad.buttons
         g.axes={.Left_X=pad.left_stick.x,.Left_Y=pad.left_stick.y,.Right_X=pad.right_stick.x,.Right_Y=pad.right_stick.y,.Left_Trigger=pad.left_trigger,.Right_Trigger=pad.right_trigger}
+        step.pad_taps[pad.slot]=pad.tapped
     }
     return step,true
 }
@@ -132,13 +162,13 @@ api_list_items :: proc(text:string,items:[]string) -> int {
 
 // The segments given as JSON in raw, checked; their ticks are at most a step.
 @(private)
-api_segments_read :: proc(call:^api.Call,segments:[]Api_Play_Segment,raw:string) -> (timeline:[]Api_Step_Input,ok:bool) {
+api_segments_read :: proc(call:^api.Call,segments:[]Api_Play_Segment,raw:string,tick_dt:f32) -> (timeline:[]Api_Step_Input,ok:bool) {
     items:=make([]string,len(segments),call.allocator)
     count:=api_list_items(raw,items)
-    if count==0 {api.call_fail(call,api.INVALID_PARAMS,`segments is empty: give them as [{"ticks": 2, "keys": ["Space"]}, {"ticks": 30}] or leave it out`);return}
+    if count==0 {api.call_fail(call,api.INVALID_PARAMS,`segments is empty: give them as [{"ticks": 2, "keys": ["Space"]}, {"seconds": 0.5}] or leave it out`);return}
     timeline=make([]Api_Step_Input,count,call.allocator)
     for &step,i in timeline {
-        step=api_segment_read(call,&segments[i],items[i],fmt.tprintf("segments[%d].",i)) or_return
+        step=api_segment_read(call,&segments[i],items[i],fmt.tprintf("segments[%d].",i),tick_dt) or_return
     }
     if total:=api_timeline_ticks(timeline);total>API_STEP_LIMIT {
         api.call_failf(call,api.INVALID_PARAMS,"segments run %d ticks and a step runs at most %d: split them into several calls",total,API_STEP_LIMIT)
@@ -149,20 +179,20 @@ api_segments_read :: proc(call:^api.Call,segments:[]Api_Play_Segment,raw:string)
 
 // The input of play.step along its ticks: its segments, or the input fields as one segment of ticks.
 @(private)
-api_step_timeline :: proc(call:^api.Call,params:^Api_Play_Step_Params) -> (timeline:[]Api_Step_Input,ok:bool) {
-    keys:=[?]string{"segments","ticks","keys","mouse_buttons","mouse_position","mouse_delta","wheel","text","gamepads"}
+api_step_timeline :: proc(call:^api.Call,params:^Api_Play_Step_Params,tick_dt:f32) -> (timeline:[]Api_Step_Input,ok:bool) {
+    keys:=[?]string{"segments","ticks","seconds","keys","mouse_buttons","tap_keys","tap_buttons","mouse_position","mouse_delta","wheel","text","gamepads"}
     values:[len(keys)]string
     api.object_values(call.allocator,call.raw,keys[:],values[:])
     if values[0]!="" {
         for value,i in values[1:] {
             if value!="" {api.call_failf(call,api.INVALID_PARAMS,"%s goes inside each of segments, which carry their own ticks and input: move it there or leave segments out",keys[i+1]);return}
         }
-        return api_segments_read(call,params.segments[:],values[0])
+        return api_segments_read(call,params.segments[:],values[0],tick_dt)
     }
     flat:=new(Api_Play_Segment,call.allocator)
-    flat^={ticks=params.ticks,keys=params.keys,mouse_buttons=params.mouse_buttons,mouse_position=params.mouse_position,mouse_delta=params.mouse_delta,wheel=params.wheel,text=params.text,gamepads=params.gamepads}
+    flat^={ticks=params.ticks,seconds=params.seconds,keys=params.keys,mouse_buttons=params.mouse_buttons,tap_keys=params.tap_keys,tap_buttons=params.tap_buttons,mouse_position=params.mouse_position,mouse_delta=params.mouse_delta,wheel=params.wheel,text=params.text,gamepads=params.gamepads}
     timeline=make([]Api_Step_Input,1,call.allocator)
-    timeline[0]=api_segment_read(call,flat,call.raw,"") or_return
+    timeline[0]=api_segment_read(call,flat,call.raw,"",tick_dt) or_return
     return timeline,true
 }
 
@@ -176,9 +206,75 @@ api_timeline_ticks :: proc(timeline:[]Api_Step_Input) -> (ticks:int) {
 @(private)
 api_timeline_input :: proc(timeline:[]Api_Step_Input) -> bool {
     for step in timeline {
-        if step.keys!={} || step.buttons!={} || step.mouse_delta!={} || step.wheel!={} || step.placed || step.text!="" || step.gamepads!={} {return true}
+        if step.keys!={} || step.buttons!={} || step.tap_keys!={} || step.tap_buttons!={} || step.mouse_delta!={} || step.wheel!={} || step.placed || step.text!="" || step.gamepads!={} {return true}
     }
     return false
+}
+
+// The input of devices play.input schedules for the next ticks of a run: each
+// tick the API runs without input of its own plays the next one, and nothing
+// is held once it ends. Its texts live here, not in the memory of a call.
+Run_Script :: struct {
+    run:u64, // Run.id of the run it is for; another run in the same place has none
+    steps:[API_STEP_SEGMENTS]Api_Step_Input, // their text is in texts
+    texts:[API_STEP_SEGMENTS][ui.INPUT_TEXT_CAPACITY]u8,
+    count,segment,at:int, // at: the ticks of segment already played
+}
+
+// The script of a run of s.runs; nil without the API, which keeps them.
+@(private)
+run_script :: proc(s:^Session,r:^Run) -> ^Run_Script {
+    st:=api_state(s)
+    if st==nil || r==nil {return nil}
+    if uintptr(r)<uintptr(&s.runs[0]) {return nil}
+    place:=int(uintptr(r)-uintptr(&s.runs[0]))/size_of(Run)
+    if place>=len(s.runs) {return nil}
+    script:=&st.scripts[place]
+    if script.run!=r.id {script^={run=r.id}}
+    return script
+}
+
+@(private)
+run_script_set :: proc(script:^Run_Script,timeline:[]Api_Step_Input) {
+    script^={run=script.run,count=len(timeline)}
+    for step,i in timeline {
+        script.steps[i]=step
+        script.steps[i].text=""
+        copy(script.texts[i][:],step.text)
+    }
+}
+
+// The ticks of a script still to play.
+@(private)
+run_script_ticks :: proc "contextless" (script:^Run_Script) -> (ticks:int) {
+    if script==nil || script.segment>=script.count {return 0}
+    for step in script.steps[script.segment:script.count] {ticks+=step.ticks}
+    return ticks-script.at
+}
+
+// The input of the next tick of a script and which tick of its segment it is;
+// nothing held once it ended.
+@(private)
+run_script_take :: proc(script:^Run_Script) -> (step:Api_Step_Input,at:int) {
+    if script==nil {return {ticks=1},0}
+    for script.segment<script.count && script.at>=script.steps[script.segment].ticks {script.segment+=1;script.at=0}
+    if script.segment>=script.count {
+        script^={run=script.run}
+        return {ticks=1},0
+    }
+    step,at=script.steps[script.segment],script.at
+    step.text=base.text_get(script.texts[script.segment][:])
+    script.at+=1
+    return
+}
+
+// Why a call that gives input of its own cannot run while r has a script; "" when it can.
+@(private)
+run_script_blocks :: proc(s:^Session,r:^Run) -> string {
+    if ticks:=run_script_ticks(run_script(s,r));ticks>0 {
+        return fmt.tprintf("play.input scheduled %d more ticks of input, which the next steps play: step without input to play them, or play.input with release_all to drop them",ticks)
+    }
+    return ""
 }
 
 // Takes a sample of the game w after ran ticks of the step; "" or why the step fails.
@@ -208,8 +304,9 @@ Api_Step_Run :: struct {
 }
 
 // Runs the ticks of a timeline, its segments one after the other, until its
-// conditions hold, sampling every some ticks and after the last one. The
-// user's Play pauses first. problem: why it stopped failing.
+// conditions hold, sampling every some ticks and after the last one. A
+// timeline without input plays the script of the run instead. The user's Play
+// pauses first. problem: why it stopped failing.
 @(private)
 api_step_run :: proc(s:^Session,run:^Api_Step_Run,frame:Api_Step_Frame) -> (ran:int,met:bool,problem:string) {
     target:=run_player(s,run.owner,run.player)
@@ -222,10 +319,11 @@ api_step_run :: proc(s:^Session,run:^Api_Step_Run,frame:Api_Step_Frame) -> (ran:
     total:=api_timeline_ticks(run.timeline)
     sampled:=0
     segment,at:=0,0
+    scripted:=!api_timeline_input(run.timeline)
     for ran<total {
         if len(run.until)>0 && met {break}
         for at>=run.timeline[segment].ticks {segment+=1;at=0}
-        api_step_tick(s,run.owner,run.player,&run.timeline[segment],at==0)
+        api_step_tick(s,run.owner,run.player,scripted?nil:&run.timeline[segment],at)
         if !frame(s) {return}
         ran+=1;at+=1
         // The run ends with its turn or with the document.
@@ -253,6 +351,7 @@ Api_Trace :: struct {
     names:[API_TRACE_ENTITIES]string, // when the step began, for the columns
     count:int,
     storage:int, // in the storages of the world; -1: entities
+    view:bool,   // the view, whose points are the entities
     fields:[API_TRACE_FIELDS]string,
     field_count:int,
     include_runtime:bool,
@@ -266,7 +365,7 @@ Api_Trace :: struct {
 @(private)
 api_trace_read :: proc(s:^Session,call:^api.Call,w:core.World_Ref,p:^Api_Play_Trace,raw:string,ticks:int,trace:^Api_Trace) -> (problem:string) {
     st:=api_state(s)
-    trace^={storage=-1,include_runtime=p.include_runtime}
+    trace^={storage=-1,view=p.view,include_runtime=p.include_runtime}
     values:[1]string
     api.object_values(call.allocator,raw,{"fields"},values[:])
     trace.field_count=api_list_count(values[0])
@@ -281,11 +380,14 @@ api_trace_read :: proc(s:^Session,call:^api.Call,w:core.World_Ref,p:^Api_Play_Tr
     }
     handle,name,component,storage:=base.text_get(p.entity[:]),base.text_get(p.name[:]),base.text_get(p.component[:]),base.text_get(p.storage[:])
     named:=p.id!=0 || handle!="" || name!="" || component!=""
-    if named==(storage!="") {return "trace: name what it reads: entities by id or entity or name or component (they narrow each other) or a storage"}
+    switch {
+    case p.view && storage!="": return "trace: view reads what the player sees in place of a storage: leave storage out"
+    case !p.view && named==(storage!=""): return "trace: name what it reads: entities by id or entity or name or component (they narrow each other), a storage or the view"
+    }
     if storage!="" {
         for &info,i in s.info.storages {if st.storage_types[i]!=serial.TYPE_NONE && info.name==storage {trace.storage=i;break}}
         if trace.storage<0 {return fmt.tprintf("trace.storage %q is not a storage of the game; play.inspect with storages lists them",storage)}
-    } else {
+    } else if named {
         table:^core.Table_Info
         if component!="" {
             if _,table=core.world_table_named(w,component);table==nil {return fmt.tprintf("trace.component %q is not a component of the game; component.list lists them",component)}
@@ -309,9 +411,11 @@ api_trace_read :: proc(s:^Session,call:^api.Call,w:core.World_Ref,p:^Api_Play_Tr
         if matched>API_TRACE_ENTITIES {return fmt.tprintf("trace matches %d entities and reads at most %d: narrow it with id or entity or name or component",matched,API_TRACE_ENTITIES)}
         trace.count=matched
     }
-    scratch,memory:=make([]u8,max(st.largest,1),call.allocator)
-    if memory!=nil {return "the request needs more scratch memory than the server has"}
-    trace.scratch=scratch
+    if !trace.view {
+        scratch,memory:=make([]u8,max(st.largest,1),call.allocator)
+        if memory!=nil {return "the request needs more scratch memory than the server has"}
+        trace.scratch=scratch
+    }
     serial.writer_init(&trace.rows,4096,call.allocator)
     return api_trace_take(s,trace,w,0)
 }
@@ -332,10 +436,16 @@ api_trace_take :: proc(s:^Session,data:rawptr,w:core.World_Ref,ran:int) -> strin
     doc:serial.Writer
     serial.writer_init(&doc,0,context.temp_allocator)
     omitted:=serial.Field_Flags{.Transient,.Hidden} if !trace.include_runtime else serial.Field_Flags{}
-    for d in 0..<(trace.storage>=0?1:trace.count) {
+    for d in 0..<(trace.storage>=0 || trace.view?1:trace.count) {
         serial.writer_reset(&doc)
         there:=true
-        if trace.storage>=0 {
+        if trace.view {
+            targets:[API_TRACE_ENTITIES]Play_View_Target
+            for e,i in trace.entities[:trace.count] {targets[i]={entity=e,named=true}}
+            text,problem:=play_view_json(w,targets[:trace.count])
+            if problem!="" {return problem}
+            serial.text_write_raw(&doc,text)
+        } else if trace.storage>=0 {
             info:=&s.info.storages[trace.storage]
             api_value_out(w,info.info,rawptr(uintptr(w.data)+info.offset),trace.scratch,handles=true)
             serial.text_write(&doc,&st.schema,st.storage_types[trace.storage],trace.scratch[:info.info.size],.Line,omit_fields=omitted)
@@ -402,11 +512,13 @@ api_play_step_write :: proc(s:^Session,call:^api.Call,r:^Run,ran:int,met:bool,tr
 api_trace_write :: proc(s:^Session,out:^serial.Writer,trace:^Api_Trace) {
     api.write_key(out,"trace");serial.text_write_raw(out,`{"columns":[`)
     first:=true
-    for d in 0..<(trace.storage>=0?1:trace.count) {
+    for d in 0..<(trace.storage>=0 || trace.view?1:trace.count) {
         for field in trace.fields[:trace.field_count] {
             if !first {serial.write_u8(out,',')}
             first=false
-            if trace.storage>=0 {
+            if trace.view {
+                serial.text_write_raw(out,`{"view":true`)
+            } else if trace.storage>=0 {
                 serial.text_write_raw(out,`{"storage":`);serial.text_write_string(out,s.info.storages[trace.storage].name)
             } else {
                 serial.text_write_raw(out,`{"entity":"`);serial.text_write_hex(out,u64(trace.entities[d]))

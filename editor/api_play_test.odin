@@ -502,6 +502,7 @@ a_filmstrip_cell_comes_before_the_first_tick_and_every_every_ticks_around_its_en
     }
     refused:=[?]struct{params,says:string}{
         {`{"count":4}`,"count is of a filmstrip"},
+        {`{"ui":true,"count":4}`,"count is of a filmstrip"}, // ui is a field of the capture, whatever it draws
         {`{"every":3}`,"count: give the cells"},
         {`{"every":100,"count":64}`,"lower every or count"},
         {`{"every":3,"count":4,"follow":"Nobody"}`,"names no entity"},

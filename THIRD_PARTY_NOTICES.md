@@ -61,10 +61,6 @@ are kept here and, where the license asks for it, in the header of the file.
   `cook/import/gltf/meshopt.odin`. Editor.
 - **Mesh2Motion** (MIT; © 2025 Scott Petrovic), <https://github.com/Mesh2Motion/mesh2motion-app>.
   The skinning solvers of `cook/rig/weights.odin`, altered. Editor.
-- **ACL 2.1, Animation Compression Library** (MIT; © 2017 Nicholas Frechette),
-  <https://github.com/nfrechette/acl>. The table of bit rates, the constant and default tracks,
-  the rigid shells, the segments with their ranges and the search of bit rates of
-  `std/anim/compress.odin` and the stream that `std/anim/sampled.odin` reads, altered. Game.
 - **Motion-Matching** (MIT; © Daniel Holden), <https://github.com/orangeduck/Motion-Matching>.
   The features, their normalization by kind and the search bounded by runs of rows of
   `std/anim/matching.odin`, altered. Game, with the `animation` plugin.

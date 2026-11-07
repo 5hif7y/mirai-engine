@@ -72,7 +72,7 @@ Match_Candidates :: struct {items:[MATCH_CANDIDATES]Match_Candidate,count:i32}
 Match_Query :: [MATCH_LANES]simd.f32x4
 
 // Clips a blended sample of the database mixes.
-MATCH_BLEND :: 4
+MATCH_BLEND :: 8
 
 // A clip in the database, or a sample of a blend: clips[0] alone (no weights, or only weights[0]),
 // or the clips with a weight above zero mixed in phase at their share of the sum of the weights,
@@ -81,12 +81,14 @@ MATCH_BLEND :: 4
 // modes is the set of locomotion modes it serves, bit m for mode m; an entry clip starts one of
 // them (a jump, a landing): it is searched only from its start, when the body enters the mode.
 // speed, when positive, is the m/s it travels at instead of the one measured: an in-place clip
-// goes that fast along its measured direction, or forward.
-Match_Clip :: struct {clips:[MATCH_BLEND]Clip,weights:[MATCH_BLEND]f32,modes:u32,entry:bool,speed:f32}
+// goes that fast along its measured direction, or forward. rates, when rates[0] is positive, are
+// the least and most rate it plays at to follow the body in place of those of a search: a set
+// authored slower than it is played (a crouch), or one kept from playing faster than it was made.
+Match_Clip :: struct {clips:[MATCH_BLEND]Clip,weights:[MATCH_BLEND]f32,modes:u32,entry:bool,speed:f32,rates:[2]f32}
 // The rows of a clip or of a blended sample, with its clips and their weights as shares of 1.
 // speed is how fast the body goes over the ground in it, m/s: that of its root, or for a clip in
-// place the one its feet push at.
-Match_Range :: struct {clips:[MATCH_BLEND]Clip,weights:[MATCH_BLEND]f32,first,count:i32,modes:u32,loop,entry:bool,speed:f32,travel:math.Vec3}
+// place the one its feet push at. rates: those of its Match_Clip.
+Match_Range :: struct {clips:[MATCH_BLEND]Clip,weights:[MATCH_BLEND]f32,first,count:i32,modes:u32,loop,entry:bool,speed:f32,travel:math.Vec3,rates:[2]f32}
 Match_Database :: struct {
     rate:f32,                      // rows per second of each clip
     features:[]simd.f32x4,         // MATCH_LANES per row, normalized
@@ -150,7 +152,7 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
     total,longest,blend_tracks:=0,0,0
     events:=false
     for c in clips {
-        if !anim_finite(c.speed) || c.speed<0 {return}
+        if !anim_finite(c.speed) || c.speed<0 || !match_rates_valid(c.rates) {return}
         duration,blended,valid:=match_clip_duration(lib,c,rate)
         if !valid {return}
         count,_:=frames_layout(duration,rate,MAX_FRAMES)
@@ -206,7 +208,7 @@ match_database_build :: proc(db:^Match_Database,lib:^Library,rig:Match_Rig,clips
             speed=c.speed
         }
         motion:=Match_Motion{frames=frames,world=world[:count*n],rest=rest_world,root=root,in_place=ground.in_place,travel=travel,forward=forward}
-        ranges[i]={clips=c.clips if blended else {0=c.clips[0]},weights=weights,first=i32(row),count=i32(count),modes=c.modes,loop=frames.loop,entry=c.entry,speed=speed,travel=travel}
+        ranges[i]={clips=c.clips if blended else {0=c.clips[0]},weights=weights,first=i32(row),count=i32(count),modes=c.modes,loop=frames.loop,entry=c.entry,speed=speed,travel=travel,rates=c.rates}
         for frame in 0..<count {
             values:=&raw[row+frame]
             at:=f32(frame)
@@ -360,8 +362,9 @@ match_query_trajectory :: proc "contextless" (db:^Match_Database,query:^Match_Qu
 
 // What a search looks for: the pose part of query (the trajectory lanes are written per clip),
 // the trajectory, the modes whose clips it searches and the rates a clip that travels may play at
-// (1 and 1: as it was made) and the rate the pose of query plays at (0: 1). entry searches the
-// starts of the entry clips of the modes alone; otherwise they are left out. With
+// (1 and 1: as it was made; 0 and 0: at its own rate), which the rates of a clip replace, and the
+// rate the pose of query plays at (0: 1). entry searches the starts of the entry clips of the
+// modes alone; otherwise they are left out. With
 // filter_stationary, a clip that is not an entry is searched only if it stands (MATCH_STILL) when
 // the body does not move, and moves when the body does. event, when positive with the events of
 // the database, is the seconds to the event (a landing): only rows in its window are searched
@@ -370,6 +373,16 @@ match_query_trajectory :: proc "contextless" (db:^Match_Database,query:^Match_Qu
 // stationary filter. event_from, when positive, is the seconds to its marker of the row that
 // plays: rows further from theirs are out of the window, as an arc in the air only goes on.
 Match_Request :: struct {query:Match_Query,trajectory:Match_Trajectory,modes:u32,min_rate,max_rate,rate:f32,entry:bool,filter_stationary,moving:bool,event:f32,event_rates:[2]f32,event_from:f32}
+
+// Whether rates are none (zero) or a least and a most rate a clip may play at.
+match_rates_valid :: proc "contextless" (rates:[2]f32) -> bool {
+    return rates=={} || anim_finite(rates[0]) && anim_finite(rates[1]) && rates[0]>0 && rates[0]<=rates[1]
+}
+// The least and most rate a range plays at to follow the body: its own, else least and most.
+match_range_rates :: proc "contextless" (r:Match_Range,least,most:f32) -> (f32,f32) {
+    if r.rates[0]>0 {return r.rates[0],r.rates[1]}
+    return least,most
+}
 
 // The query against the rows of a range, its weights and the rate the range plays at to go where
 // the trajectory goes: a few clips cover the speeds between theirs by their rate, whose trajectory
@@ -382,7 +395,8 @@ match_query :: proc "contextless" (db:^Match_Database,request:Match_Request,rang
     for &lane in weights {lane={1,1,1,1}}
     r:=db.ranges[range]
     if r.speed>1e-3 && request.min_rate>0 && request.min_rate<=request.max_rate {
-        rate=clamp(linalg.length(request.trajectory.positions[MATCH_TRAJECTORY-1])/(MATCH_HORIZON[MATCH_TRAJECTORY-1]*r.speed),request.min_rate,request.max_rate)
+        least,most:=match_range_rates(r,request.min_rate,request.max_rate)
+        rate=clamp(linalg.length(request.trajectory.positions[MATCH_TRAJECTORY-1])/(MATCH_HORIZON[MATCH_TRAJECTORY-1]*r.speed),least,most)
     }
     trajectory:=request.trajectory
     trajectory.velocity/=rate;trajectory.past/=rate

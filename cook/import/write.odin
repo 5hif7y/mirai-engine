@@ -1,6 +1,7 @@
 package importer
 
 import "core:fmt"
+import "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:path/filepath"
@@ -474,6 +475,7 @@ write_model :: proc(w:^Writer,model:^Imported_Model) -> bool {
     }
 
     w.report.skeleton_ids=make([]base.Asset_Id,len(model.skeletons),w.allocator)
+    root_bones:=make([]int,len(model.skeletons),context.temp_allocator)
     for skeleton,i in model.skeletons {
         part:=&parts[first_skeleton+i]
         w.report.skeleton_ids[i]=part.id
@@ -492,6 +494,7 @@ write_model :: proc(w:^Writer,model:^Imported_Model) -> bool {
         body:asset.Skeleton_Body
         body_parts:[len(anim.Body_Part)]asset.Skeleton_Body_Part
         count,map_:=skeleton_body(previous,skeleton.bones,&body,&body_parts)
+        root_bones[i]=skeleton_root_bone(skeleton.bones,map_) if count>0 else -1
         sockets:=skeleton_sockets(model,skeleton)
         if count>0 {skeleton_grips(w,model,i,map_,&sockets)}
         skeleton_sockets_kept(previous,skeleton.bones,&sockets)
@@ -563,7 +566,17 @@ write_model :: proc(w:^Writer,model:^Imported_Model) -> bool {
         existed:=os.exists(part.path)
         clips:=make([]asset.Animation_Clip_Desc,len(model.animations),context.temp_allocator)
         copy(clips,model.animations)
-        for &clip in clips {clip.skeleton=clip_skeleton(model,clip,w.report.skeleton_ids)}
+        // The file it replaces: the root a person set on a clip stays.
+        previous_file:asset.Asset
+        previous:asset.Animation_View
+        loaded:=existed && asset.asset_load(&previous_file,part.path,context.temp_allocator)==.None
+        defer if loaded {asset.asset_close(&previous_file)}
+        if loaded {previous,_=asset.animation_view(&previous_file,&w.types)}
+        for &clip in clips {
+            index:int
+            clip.skeleton,index=clip_skeleton(model,clip,w.report.skeleton_ids)
+            if index>=0 {clip.root=clip_root(model.skeletons[index].bones,root_bones[index],clip,previous)}
+        }
         desc:=asset.Animation_Desc{id=part.id,owner=part.owner,clips=clips,source=&import_data}
         if error:=asset.animation_save(part.path,&w.types,desc);error!=.None {return save_failed(w,error,part.path)}
         w.report.animation_id=part.id
@@ -573,10 +586,11 @@ write_model :: proc(w:^Writer,model:^Imported_Model) -> bool {
     return true
 }
 
-// The skeleton a clip plays on: the one with the most bones its transform tracks move.
+// The skeleton a clip plays on: the one with the most bones its transform tracks move, and its
+// index (-1: none).
 @(private="file")
-clip_skeleton :: proc(model:^Imported_Model,clip:asset.Animation_Clip_Desc,ids:[]base.Asset_Id) -> (id:base.Asset_Id) {
-    best:=0
+clip_skeleton :: proc(model:^Imported_Model,clip:asset.Animation_Clip_Desc,ids:[]base.Asset_Id) -> (id:base.Asset_Id,index:int) {
+    best:=0;index=-1
     for skeleton,i in model.skeletons {
         if i>=len(ids) {break}
         moved:=0
@@ -585,10 +599,50 @@ clip_skeleton :: proc(model:^Imported_Model,clip:asset.Animation_Clip_Desc,ids:[
             target:=base.name_hash(track.target)
             for &bone in skeleton.bones {if bone.target==target {moved+=1;break}}
         }
-        if moved>best {best,id=moved,ids[i]}
+        if moved>best {best,id,index=moved,ids[i],i}
     }
     return
 }
+
+// The bone a skeleton carries the motion of its body on: the parent of its pelvis (the root bone of
+// an Unreal skeleton, which a clamber or a jump start moves up and along). -1 when the pelvis is its
+// top bone: its track is the bob of the body, which a root kept in place would flatten.
+@(private="file")
+skeleton_root_bone :: proc(bones:[]asset.Skeleton_Bone,map_:anim.Body_Map) -> int {
+    pelvis:=int(map_.bones[.Pelvis])
+    if pelvis<0 || pelvis>=len(bones) {return -1}
+    parent:=int(bones[pelvis].parent)
+    return parent if parent>=0 && parent<len(bones) else -1
+}
+
+// The root of a clip of the skeleton of bones: the one a person set on the clip of that name in the
+// file the import replaces while its bone is still there, else its root bone with translation and
+// rotation when the clip moves or turns it (a clamber, a jump start), so that a character whose
+// capsule moves the body plays it in place (Root_Motion_Policy.In_Place); else none.
+@(private="file")
+clip_root :: proc(bones:[]asset.Skeleton_Bone,root:int,clip:asset.Animation_Clip_Desc,previous:asset.Animation_View) -> (value:asset.Animation_Root) {
+    for &kept in previous.clips {
+        if base.text_get(kept.name[:])!=clip.name || !kept.root.translation && !kept.root.rotation {continue}
+        for &bone in bones {if bone.path==kept.root.bone {return kept.root}}
+    }
+    if root<0 {return}
+    for track in clip.tracks {
+        if track.property!=.Position && track.property!=.Rotation || base.name_hash(track.target)!=bones[root].target || len(track.keys)<2 {continue}
+        first:=track.keys[0].value
+        for key in track.keys[1:] {
+            moved:=linalg.length(key.value.xyz-first.xyz)>ROOT_STILL if track.property==.Position else abs(linalg.dot(key.value,first))<1-ROOT_STILL
+            if moved {
+                value.bone,value.translation,value.rotation=bones[root].path,true,true
+                return
+            }
+        }
+    }
+    return
+}
+// Least change of the position of a root bone, in its units, or of the cosine of half its turn,
+// that moves it.
+@(private="file")
+ROOT_STILL :: 1e-4
 
 // "12034/3008/752 triangles, 3 hulls of 87 points, 1 box": the levels and the colliders of a mesh.
 @(private="file")

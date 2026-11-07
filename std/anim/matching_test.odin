@@ -92,6 +92,25 @@ match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_f
     testing.expectf(t,costs[0]<.05 && costs[1]>costs[0]+1,"a pose at half its rate is not its own frame: %v",costs)
     testing.expect(t,match_database_size(db)==match_database_bytes(db.rows,len(db.ranges)))
     testing.expect_value(t,match_database_build(&db,&library,rig,clips[:],30,weights,match_database_bytes(db.rows,3)-1),Match_Build_Error.Memory_Limit)
+    // Rates of its own replace those of the search for a clip: a walk let up to twice its speed
+    // follows a body that goes 1.8 times as fast where the search stops the others at their own.
+    rated:=clips;rated[1].rates={.5,2}
+    if testing.expect(t,match_database_build(&db,&library,rig,rated[:],30,weights)==.None) {
+        speed:=db.ranges[1].speed*1.8
+        request:=Match_Request{query=match_features(&db,int(db.ranges[1].first)),modes=1<<1,min_rate=.5,max_rate=1}
+        request.trajectory=match_trajectory({0,0,speed},{0,0,speed},20,20,{0,0,1},{0,0,1},0)
+        _,_,scaled:=match_query(&db,request,1)
+        testing.expectf(t,abs(scaled-1.8)<.05,"the walk plays at 1.8 by its own rates: %v",scaled)
+        rated[1].rates={}
+        if testing.expect(t,match_database_build(&db,&library,rig,rated[:],30,weights)==.None) {
+            _,_,scaled=match_query(&db,request,1)
+            testing.expectf(t,scaled==1,"without them it stops at the most of the search: %v",scaled)
+        }
+    }
+    for refused in ([3][2]f32{{2,1},{0,1},{.5,cmath.inf_f32(1)}}) {
+        rated[1].rates=refused
+        testing.expect_value(t,match_database_build(&db,&library,rig,rated[:],30,weights),Match_Build_Error.Invalid)
+    }
     // A speed set by hand replaces the measured one along the direction the feet push.
     told:=clips;told[1].speed=3
     if testing.expect(t,match_database_build(&db,&library,rig,told[:],30,weights)==.None) {
@@ -126,7 +145,7 @@ match_database_finds_each_frame_by_its_features_and_the_clip_a_trajectory_asks_f
     measured:=[5]Match_Clip{clips[0],clips[1],clips[2],blend,{clips={0=halfway},modes=1<<1}}
     if testing.expect(t,match_database_build(&db,&library,rig,measured[:],30,weights)==.None) {
         a,b:=db.ranges[3],db.ranges[4]
-        testing.expectf(t,a.count==b.count && abs(a.speed-.75)<.1 && abs(a.speed-b.speed)<1e-3 && a.weights=={.5,.5,0,0} && a.clips==blend.clips,"a blend of idle and walk goes half as fast as the walk: %v",a)
+        testing.expectf(t,a.count==b.count && abs(a.speed-.75)<.1 && abs(a.speed-b.speed)<1e-3 && a.weights=={0=.5,1=.5} && a.clips==blend.clips,"a blend of idle and walk goes half as fast as the walk: %v",a)
         for k in 0..<int(a.count) {
             difference:=match_features(&db,int(a.first)+k)-match_features(&db,int(b.first)+k)
             largest:f32

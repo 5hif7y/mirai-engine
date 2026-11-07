@@ -175,29 +175,33 @@ character_setup_classifies_the_clips_it_is_given_at_their_speeds_and_fails_past_
     testing.expect(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,`"path":"clips[1]"`) && strings.contains(result.data,"Missing_Clip"))
     result=authoring_test_execute(a,"setup",fmt.tprintf(`{{%s,"speeds":[{{"clip":"Wave","speed":1}}]}}`,ids))
     testing.expect(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,`"path":"speeds[0].clip"`) && strings.contains(result.data,"Not_Locomotion"))
-    result=authoring_test_execute(a,"setup",fmt.tprintf(`{{%s,"want":["Locomotion"],"speeds":[{{"clip":"Walk","speed":3}}]}}`,ids))
+    // A clip with rates of its own plays between them instead of those of the .match.
+    result=authoring_test_execute(a,"setup",fmt.tprintf(`{{%s,"want":["Locomotion"],"speeds":[{{"clip":"Walk","speed":3}}],"rates":[{{"clip":"Walk","min_rate":0.5,"max_rate":1.5}}]}}`,ids))
     if !testing.expectf(t,result.code==0,"%s %s",result.message,result.data) {return}
+    text=string(serial_bytes(a))
+    testing.expectf(t,strings.contains(text,`"speed":3,"told":true,"rates":[0.5,1.5]`),"rates in %s",text)
     match:asset.Asset
     if testing.expect_value(t,authoring_test_load(a,"characters/figure.match",&match),asset.Error.None) {
         profile,error:=anim.match_view(&match,&a.assets.types)
         testing.expect(t,error==.None && len(profile.clips)==2 && profile.clips[0].speed==0 && profile.clips[1].speed==3)
+        if len(profile.clips)==2 {testing.expect(t,profile.clips[0].min_rate==0 && profile.clips[0].max_rate==0 && profile.clips[1].min_rate==.5 && profile.clips[1].max_rate==1.5)}
         asset.asset_close(&match)
     }
 
     // A blend of Idle and Walk takes their place in the .match, with its samples, and the rates
     // and the weight of the direction of the trajectory are written as given.
-    blends:=`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[1,0,0,0]},{"weights":[0.5,0.5,0,0],"speed":0.6},{"weights":[0,1,0,0]}]}]`
+    blends:=`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[1,0,0,0,0,0,0,0]},{"weights":[0.5,0.5,0,0,0,0,0,0],"speed":0.6},{"weights":[0,1,0,0,0,0,0,0]}],"min_rate":0.5,"max_rate":2}]`
     result=authoring_test_execute(a,"setup",fmt.tprintf(`{{%s,"want":["Locomotion"],"replace":true,%s,"min_rate":0.3,"max_rate":1.5,"trajectory_direction":0}}`,ids,blends))
     if !testing.expectf(t,result.code==0,"%s %s",result.message,result.data) {return}
     text=string(serial_bytes(a))
-    testing.expectf(t,strings.contains(text,`"locomotion":[],"blends":[{"clips":["Idle","Walk"],"mode":"WALKING","samples":3}]`),"blends in %s",text)
+    testing.expectf(t,strings.contains(text,`"locomotion":[],"blends":[{"clips":["Idle","Walk"],"mode":"WALKING","samples":3,"rates":[0.5,2]}]`),"blends in %s",text)
     if testing.expect_value(t,authoring_test_load(a,"characters/figure.match",&match),asset.Error.None) {
         profile,error:=anim.match_view(&match,&a.assets.types)
         ok:=error==.None && len(profile.clips)==1 && len(profile.samples)==3
         if testing.expectf(t,ok,"%v: %d clips, %d samples",error,len(profile.clips),len(profile.samples)) {
             source:=profile.clips[0]
-            testing.expect(t,base.text_get(source.clip[:])=="Idle" && base.text_get(source.blend[0][:])=="Walk" && source.blend[1][0]==0 && source.loop && source.modes==1<<1)
-            testing.expect(t,profile.samples[1]==anim.Match_Sample{source=0,weights={.5,.5,0,0},speed=.6} && profile.samples[2].weights=={0,1,0,0})
+            testing.expect(t,base.text_get(source.clip[:])=="Idle" && base.text_get(source.blend[0][:])=="Walk" && source.blend[1][0]==0 && source.loop && source.modes==1<<1 && source.min_rate==.5 && source.max_rate==2)
+            testing.expect(t,profile.samples[1]==anim.Match_Sample{source=0,weights={0=.5,1=.5},speed=.6} && profile.samples[2].weights=={1=1})
             testing.expect(t,profile.info.min_rate==.3 && profile.info.max_rate==1.5 && profile.info.trajectory_direction==0)
         }
         asset.asset_close(&match)
@@ -205,12 +209,17 @@ character_setup_classifies_the_clips_it_is_given_at_their_speeds_and_fails_past_
     // What a blend or the rates cannot be says what failed and how to fix it.
     Refused :: struct {params,path,code:string}
     for refused in ([?]Refused{
-        {`"blends":[{"clips":["Idle","Wave"],"samples":[{"weights":[1,0,0,0]}]}]`,"blends[0].clips[1]","Not_Locomotion"},
-        {`"blends":[{"clips":["Idle"],"samples":[{"weights":[1,0,0,0]}]}]`,"blends[0].clips","Blend_Size"},
-        {`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[0,0,0,0]}]}]`,"blends[0].samples[0].weights","Zero_Weights"},
-        {`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[1,0,1,0]}]}]`,"blends[0].samples[0].weights[2]","Extra_Weight"},
+        {`"blends":[{"clips":["Idle","Wave"],"samples":[{"weights":[1,0,0,0,0,0,0,0]}]}]`,"blends[0].clips[1]","Not_Locomotion"},
+        {`"blends":[{"clips":["Idle"],"samples":[{"weights":[1,0,0,0,0,0,0,0]}]}]`,"blends[0].clips","Blend_Size"},
+        {`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[0,0,0,0,0,0,0,0]}]}]`,"blends[0].samples[0].weights","Zero_Weights"},
+        {`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[1,0,1,0,0,0,0,0]}]}]`,"blends[0].samples[0].weights[2]","Extra_Weight"},
         {`"blends":[{"clips":["Idle","Walk"]}]`,"blends[0].samples","Required"},
         {`"min_rate":2,"max_rate":1`,"min_rate","Invalid_Rate"},
+        {`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[1,0,0,0,0,0,0,0]}],"min_rate":0.5}]`,"blends[0].min_rate","Invalid_Rate"},
+        {`"rates":[{"clip":"Wave","min_rate":0.5,"max_rate":1}]`,"rates[0].clip","Not_Locomotion"},
+        {`"rates":[{"clip":"Walk","min_rate":2,"max_rate":1}]`,"rates[0].min_rate","Invalid_Rate"},
+        {`"rates":[{"clip":"Walk","min_rate":0.5,"max_rate":1},{"clip":"Walk","min_rate":0.5,"max_rate":1}]`,"rates[1].clip","Duplicate"},
+        {`"blends":[{"clips":["Idle","Walk"],"samples":[{"weights":[1,0,0,0,0,0,0,0]}]}],"rates":[{"clip":"Walk","min_rate":0.5,"max_rate":1}]`,"rates[0].clip","Blended"},
     }) {
         result=authoring_test_execute(a,"setup",fmt.tprintf(`{{%s,"want":["Locomotion"],"replace":true,%s}}`,ids,refused.params))
         testing.expectf(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,fmt.tprintf(`"path":"%s"`,refused.path)) && strings.contains(result.data,refused.code) && strings.contains(result.data,`"fix"`),"%s: %s",refused.code,result.data)
@@ -221,7 +230,7 @@ character_setup_classifies_the_clips_it_is_given_at_their_speeds_and_fails_past_
     pace:=base.Asset_Id{840,11}
     testing.expect_value(t,asset.animation_save(fmt.tprintf("%s/pace.anim",a.root),&a.assets.types,{id=pace,clips=paced[:]}),asset.Error.None)
     testing.expect(t,host.assets_scan(&a.assets))
-    result=authoring_test_execute(a,"setup",fmt.tprintf(`{{"id":"11","library":"%s","folder":"paced","want":["Locomotion"],"blends":[{{"clips":["Idle","Jog"],"samples":[{{"weights":[1,1,0,0]}}]}}]}}`,authoring_test_id_text(pace)))
+    result=authoring_test_execute(a,"setup",fmt.tprintf(`{{"id":"11","library":"%s","folder":"paced","want":["Locomotion"],"blends":[{{"clips":["Idle","Jog"],"samples":[{{"weights":[1,1,0,0,0,0,0,0]}}]}}]}}`,authoring_test_id_text(pace)))
     testing.expectf(t,result.code==api.INVALID_PARAMS && strings.contains(result.data,`"path":"blends[0].clips[1]"`) && strings.contains(result.data,"Unequal_Duration") && strings.contains(result.data,"retime"),"%s",result.data)
 
     // A library larger than a .match or an .action takes fails and says how many there are.

@@ -213,6 +213,7 @@ Api_Play_Result :: struct {
     building:bool `mirai:"label=An Odin source changed since the last build: the build runs and the game starts once it stands. build.status says when it ends; a failed one leaves the game stopped and its errors in engine.diagnostics"`,
     ran:int `mirai:"label=play.step: the ticks it ran"`,
     met:bool `mirai:"label=play.step with until: whether they held when it stopped"`,
+    scripted:int `mirai:"label=Ticks left of the input play.input scheduled: the next ticks without input of their own play them"`,
 }
 
 
@@ -235,10 +236,13 @@ Api_Pause_Params :: struct {
 
 Api_Play_Step_Params :: struct {
     ticks:int `mirai:"optional,min=1,max=3600,label=Fixed ticks it runs"`,
+    seconds:f32 `mirai:"optional,label=Game time it runs in place of ticks: the nearest whole ticks and at least 1"`,
     keys:core.Keys `mirai:"optional,label=Keys held in every tick; they go to the local seat with the focus"`,
     mouse_buttons:core.Mouse_Buttons `mirai:"optional,label=Buttons held in every tick"`,
+    tap_keys:core.Keys `mirai:"optional,label=Keys pressed and released inside the first tick: a press shorter than a tick that is never down"`,
+    tap_buttons:core.Mouse_Buttons `mirai:"optional,label=Buttons pressed and released inside the first tick"`,
     mouse_position:[2]f32 `mirai:"optional,label=Where the pointer is from the first tick on in points of the window from its top left (the image of play.capture over the density): the UI of the game takes it and its clicks; it stays for the next steps"`,
-    mouse_delta:[2]f32 `mirai:"optional,label=Added to the first tick"`,
+    mouse_delta:[2]f32 `mirai:"optional,label=Relative motion of the mouse in points spread evenly over the ticks"`,
     wheel:[2]f32 `mirai:"optional,label=Added to the first tick"`,
     text:[ui.INPUT_TEXT_CAPACITY]u8 `mirai:"optional,text,label=Printable ASCII typed in the first tick: the field of the UI of the game with the focus takes it"`,
     gamepads:[core.GAMEPAD_CAPACITY]Api_Play_Gamepad `mirai:"optional,label=The gamepads connected in every tick; gamepad i is that of the local seat of slot i when the game has several"`,
@@ -257,6 +261,7 @@ Api_Build_Params :: struct {
 Api_Play_Gamepad :: struct {
     slot:int `mirai:"min=0,max=3,label=Which gamepad: the local seat of this slot gets it"`,
     buttons:platform.Gamepad_Buttons `mirai:"optional,label=Held in every tick"`,
+    tapped:platform.Gamepad_Buttons `mirai:"optional,label=Pressed and released inside the first tick"`,
     left_stick:[2]f32 `mirai:"optional,min=-1,max=1,label=x and y from -1 to 1 with y positive downward"`,
     right_stick:[2]f32 `mirai:"optional,min=-1,max=1,label=x and y from -1 to 1 with y positive downward"`,
     left_trigger:f32 `mirai:"optional,min=0,max=1"`,
@@ -382,6 +387,7 @@ api_methods_register :: proc(s:^Session,st:^Api_State) {
     api_play_wait_register(s,st)
     spatial_api_register(s,st)
     play_observe_api_register(s,st)
+    play_view_api_register(s,st)
     save_api_register(s,st)
     api_diagnostics_register(s,st)
 }
@@ -1222,6 +1228,7 @@ api_play_result_fill :: proc(s:^Session,result:^Api_Play_Result,r:^Run) {
     }
     result.entities=core.world_entities(ref).alive
     if view:=core.world_storage_of(ref,core.View);view!=nil {result.game_camera=view.camera!=core.NONE}
+    result.scripted=run_script_ticks(run_script(s,r))
 }
 
 @(private)
@@ -1339,7 +1346,7 @@ api_play_step :: proc(s:^Session,call:^api.Call) {
     }
     if !own {api_play_refused(call);return}
     owner:=r.owner
-    timeline,ok:=api_step_timeline(call,params)
+    timeline,ok:=api_step_timeline(call,params,s.app.tick_dt)
     if !ok {return}
     if owner==0 && simulating(s) && (api_timeline_input(timeline) || params.focus>=0) {
         api.call_fail(call,api.INVALID_PARAMS,"A simulation takes no player input")
@@ -1349,6 +1356,9 @@ api_play_step :: proc(s:^Session,call:^api.Call) {
     if target==nil {
         api.call_fail(call,api.INVALID_PARAMS,"That player has no run: play.start with online opens them")
         return
+    }
+    if api_timeline_input(timeline) {
+        if problem:=run_script_blocks(s,target);problem!="" {api.call_fail(call,api.INVALID_PARAMS,problem);return}
     }
     values:[2]string
     api.object_values(call.allocator,call.raw,{"until","trace"},values[:])
@@ -1404,14 +1414,22 @@ api_seat_focus :: proc(s:^Session,call:^api.Call,r:^Run,slot:int) -> bool {
 }
 
 // One tick of play.step: every run of the game advances; the one of the
-// player gets the input of step. first: the first tick of its segment, which
-// takes its pointer motion, wheel and text.
+// player gets the input of step, or without one the next tick of its script.
+// at: the tick of its segment; the first takes its pointer, wheel, taps and
+// text, and the motion of the mouse is spread over all of them.
 @(private)
-api_step_tick :: proc(s:^Session,owner,player:int,step:^Api_Step_Input,first:bool) {
+api_step_tick :: proc(s:^Session,owner,player:int,step:^Api_Step_Input,at:int) {
     for &other in s.runs {
         if other.world==nil || other.owner!=owner {continue}
         other.step=true
         if other.player!=player {continue}
+        step,at:=step,at
+        scripted:Api_Step_Input
+        if step==nil {
+            scripted,at=run_script_take(run_script(s,&other))
+            step=&scripted
+        }
+        first:=at==0
         if step.placed {other.pointer,other.pointer_set=step.mouse_position,true}
         given:core.Input
         given.keys_down,given.mouse_down=step.keys,step.buttons
@@ -1419,17 +1437,26 @@ api_step_tick :: proc(s:^Session,owner,player:int,step:^Api_Step_Input,first:boo
         given.keys_released=other.held_keys-step.keys
         given.mouse_pressed=step.buttons-other.held_buttons
         given.mouse_released=other.held_buttons-step.buttons
+        if first {
+            given.keys_pressed+=step.tap_keys;given.keys_released+=step.tap_keys
+            given.mouse_pressed+=step.tap_buttons;given.mouse_released+=step.tap_buttons
+        }
         given.mouse_position,given.gamepads=other.pointer,step.gamepads
         // The device used last stays until another is pressed.
         if held:=core.world_storage_of(run_ref(s,&other),core.Input);held!=nil {given.device=held.device}
         for &g,slot in given.gamepads {
             g.pressed=g.down-other.held_pads[slot]
             g.released=other.held_pads[slot]-g.down
+            if first {g.pressed+=step.pad_taps[slot];g.released+=step.pad_taps[slot]}
             other.held_pads[slot]=g.down
             if g.pressed!={} {given.device={gamepad=true,slot=u8(slot)}}
         }
         if given.keys_pressed!={} || given.mouse_pressed!={} {given.device={}}
-        if first {given.mouse_delta,given.wheel=step.mouse_delta,step.wheel}
+        if at<step.ticks {
+            ticks:=f32(step.ticks)
+            given.mouse_delta=step.mouse_delta*f32(at+1)/ticks-step.mouse_delta*f32(at)/ticks
+        }
+        if first {given.wheel=step.wheel}
         other.held_keys,other.held_buttons=step.keys,step.buttons
         // One store per value until odin-lang/Odin#7937 (see ODIN_WORKAROUNDS).
         other.input=given
@@ -1459,7 +1486,7 @@ api_play_ui_input :: proc(given:core.Input,text:string) -> ui.Input {
 @(private)
 runs_tick_ask :: proc(s:^Session,owner,player:int,keys:core.Keys,buttons:core.Mouse_Buttons,mouse_delta,wheel:[2]f32) {
     step:=Api_Step_Input{ticks=1,keys=keys,buttons=buttons,mouse_delta=mouse_delta,wheel=wheel}
-    api_step_tick(s,owner,player,&step,true)
+    api_step_tick(s,owner,player,&step,0)
 }
 
 // Whether the game loop of a run goes on every frame of the editor: the Play

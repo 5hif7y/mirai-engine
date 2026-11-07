@@ -591,17 +591,47 @@ match_assets_roundtrip_refuse_no_memory_or_looping_entries_and_report_a_database
     profile:=f.graphs.matches[0].profile
     types:asset.Types;asset.types_init(&types);defer asset.types_destroy(&types)
     doc:asset.Document;if !testing.expect_value(t,match_document(&doc,&types,MATCH_TEST_ID,profile),asset.Error.None) {return};defer asset.document_destroy(&doc)
-    for version in ([2]type_of(doc.kind_version){MATCH_VERSION,MATCH_VERSION-1}) {
+    // Every version from the oldest to the current one reads; an older or a newer one is refused.
+    for version in ([4]type_of(doc.kind_version){MATCH_VERSION,MATCH_OLDEST,MATCH_OLDEST-1,MATCH_VERSION+1}) {
         doc.kind_version=version
         writer:serial.Writer;serial.writer_init(&writer);defer serial.writer_destroy(&writer)
         if !testing.expect_value(t,asset.document_write(&doc,&writer),asset.Error.None) {continue}
         file:asset.Asset
         if !testing.expect_value(t,asset.asset_open(&file,serial.writer_bytes(&writer)),asset.Error.None) {continue};defer asset.asset_close(&file)
         view,read:=match_view(&file,&types)
-        if version!=MATCH_VERSION {testing.expect(t,read!=.None,"an older version is refused");continue}
+        if version<MATCH_OLDEST || version>MATCH_VERSION {testing.expect_value(t,read,asset.Error.Version);continue}
         if !testing.expect_value(t,read,asset.Error.None) {continue}
         testing.expect_value(t,view.info,profile.info);testing.expect_value(t,len(view.clips),len(profile.clips))
         for clip,i in view.clips {testing.expect_value(t,clip,profile.clips[i])}
+    }
+    {
+        // A .match of version 6 stored its sources with a blend of three clips and no rates of
+        // their own: its rows migrate by the schema of the file.
+        Source_6 :: struct {clip:[64]u8 `mirai:"text"`,animation:base.Asset_Id,modes:u32,loop,entry:bool,speed:f32,blend:[3][64]u8 `mirai:"text"`}
+        Sample_6 :: struct {source:u32,weights:[4]f32,speed:f32}
+        old:asset.Document;asset.document_init(&old,MATCH_KIND,MATCH_TEST_ID);defer asset.document_destroy(&old)
+        old.kind_version=6
+        sources:=make([]Source_6,len(profile.clips));defer delete(sources)
+        wanted:=make([]Match_Source,len(profile.clips));defer delete(wanted)
+        for clip,i in profile.clips {
+            sources[i]={clip=clip.clip,animation=clip.animation,modes=clip.modes,loop=clip.loop,entry=clip.entry,speed=clip.speed}
+            wanted[i]={clip=clip.clip,animation=clip.animation,modes=clip.modes,loop=clip.loop,entry=clip.entry,speed=clip.speed}
+            for k in 0..<3 {sources[i].blend[k]=clip.blend[k];wanted[i].blend[k]=clip.blend[k]}
+        }
+        info:=profile.info
+        _,put:=asset.document_put_row(&old,&types,"match",&info);testing.expect_value(t,put,asset.Error.None)
+        _,put=asset.document_put(&old,&types,"clips",sources);testing.expect_value(t,put,asset.Error.None)
+        _,put=asset.document_put(&old,&types,"samples",[]Sample_6{});testing.expect_value(t,put,asset.Error.None)
+        bytes,written:=asset.document_bytes(&old,context.temp_allocator)
+        file:asset.Asset
+        if testing.expect_value(t,written,asset.Error.None) && testing.expect_value(t,asset.asset_open(&file,bytes,context.temp_allocator),asset.Error.None) {
+            defer asset.asset_close(&file)
+            view,read:=match_view(&file,&types)
+            if testing.expect_value(t,read,asset.Error.None) && testing.expect_value(t,len(view.clips),len(wanted)) {
+                testing.expect_value(t,view.info,profile.info)
+                for clip,i in view.clips {testing.expect_value(t,clip,wanted[i])}
+            }
+        }
     }
     changed:=profile;changed.info.memory=0
     testing.expect(t,!match_check(changed),"a .match keeps some memory")

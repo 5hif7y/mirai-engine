@@ -24,7 +24,8 @@ Api_Play_Condition :: struct {
     name:[64]u8 `mirai:"optional,text,label=The entity by its name: the first with it in the order of play.inspect"`,
     component:[64]u8 `mirai:"optional,text,label=A component of the entity; empty: the entity itself or its world_position"`,
     storage:[64]u8 `mirai:"optional,text,label=A storage of the world in place of an entity"`,
-    field:[128]u8 `mirai:"optional,text,label=The value inside by names of fields and indices of elements joined by dots (velocity.1); empty: all of it"`,
+    view:bool `mirai:"optional,label=What the player sees as play.view writes it in place of a storage or an entity: the entity named is its point (points.0)"`,
+    field:[128]u8 `mirai:"optional,text,label=The value inside by names of fields and indices of elements joined by dots (velocity.1 or points.0.normalized.0); empty: all of it"`,
     compare:Api_Compare `mirai:"optional,label=Exists (the default) and Gone say whether the entity or the component or the field is there; the others compare the value"`,
     number:f64 `mirai:"optional,label=What a number is compared with; a bool is 1 or 0"`,
     text:[128]u8 `mirai:"optional,text,label=What a text or the name of a value of an enum is compared with (Equal and Not_Equal) in place of number"`,
@@ -66,7 +67,8 @@ api_condition_read :: proc(s:^Session,w:core.World_Ref,c:^Api_Play_Condition,all
     handle,name,component,storage:=base.text_get(c.entity[:]),base.text_get(c.name[:]),base.text_get(c.component[:]),base.text_get(c.storage[:])
     field,text:=base.text_get(c.field[:]),base.text_get(c.text[:])
     named:=int(handle!="")+int(c.id!=0)+int(name!="")
-    if (named>0) == (storage!="") {return {},"name what it reads: an entity (by entity, id or name) or a storage"}
+    if c.view && (storage!="" || component!="") {return {},"view reads what the player sees: leave storage and component out; an entity named is its point"}
+    if !c.view && (named>0) == (storage!="") {return {},"name what it reads: an entity (by entity, id or name), a storage or the view"}
     if named>1 {return {},"name the entity once: by entity, by id or by name"}
     if storage!="" && component!="" {return {},"a storage has no components: leave component out, or name an entity"}
     if text!="" && c.compare!=.Equal && c.compare!=.Not_Equal && c.compare!=.Exists && c.compare!=.Gone {return {},"a text is compared with Equal or Not_Equal; give number for the others"}
@@ -91,12 +93,20 @@ api_condition_read :: proc(s:^Session,w:core.World_Ref,c:^Api_Play_Condition,all
             if !parsed {return {},fmt.tprintf("entity %q is not a handle: give the 16 hexadecimal digits play.inspect writes as entity",handle)}
             if core.alive(core.world_entities(w),core.Entity(value)) {e=core.Entity(value)}
         case c.id!=0: e=api_entity(w,c.id)
-        case:
+        case name!="":
             for candidate in api_entities_ordered(w,allocator) {
                 if entity_name(w,candidate)==name {e=candidate;break}
             }
         }
-        if component!="" {
+        if c.view {
+            // An entity that is not there is a reading of null, as without view.
+            if named>0 && e==core.NONE {break}
+            targets:=[1]Play_View_Target{{entity=e,named=true}}
+            text,problem:=play_view_json(w,targets[:named],allocator)
+            if problem!="" {return {},problem}
+            serial.text_write_raw(&out,text)
+            found=true
+        } else if component!="" {
             t:=component_table(s,component)
             if t==nil || t.place!=.World || st.types[api_table_index(s,t)]==serial.TYPE_NONE {return {},fmt.tprintf("component %q is not a component of the game; component.list lists them",component)}
             value:=e!=core.NONE?core.raw_find(core.world_table_at(w,t),t.info,e):nil

@@ -174,9 +174,8 @@ player_launch_open :: proc(s:^Session) -> string {
         folder=filepath.dir(game)
         append(&command,game,"--attached")
     } else {
-        exe,exe_error:=os.get_executable_path(context.temp_allocator)
-        player:=project.path(filepath.dir(exe),"mirai-player"+(".exe" when ODIN_OS==.Windows else ""),allocator=context.temp_allocator)
-        if exe_error!=nil || !os.is_file(player) {return "The player program is missing next to the editor"}
+        player:=engine_program_here(s,"mirai-player")
+        if !os.is_file(player) {return "The player program is missing next to the editor"}
         append(&command,player,"--attached","--project",s.project_root)
     }
     if scene:=base.text_get(l.scene[:]);scene!="" {append(&command,"--scene",scene)}

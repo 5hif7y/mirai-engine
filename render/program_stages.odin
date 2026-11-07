@@ -77,11 +77,7 @@ program_graphics_destroy :: proc(r: ^Renderer) {
 // in the editor makes again only the pipelines of its own stages.
 @(private)
 program_stages_publish :: proc(r: ^Renderer, next: []rhi.Shader_Code) {
-	same :: proc(codes: []rhi.Shader_Code, code: ^rhi.Shader_Code) -> ^rhi.Shader_Code {
-		if code == nil {return nil}
-		for &other in codes {if other.name == code.name {return &other if shader_code_matches(other, code^) else nil}}
-		return nil
-	}
+	same :: program_code_same
 	kept := make([dynamic]Program_Graphics, context.temp_allocator)
 	for entry in r.program_graphics {
 		if entry.target == nil {continue}
@@ -93,15 +89,8 @@ program_stages_publish :: proc(r: ^Renderer, next: []rhi.Shader_Code) {
 	for entry in kept {
 		if slot, _ := program_graphics_entry(r, entry.target, entry.program); slot != nil {slot^ = entry}
 	}
-	m := &r.points
-	for &pipeline, id in m.pipelines {
-		if code := same(next, m.codes[id]); code != nil && pipeline != 0 {
-			m.codes[id] = code
-			continue
-		}
-		if pipeline != 0 {rhi.pipeline_destroy(r.device, pipeline)}
-		pipeline, m.asked[id], m.codes[id] = 0, false, nil
-	}
+	program_computes_publish(r, &r.points.stages, next)
+	program_computes_publish(r, &r.vertex_stages, next)
 	for &entry in r.stage_pipelines {
 		if !entry.asked || entry.program == 0 {continue}
 		if code := same(next, entry.code); code != nil && entry.pipeline != 0 {
@@ -111,6 +100,14 @@ program_stages_publish :: proc(r: ^Renderer, next: []rhi.Shader_Code) {
 		if entry.pipeline != 0 {rhi.pipeline_destroy(r.device, entry.pipeline)}
 		entry = {}
 	}
+}
+
+// The code of next with the name of code, when it is the same code; nil otherwise.
+@(private)
+program_code_same :: proc(codes: []rhi.Shader_Code, code: ^rhi.Shader_Code) -> ^rhi.Shader_Code {
+	if code == nil {return nil}
+	for &other in codes {if other.name == code.name {return &other if shader_code_matches(other, code^) else nil}}
+	return nil
 }
 
 // The description of a graphics pipeline of the renderer, by where it keeps it.

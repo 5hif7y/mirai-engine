@@ -31,6 +31,8 @@ difference with the catalog, it rules.
   [`mirai record`](references/api.md#mirai-record).
 - Checking a motion in one or two calls (an input timeline, a table of values per tick, one
   image of cells around an entity): [`play.step` and `play.capture`](references/methods.md#play).
+- Testing a game as a person plays it (a click, a double click, a hold of some seconds, a look)
+  and asserting on what the camera shows: [testing like a player](#testing-like-a-player).
 - Values of entities at past ticks without changing the game, and whether replaying the past
   repeats it (first tick and field that differ): [`play.history`](references/methods.md#play).
 - Capturing the world without UI and comparing it with a reference:
@@ -58,10 +60,11 @@ difference with the catalog, it rules.
 
 1. Open it with `mirai edit` (window or manual mode and port per
    [arguments](../mirai-editor/references/editor.md#arguments)) or, without a window and in the
-   background, with `mirai session start [project] --dev`; `mirai rpc --project <project>` finds
-   the port. If the user's windowed editor holds the project, `--copy` opens a session on a fresh
-   copy under its `.mirai/tmp/`, whose path it prints, on a free port that is never 7940;
-   `mirai session stop <copy>` deletes it.
+   background, with `mirai session start [project] --dev`, on a free port that is never 7940
+   unless `--api-port` names one; `mirai rpc --project <project>` finds the port. If the user's
+   windowed editor holds the project, `--copy` opens a session on a fresh copy under its
+   `.mirai/tmp/`, whose path it prints; `mirai session stop <copy>` deletes it, and the next
+   `--copy` (or `stop --orphans <project>`) deletes the copies a killed run left behind.
 2. `mirai rpc describe` lists the methods by plugin and says which plugins exist and which the
    project uses; `mirai rpc describe <plugin>` gives those of an area. Before calling a method for
    the first time, `mirai rpc describe <method|prefix>` (several methods at once:
@@ -81,6 +84,31 @@ difference with the catalog, it rules.
    binaries it runs ([sessions](references/api.md#sessions)).
 7. Close with `engine.shutdown` (`discard` to discard unsaved changes) or with
    `mirai session stop`.
+
+### Testing like a player
+
+A person's input has timing and a person looks at the screen; a check that sets actions and reads
+positions misses both.
+
+1. Give devices, not actions, when the test is about how input plays: `segments` of `play.input`
+   or `play.step` go through the path of real input, so taps, holds, double-press windows and
+   thresholds of the actions see them. Each press has its own length: one tick and three ticks are
+   different inputs.
+   - A click: `[{"ticks": 3, "mouse_buttons": ["Left"]}, {"ticks": 1}]`.
+   - A double click: two presses with a gap inside the game's window,
+     `[{"ticks": 3, "mouse_buttons": ["Left"]}, {"ticks": 5}, {"ticks": 3, "mouse_buttons":
+     ["Left"]}, {"ticks": 1}]`.
+   - A hold: `[{"seconds": 0.8, "keys": ["E"]}, {"ticks": 1}]`; a press shorter than a tick:
+     `tap_keys`; a chord: the keys in one segment, or the modifier one segment earlier.
+   - A look or a turn of the stick: `mouse_delta` (spread over its segment) or `gamepads` with a
+     stick, in a segment as long as the motion.
+2. Schedule them with `play.input` and step a few ticks at a time with `play.step` without input,
+   reading `play.view` (or `play.capture`) between steps; or in one call, `play.step` with the
+   `segments` and a `trace` with `view` that reads every tick.
+3. Assert what a person checks: that the game did it (`play.check` on its components) and what is
+   seen, with `view` conditions on `follow.distance`, `blend.weight` or `points.0.normalized` and
+   `points.0.on_screen`; `until` with them waits for the moment. Look at one image at the moments
+   that matter: values can pass while the picture is wrong.
 
 ### Checking an image
 
@@ -162,14 +190,18 @@ difference with the catalog, it rules.
 - The timeline, trace and filmstrip of a step: `mirai test editor
   a_step_holds_each_segment_for_its_ticks_in_order_with_its_edges_at_its_first
   a_trace_reads_a_row_before_the_first_tick_every_some_ticks_and_after_the_last
-  a_filmstrip_cell_comes_before_the_first_tick_and_every_every_ticks_around_its_entity`
-  and the grid of its cells, `mirai test cook/image
+  a_filmstrip_cell_comes_before_the_first_tick_and_every_every_ticks_around_its_entity`;
+  the input of a person and what the player sees: `mirai test editor
+  play_input_schedules_the_devices_of_a_person_that_the_next_steps_play_tick_by_tick
+  play_view_says_what_the_player_sees_and_where_things_show_on_the_screen`; and the grid of its
+  cells, `mirai test cook/image
   a_sheet_of_given_columns_takes_regions_of_frames_black_outside_them`; the filmstrip with a GPU,
   live.
 - `mirai image` and the measure of `mirai capture`: `mirai test cook/image`; `mirai capture`
   against a project with GPU and `mirai test tools/mirai` if the CLI changes.
-- `mirai session`: `mirai test tools/mirai` covers options, discarding copies of `.mirai/tmp/` and
-  process roles (`tools/mirai/session_test.odin`); `restart`, the build with an open session and
+- `mirai session`: `mirai test tools/mirai` covers options, the free API port, discarding copies
+  of `.mirai/tmp/`, sweeping the copies whose editor ended and process roles
+  (`tools/mirai/session_test.odin`); `restart`, the build with an open session and
   `stop --orphans` are tested with a real editor.
 - `mirai rpc` (`--select`, `--wait-until`, `describe`): `mirai test tools/mirai` and
   `mirai test editor/api the_rpc_and_mcp_commands_drive_the_server`, which runs the tool against

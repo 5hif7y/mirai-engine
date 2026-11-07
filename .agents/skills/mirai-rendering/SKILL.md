@@ -55,7 +55,9 @@ description: Modify, diagnose and measure Mirai rendering, GI, shaders, RHI and 
 - Materials, textures, BRDF, previews and thumbnails →
   [materials](references/materials.md#material-row); Surface programs in raster and rays (material
   points, `points.odin`, `program_stages.odin`, deferred glass filters, pipelines on the renderer
-  thread) → [programs](references/materials.md#surface-programs-in-rays-and-raster); texture levels
+  thread) → [programs](references/materials.md#surface-programs-in-rays-and-raster); programs that
+  move vertices (`//! vertex`, `displace.odin`) →
+  [vertex functions](references/materials.md#vertex-functions); texture levels
   by distance, `textures_pending` → [residency](references/materials.md#residency-by-distance)
 - OpenPBR layers (coat, fuzz, anisotropy, diffuse transmission, unlit), tangents and normal maps →
   [layers](references/materials.md#layers-openpbr),

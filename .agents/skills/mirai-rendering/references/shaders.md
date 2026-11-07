@@ -104,6 +104,11 @@
   of a grid `(Mirai_Vfx_Cell, Parameters)`. The generation dispatches them in
   `mirai_vfx_particle_stage` and `mirai_vfx_cell_stage` and the catalog lists them in `stages`; the
   [plugin](../../mirai-plugins/references/vfx.md#grids-and-stages) runs them.
+- A Surface program that moves vertices says `//! vertex [animated] [reach <metres>|reach
+  <parameter>]` and declares `vertex` ([vertex functions](materials.md#vertex-functions)): reach is
+  a number from 0 or a parameter of one float; another word, a reach of another type or the line
+  in another domain leave the program out, and the check asks for `vertex` with its signature. The
+  catalog gives it in `vertex` (`animated`, `reach`: a number or the name of the parameter).
 - `mirai_sample_texture(ctx,index,uv,lod)` receives the explicit context:
   - Surface in raster: derivatives and bias.
   - Surface with `ctx.ray` (also hits rebuilt in fragment shaders): LOD of the ray footprint.
@@ -174,8 +179,11 @@
   program in front; `//! per surface program only` compiles only those. They are the raster stages
   that draw materials (G-buffer, glass layers and filter, translucents, overlays, highlight,
   thumbnails, UI and the `vfx` sprites) and `surface_points.comp`, that of the ray material points
-  ([programs in rays and raster](materials.md#surface-programs-in-rays-and-raster)). No other
-  engine stage evaluates a Surface program.
+  ([programs in rays and raster](materials.md#surface-programs-in-rays-and-raster)). A source
+  marked `//! per vertex program` is compiled only for the Surface programs with `vertex`, with
+  the same include, and has no stage of its own: `surface_vertices.comp`, which calls
+  `mirai_vertex_program` (the include of the generation and that of a program without `vertex`
+  define it as moving nothing). No other engine stage evaluates a Surface program.
 - A Surface program thus reaches only its stages, and its alpha those of rays if it has coverage;
   a PostProcess one, only `postprocess.frag`; a Vfx one, the stages of the `vfx` plugin that
   include it (emit, simulate and the vertices of sprites and meshes); a UI one, `ui.frag` and its

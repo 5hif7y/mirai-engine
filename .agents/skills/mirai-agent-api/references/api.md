@@ -9,9 +9,10 @@ Code: `editor/api/` (package `api`: server, JSON-RPC, MCP, schemas, client),
 - It listens on `127.0.0.1:api.DEFAULT_PORT`; `--api-port N` chooses another and `--no-api` does
   not open it. Without `--api-port`, a busy port makes it choose a free one, which the editor
   prints on stderr; with a busy `--api-port`, or another failure, it continues without an API and
-  says so. `--api-port 0` takes a free one and never the default: a `mirai session start --copy`
-  passes it, so the default port stays that of the user's editor. If a method does not fit in the registry it does not open the API and names
-  `API_METHOD_CAPACITY`.
+  says so. `--api-port 0` takes a free one and never the default: every `mirai session start`
+  passes it unless its arguments name a port or `--no-api`, so the default port stays that of
+  the user's editor and a tool reaches a session only through its project's `api.json`. If a
+  method does not fit in the registry it does not open the API and names `API_METHOD_CAPACITY`.
 - When it opens it writes `<project>/.mirai/api.json` (`api.Port_File`) and deletes it on close:
   `rpc`, `mcp` and `capture` take the port from there, and `session` knows which binaries and
   library it runs.
@@ -83,14 +84,22 @@ named by `.mirai/session.json` (pid, mode and arguments) and `api.json`; its log
   (with its players), build and reopen it on the new binaries; if the engine does not build, it
   stays closed. Every other program that runs them (another session, a person's editor) goes on
   with the binaries it started with and is named; it takes the new ones when it starts again. An
-  editor whose engine was rebuilt restarts on the new one after its next Build instead of loading
-  the library into the old one. `mirai build engine` does not restart sessions: it names them.
+  editor whose engine was rebuilt restarts on the new one as soon as its next Build ends, a
+  headless one too, between calls, instead of loading the library into the old one: it runs the
+  program and reads the stamp of the folder it started from (`Session.program`), not where the
+  system says its moved executable is, and the session record follows it to the new process, so
+  the next call reaches it through the port file (`--wait` covers its start), its `build.status`
+  says `Built`, and `mirai session` still knows it as the project's. `mirai build engine` does not restart sessions: it names them.
 - `stop` never saves: unsaved changes (from `editor.documents` and `asset.unsaved`) are discarded
   automatically if all are copies under `.mirai/tmp/`; otherwise it fails listing them and
   `--discard` discards them.
 - **Orphans**: editors that run from the checkout's `.mirai/engine/` and that the `api.json` of
   their project does not name. `status` (0 if the session responds) lists them and
   `stop --orphans [project]` closes the headless ones, never one with a window.
+- **Orphan copies**: a run killed after `start --copy` leaves its copy. `start --copy` and
+  `stop --orphans <project>` delete the project's copies that no start is making or opening
+  (`SESSION_COPY_LOCK`, held from the copy's first file until its editor answers) and whose port
+  file and record name no running process that opens them.
 
 ## `mirai capture`
 
@@ -139,7 +148,8 @@ mirai rpc --batch <calls.jsonl> [the same options]
   `--batch` reads one `{"method","params"}` call per line and stops at the first error.
 - Output: the result on stdout and code 0; an error, on stderr as `{"error":{...}}` and code 1;
   invalid arguments, `Usage:` and code 2. From the client: `-32099` with no editor listening,
-  `-32097` with no response in time, `-32098` if the response is not JSON-RPC. `-32601` names the
+  `-32097` with no response in time, `-32096` if it closed the connection without answering (it
+  ended or restarted, maybe after running the call), `-32098` if the response is not JSON-RPC. `-32601` names the
   similar ones.
 
 ### Fields and waits
@@ -155,7 +165,8 @@ from the end if `i` is negative (`entities[0].id`, `entities[-1]`).
   prints that result. `op` is `=` (`==`), `!=`, `<`, `<=`, `>` or `>=`; the ordering ones need
   numbers. Numbers are compared as numbers (exact integers), a text by its content, with or
   without quotes, and the rest as JSON without spaces (`selection=[]`). An editor that does not
-  respond (`-32099`, `-32097`) keeps being waited for, because Build restarts it; another error, a
+  respond or ends while it answers (`-32099`, `-32097`, `-32096`) keeps being waited for, because
+  Build restarts it; another error, a
   field that is not there or a value that cannot be ordered end immediately. After `--timeout` it
   exits with `-32097`, the last value in the message and `data:{field,value}`. Example:
   `mirai rpc build.status --wait-until 'building=false' --timeout 600 --select phase,message`.

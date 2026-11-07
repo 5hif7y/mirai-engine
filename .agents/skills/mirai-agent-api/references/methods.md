@@ -501,20 +501,35 @@ result of `play.status`, `paused`, `simulating` and `input_released` are the use
   - `until`: up to 8 conditions of `play.check`; runs until the first tick after which all are met,
     with `ticks` as the maximum (`ran` and `met` say so). A badly written condition fails before
     running; if it becomes invalid later, it fails saying after how many ticks.
-  - `segments`: a timeline in one call, each segment holding its input for its `ticks` and its
-    pointer motion, wheel and text in its first tick; it replaces `ticks` and the input fields,
-    which fail beside it, and its ticks add up to at most those of a step.
-  - `trace`: up to 4 entities (selected as in `play.inspect`) or a storage, and paths of
-    `--select` inside the document `play.inspect` writes. Its rows are read between ticks, before
-    the first, every `every` and after the last, so the rows of a long step need a larger `every`.
-    In the first row a path that is not there fails, unless it names a component the entity does
-    not have yet; later, what is gone is `null`.
+  - `segments`: a timeline in one call, each segment holding its input for its `ticks` (or
+    `seconds`, rounded to whole ticks) and its pointer, wheel, text and taps in its first tick; the
+    mouse motion is spread over its ticks. It replaces `ticks` and the input fields, which fail
+    beside it, and its ticks add up to at most those of a step.
+  - Edges are against what the previous tick held, so a press is a segment with the key and a
+    release the next one without it. A tap (`tap_keys`, `tap_buttons`, a gamepad's `tapped`) is
+    pressed and released inside one tick and never down, like a press shorter than a tick.
+  - A step without input of its own plays the segments `play.input` scheduled; one with input
+    fails while some are left.
+  - `trace`: up to 4 entities (selected as in `play.inspect`), a storage or `view`, and paths of
+    `--select` inside the document `play.inspect` (or `play.view`) writes. Its rows are read
+    between ticks, before the first, every `every` and after the last, so the rows of a long step
+    need a larger `every`. In the first row a path that is not there fails, unless it names a
+    component the entity does not have yet; later, what is gone is `null`. With `view` the
+    entities named are its `points`.
 - `play.check` (`read_only`): each condition reads a field (`field` with dots and indices) of a
-  component of an entity (by `entity`, `id` or `name`) or of a storage, as `play.inspect` writes
-  it, and compares it with `number` or `text`; without a component, the entity gives its
-  `world_position`. `Exists` and `Gone` say whether the entity, the component or the field is
-  there: what is not there is a reading, not an error. A name or a field the game does not have is
-  `-32602` with what exists. A `passed:false` is a result, not a failure.
+  component of an entity (by `entity`, `id` or `name`), of a storage or of the `view`, as
+  `play.inspect` or `play.view` write them, and compares it with `number` or `text`; without a
+  component, the entity gives its `world_position`. With `view` the entity named is `points.0`.
+  `Exists` and `Gone` say whether the entity, the component or the field is there: what is not
+  there is a reading, not an error. A name or a field the game does not have is `-32602` with what
+  exists. A `passed:false` is a result, not a failure.
+- `play.view` (`read_only`): what the player sees, read from the run's `core.View` and the camera
+  of the focused local slot of `engine/camera`: the camera with its place and lens, its mode and
+  the blend into it (`progress` of the time, `weight` after the ease; 1 when it does not blend),
+  what its `Camera_Follow` follows and how far, and where each of `points` shows (normalized from
+  the top left of the view and in its pixels, `in_front`, `on_screen`). An entity projects its
+  middle (the center of mass of a body, or the middle of what hangs from it), not its feet. The
+  view is that of the last frame the run drew or stepped.
 - `play.set`, `play.spawn`, `play.destroy` and `play.push` change the caller's run between two
   ticks, as the game would, without the document or the history; a turn does not touch the user's
   Play.
@@ -537,6 +552,13 @@ result of `play.status`, `paused`, `simulating` and `input_released` are the use
   the seat of a connection in the server's run is refused, since it takes what its client sends.
   Typical test: hold `jump` for 1 tick, `play.step` 30 ticks with a `trace` of the height (or
   `play.capture` with a filmstrip that follows the body), `play.check` the height.
+  - `segments` instead schedule devices, as in `play.step`, through the path of real input (taps,
+    holds, double presses and thresholds of the actions see them as a person's): the following
+    ticks the API runs without input of their own (`play.step`, a filmstrip, `play.walk`) play them
+    one by one, and nothing is held after them. They replace what was left of earlier ones;
+    `release_all` drops them, and `scripted` in the play results counts the ticks left. Keys and
+    mouse go to the focused seat and gamepad i to seat i, so `slot` and `seat` fail beside them
+    alone. The user's Play pauses; `play.record` fails while some are left.
 - `play.walk` (registered by the `navigation` plugin): walks the body of a seat to a point or
   an entity tick by tick through the meshes and says how it ended
   ([walk](../../mirai-plugins/references/navigation.md#editor-and-api)).

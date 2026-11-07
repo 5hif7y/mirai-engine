@@ -152,6 +152,18 @@ animation_content :: proc(cache:^Source_Assets,app:^host.App,state:^Playing,desc
     return source_plan_content(cache,app,plan)
 }
 
+// While a source of what an Animation now names still has its first load under way, the library
+// of the plan it played before, with the asset and library that plan was made for. None when it
+// played nothing, or its actions asset changed: those actions name clips of the new sources.
+source_previous :: proc(cache:^Source_Assets,app:^host.App,state:^Playing,description:Animation) -> (content:^host.Content_Animation,played,library:base.Asset_Id,kept:bool) {
+    if cache==nil || app==nil || state==nil || state.source_plan==0 || int(state.source_plan)>len(cache.plans) {return}
+    plan:=&cache.plans[state.source_plan-1]
+    if !plan.valid || plan.key[2]!=description.actions || plan.key==([3]base.Asset_Id{description.asset,description.library,description.actions}) {return}
+    found,error:=source_plan_content(cache,app,plan)
+    if error!=.None || found==nil {return}
+    return found,plan.key[0],plan.key[1],true
+}
+
 // Gives the markers of a joined library the clip names and .anim of their sources.
 source_markers_resolve :: proc "contextless" (cache:^Source_Assets,state:^Playing,markers:[]Animation_Marker) {
     set:=source_playing_set(cache,state)

@@ -580,6 +580,7 @@ Renderer :: struct {
 	scene_uploads_change: bool, // the frame uploads a change of the instances, materials or lights: Settings.reference_gi starts over
 	glass_stale:          bool, // Gpu_Instance.glass waits for glass_mean.comp: instances, materials or geometry went up since it last ran
 	points:               Material_Points, // where the passes of a frame need a material program evaluated (points.odin)
+	vertex_stages:        Program_Computes, // of surface_vertices__<program>.comp, which move the vertices of instances (displace.odin)
 	program_graphics:     [PROGRAM_GRAPHICS_CAPACITY]Program_Graphics, // the raster stages of Surface programs (program_stages.odin)
 	pipeline_thread:      ^Pipeline_Thread, // makes the pipelines of programs; nil: they are made where they are asked for
 	stats_readback:  [rhi.MAX_FRAMES_IN_FLIGHT]rhi.Buffer,

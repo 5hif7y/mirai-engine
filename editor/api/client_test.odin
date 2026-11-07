@@ -55,7 +55,7 @@ an_editor_that_does_not_answer_in_time_is_a_timeout_and_one_that_closes_is_not :
     testing.expectf(t,elapsed>=150*time.Millisecond && elapsed<5*time.Second,"the timeout ends the wait: %v",elapsed)
     closed,closed_elapsed,closed_ok:=silent_post(t,true,5000)
     if !closed_ok {return}
-    testing.expect_value(t,closed.code,BAD_RESPONSE)
+    testing.expect_value(t,closed.code,CLOSED)
     testing.expectf(t,strings.contains(closed.message,"closed the connection without answering"),"%s",closed.message)
     testing.expectf(t,closed_elapsed<4*time.Second,"a closed connection does not wait for the timeout: %v",closed_elapsed)
 }

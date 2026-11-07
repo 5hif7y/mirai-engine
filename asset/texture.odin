@@ -26,6 +26,7 @@ import "mirai:std/compressor/lz"
 // (texture_fields_split).
 
 TEXTURE_VERSION :: 3
+TEXTURE_OLDEST :: TEXTURE_VERSION
 TEXTURE_MAX_SIZE :: 16384
 TEXTURE_MAX_MIPS :: 15
 // Of an array or of cube faces: the least every GPU Mirai runs on takes.
@@ -257,7 +258,7 @@ texture_view :: proc(a:^Asset,types:^Types) -> (view:Texture_View,error:Error) {
 // The texture of an open asset without its texels, whose levels
 // texture_decode reads.
 texture_open :: proc(a:^Asset,types:^Types) -> (view:Texture_View,error:Error) {
-    kind_check(a,KIND_TEXTURE,TEXTURE_VERSION) or_return
+    kind_check(a,KIND_TEXTURE,TEXTURE_OLDEST,TEXTURE_VERSION) or_return
     defaults:=TEXTURE_DEFAULTS
     view.info=asset_row(a,types,"texture",Texture_Info,&defaults) or_return
     view.mips=asset_rows(a,types,"mips","",Texture_Mip) or_return

@@ -4,17 +4,18 @@ import "core:fmt"
 import "core:os"
 import "core:slice"
 import "core:testing"
+import "mirai:cook/workspace"
 import "mirai:project"
 
-// A copy opens its API on a free port, never the default one of the user's editor, unless the
-// arguments name a port or no API.
+// A headless session, of a copy or not, opens its API on a free port, never the default one of
+// the user's editor, unless the arguments name a port or no API.
 @(test)
-a_session_copy_leaves_the_default_api_port_to_the_users_editor :: proc(t:^testing.T) {
+a_session_leaves_the_default_api_port_to_the_users_editor :: proc(t:^testing.T) {
     context.allocator=context.temp_allocator
-    testing.expect(t,slice.equal(session_copy_args({"--frames","5"}),[]string{"--frames","5","--api-port","0"}))
-    testing.expect(t,slice.equal(session_copy_args({}),[]string{"--api-port","0"}))
-    testing.expect(t,slice.equal(session_copy_args({"--api-port","7957"}),[]string{"--api-port","7957"}))
-    testing.expect(t,slice.equal(session_copy_args({"--no-api"}),[]string{"--no-api"}))
+    testing.expect(t,slice.equal(session_api_args({"--frames","5"}),[]string{"--frames","5","--api-port","0"}))
+    testing.expect(t,slice.equal(session_api_args({}),[]string{"--api-port","0"}))
+    testing.expect(t,slice.equal(session_api_args({"--api-port","7957"}),[]string{"--api-port","7957"}))
+    testing.expect(t,slice.equal(session_api_args({"--no-api"}),[]string{"--no-api"}))
 }
 
 // start and restart take the mode, the flags of their own and, for the
@@ -176,8 +177,9 @@ a_session_copy_takes_the_project_and_its_caches_without_the_files_of_its_editor 
             testing.expect(t,os.write_entire_file(path,file)==nil)
         }
     }
-    copy,problem:=session_copy(folder)
+    copy,lock,problem:=session_copy(folder)
     if !testing.expect_value(t,problem,"") {return}
+    workspace.lock_release(&lock)
     testing.expect(t,path_inside(copy,project.path(folder,".mirai","tmp")),"under .mirai/tmp/ of the project")
     for file in kept {
         data,read:=os.read_entire_file(project.path(copy,file),context.temp_allocator)
@@ -188,6 +190,40 @@ a_session_copy_takes_the_project_and_its_caches_without_the_files_of_its_editor 
     testing.expect(t,!session_copied(project.path(folder,".mirai","tmp","other")),"only what session_copy names")
     testing.expect(t,session_copy_remove(copy,"test") && !os.exists(copy))
     testing.expect(t,os.is_file(project.path(folder,".mirai","api.json")),"the project keeps its own files")
+}
+
+// A sweep deletes the copies a killed run left behind: those whose editor ended. A copy that a
+// session start is still making or opening stays, and so does one whose port file or record names
+// a process that runs and opens it; a pid that another process took again does not keep it.
+@(test)
+a_sweep_deletes_only_the_copies_whose_editor_ended :: proc(t:^testing.T) {
+    context.allocator=context.temp_allocator
+    folder,error:=os.make_directory_temp("","mirai-sweep-*",context.temp_allocator)
+    if !testing.expect(t,error==nil) {return}
+    defer os.remove_all(folder)
+    folder=project.path_absolute(folder)
+    testing.expect(t,os.write_entire_file(project.path(folder,project.PROJECT_FILE),"")==nil)
+    opening,opening_lock,opening_problem:=session_copy(folder)
+    killed,killed_lock,killed_problem:=session_copy(folder)
+    reused,reused_lock,reused_problem:=session_copy(folder)
+    if !testing.expect(t,opening_problem=="" && killed_problem=="" && reused_problem=="") {return}
+    workspace.lock_release(&killed_lock)
+    workspace.lock_release(&reused_lock)
+    record :: proc(copy:string,pid:int) -> bool {
+        path:=project.path(copy,".mirai",SESSION_FILE)
+        return os.write_entire_file(path,fmt.tprintf(`{{"pid": %d, "mode": "dev", "args": []}}`,pid))==nil
+    }
+    // No process opens a copy as its project: this test's own pid stands for a pid taken again.
+    testing.expect(t,record(killed,1<<30) && record(reused,os.get_pid()))
+    swept,kept:=session_copies_sweep(folder)
+    testing.expect_value(t,swept,2)
+    testing.expect_value(t,kept,0)
+    testing.expect(t,os.is_dir(opening),"a copy still being opened stays")
+    testing.expect(t,!os.exists(killed) && !os.exists(reused))
+    workspace.lock_release(&opening_lock)
+    swept,kept=session_copies_sweep(folder)
+    testing.expect(t,swept==1 && !os.exists(opening),"once its start ends without an editor, it goes")
+    testing.expect(t,os.is_file(project.path(folder,project.PROJECT_FILE)),"the project stays")
 }
 
 // A sync brings into a copy only the files named: one another session is
@@ -211,8 +247,9 @@ a_sync_brings_only_the_files_named_into_a_copy :: proc(t:^testing.T) {
         return string(data)
     }
     for file in ([]string{project.PROJECT_FILE,"game/blade.odin","game/game.odin","assets/items/Blade.prefab","assets/old.tex"}) {write(t,folder,file,"before")}
-    copy,problem:=session_copy(folder)
+    copy,lock,problem:=session_copy(folder)
     if !testing.expect_value(t,problem,"") {return}
+    workspace.lock_release(&lock)
     defer session_copy_remove(copy,"test")
     // Another session half-edits game.odin; this one changes blade.odin and the prefab and deletes old.tex.
     write(t,folder,"game/game.odin","half edited")

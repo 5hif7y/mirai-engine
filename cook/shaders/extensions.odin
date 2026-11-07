@@ -34,9 +34,6 @@ HOOKS_INCLUDE :: "extension_hooks.slang"
 PROBES_INCLUDE :: "extension_probes.slang"
 VERTEX_INCLUDE :: "extension_vertex.slang"
 
-// Bytes of Frame_Data before what a generation adds to it (render.Gpu_Frame).
-FRAME_CORE_SIZE :: 1984
-
 Frame_Field :: struct {
     name,type:string,
     include:string, // of its source, below the include folder of the generation
@@ -49,7 +46,7 @@ Extensions :: struct {
     nested:bool,
     instance_ids:bool,
     fields:[]Frame_Field,
-    frame_size:int, // of Frame_Data with what the generation adds; FRAME_CORE_SIZE without anything
+    frame_size:int, // of Frame_Data with what the generation adds; 0 without anything: render.Gpu_Frame alone
     ray:string,
     lights:[]Light_Hook,
     hooks:[]string, // includes of the sources with ray or light hooks
@@ -146,7 +143,6 @@ extensions_generate :: proc(runner:^Runner,root,project,output,slangc:string,sou
         }
     }
     extensions.fields,extensions.lights,extensions.hooks=fields[:],lights[:],hooks[:]
-    extensions.frame_size=FRAME_CORE_SIZE
 
     os.make_directory_all(include)
     if !write_file(path_join(include,EXTENSIONS_INCLUDE,allocator=context.temp_allocator),extensions_text(extensions,extensions_features(extensions),context.temp_allocator)) {return {},fmt.aprintf("could not write %s",EXTENSIONS_INCLUDE,allocator=allocator)}
@@ -209,6 +205,17 @@ extensions_generate :: proc(runner:^Runner,root,project,output,slangc:string,sou
     if result,ran:=tool_run(runner,command[:],context.temp_allocator);!ran {return {},fmt.aprintf("the frame constants of the extensions do not compile:\n%s",result,allocator=allocator)}
     data,readable:=read_json(reflected,context.temp_allocator)
     if !readable {return {},strings.clone("Slang did not write the reflection of the frame",allocator)}
+    if problem:=extensions_frame_read(&extensions,data);problem!="" {return {},strings.clone(problem,allocator)}
+    return extensions,""
+}
+
+// Where the reflection of Frame_Data puts what the generation adds to it: its
+// size, and the offset and size of each field of the extensions. The nested
+// views go right after the part render.Gpu_Frame mirrors (FRAME_MIRROR_LAST,
+// which the generated table of render asserts), where the renderer writes
+// them. problem says what does not fit, in the temporary allocator.
+@(private)
+extensions_frame_read :: proc(extensions:^Extensions,data:json.Object) -> (problem:string) {
     parameters,_:=data["parameters"].(json.Array)
     for value in parameters {
         parameter,_:=value.(json.Object)
@@ -221,30 +228,34 @@ extensions_generate :: proc(runner:^Runner,root,project,output,slangc:string,sou
             if json_text(size["kind"])=="uniform" {extensions.frame_size,_=json_int(size["value"])}
         }
         members,_:=element["fields"].(json.Array)
-        offset_of_member :: proc(members:json.Array,name:string) -> (offset:int,found:bool) {
+        binding_of :: proc(members:json.Array,name:string) -> (offset,size:int,found:bool) {
             for entry in members {
                 member,_:=entry.(json.Object)
                 if json_text(member["name"])!=name {continue}
                 binding,_:=member["binding"].(json.Object)
-                return json_int(binding["offset"])
+                offset,found=json_int(binding["offset"])
+                size,_=json_int(binding["size"])
+                return
             }
             return
         }
-        if nested,has:=offset_of_member(members,"nested");extensions.nested && (!has || nested!=FRAME_CORE_SIZE) {
-            return {},strings.clone("the nested views are not where the renderer writes them in the frame constants",allocator)
+        last,last_size,has_last:=binding_of(members,FRAME_MIRROR_LAST)
+        if !has_last {return fmt.tprintf("the frame constants have no %s",FRAME_MIRROR_LAST)}
+        if nested,_,has:=binding_of(members,"nested");extensions.nested && (!has || nested!=last+last_size) {
+            return "the nested views are not where the renderer writes them in the frame constants"
         }
         for &field in extensions.fields {
             found:bool
-            if field.offset,found=offset_of_member(members,field.name);!found {return {},fmt.aprintf("%s is not in the frame constants",field.name,allocator=allocator)}
+            if field.offset,_,found=binding_of(members,field.name);!found {return fmt.tprintf("%s is not in the frame constants",field.name)}
         }
         for &field,i in extensions.fields {
             end:=extensions.fields[i+1].offset if i+1<len(extensions.fields) else extensions.frame_size
             field.size=end-field.offset
-            if field.size<=0 || field.offset%4!=0 {return {},fmt.aprintf("%s: the frame constants need a struct of whole words",field.type,allocator=allocator)}
+            if field.size<=0 || field.offset%4!=0 {return fmt.tprintf("%s: the frame constants need a struct of whole words",field.type)}
         }
-        return extensions,""
+        return ""
     }
-    return {},strings.clone("the reflection has no frame constants",allocator)
+    return "the reflection has no frame constants"
 }
 
 // The macros extensions.slang defines. A stage is compiled against one that

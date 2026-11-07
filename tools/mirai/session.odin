@@ -16,29 +16,24 @@ import "mirai:std/subprocess"
 
 SESSION_USAGE :: "session start|restart|stop|status|sync [project] [paths of sync] [--dev|--release] [--no-build] [--copy] [--discard] [--orphans] [--timeout S] [editor arguments]"
 
-// <proyecto>/.mirai/session.json: the editor mirai session opened last in the
-// project, with the mode of its binaries and its arguments, which restart
-// repeats. An editor that it and the port file name was opened by mirai session.
-SESSION_FILE :: "session.json"
-Session_Record :: struct {
-    pid:int,
-    mode:string, // "dev" or "release"
-    args:[]string,
-}
+SESSION_FILE :: api.SESSION_FILE
+Session_Record :: api.Session_Record
 
 // mirai session: an editor of a project, headless and in manual mode, that
 // stays open between commands for mirai rpc, capture and mcp to drive.
 //   start    builds the project (unless --no-build), opens the editor in the
 //            background and returns once its API answers, with its port, its
-//            process and its log; one that already answers is reused. --copy
-//            opens instead a fresh copy of the project (session_copy), beside
-//            the editor that holds it
+//            process and its log; one that already answers is reused. Its API
+//            takes a free port (session_api_args). --copy opens instead a
+//            fresh copy of the project (session_copy), beside the editor that
+//            holds it, after deleting the copies whose editor ended
 //   restart  closes it, builds and opens it again, with the mode and the
 //            arguments of the last one unless others are given
 //   stop     asks it to quit and ends it if it does not. Unsaved changes go
 //            alone when they are all of copies under .mirai/tmp/, and with
 //            --discard otherwise. --orphans ends instead the headless editors
-//            of this checkout that no port file names. Of a copy, it discards
+//            of this checkout that no port file names and, with a project,
+//            deletes its copies whose editor ended. Of a copy, it discards
 //            what is unsaved and deletes the copy
 //   status   says whether one answers, and which editors of this checkout no
 //            port file names
@@ -178,13 +173,17 @@ session_start :: proc(root,folder:string,args:[]string) -> int {
     if problem=="" && (options.discard || options.orphans) {problem="--discard belongs to stop and restart, and --orphans to stop"}
     if problem!="" {fmt.eprintfln("mirai session: %s. Usage: mirai %s",problem,SESSION_USAGE);return 2}
     opened:=folder
+    copy_lock:workspace.Lock
+    defer workspace.lock_release(&copy_lock)
     if options.copy {
-        copy,copy_problem:=session_copy(folder)
+        if swept,kept:=session_copies_sweep(folder);swept>0 || kept>0 {
+            fmt.eprintfln("mirai session: deleted %d copies of %s whose editor ended%s",swept,folder,kept>0?fmt.tprintf("; %d could not be deleted while a process holds their files",kept):"")
+        }
+        copy,lock,copy_problem:=session_copy(folder)
         if copy_problem!="" {fmt.eprintfln("mirai session: %s",copy_problem);return 1}
-        opened=copy
+        opened,copy_lock=copy,lock
     }
-    editor_args:=session_copy_args(options.editor_args) if options.copy else options.editor_args
-    file,code:=session_open(root,opened,options.mode,options.no_build,options.timeout,editor_args)
+    file,code:=session_open(root,opened,options.mode,options.no_build,options.timeout,options.editor_args)
     if code!=0 {
         if options.copy {session_copy_remove(opened,"session start")}
         return code
@@ -255,6 +254,7 @@ session_open :: proc(root,folder:string,mode:Build_Mode,no_build:bool,timeout:in
     layers_isolate(root)
     log:=project.path(folder,".mirai","session.log",allocator=context.temp_allocator)
     engine:=build.engine_mode_resolve(root,mode)
+    editor_args:=session_api_args(editor_args)
     command:=make([dynamic]string)
     append(&command,build.engine_paths(root,engine).editor_program,"--project",folder,"--headless")
     append(&command,..editor_args)
@@ -397,16 +397,37 @@ session_copy_skips :: proc(relative:string) -> bool {
     return strings.has_suffix(relative,".lock")
 }
 
+// <copy>/.mirai/<SESSION_COPY_LOCK>: held by the session start that makes a copy, from before its
+// first file until its editor answers or start gives up, so that a sweep leaves it alone.
+// <project>/.mirai/tmp/<SESSION_COPIES_LOCK>: held while a copy is created and its lock taken,
+// and while the copies are swept, so that a sweep never sees a copy before its lock.
+SESSION_COPY_LOCK :: "copy.lock"
+SESSION_COPIES_LOCK :: "session-copies.lock"
+
 // A fresh copy of the project at folder under its .mirai/tmp/, without what
-// session_copy_skips leaves out; problem says why it could not and what to do.
-session_copy :: proc(folder:string) -> (copy,problem:string) {
+// session_copy_skips leaves out, and its SESSION_COPY_LOCK, which the caller
+// releases once the editor of the copy answers; problem says why it could not
+// and what to do.
+session_copy :: proc(folder:string) -> (copy:string,lock:workspace.Lock,problem:string) {
     temporary:=project.path(folder,".mirai","tmp",allocator=context.temp_allocator)
     if error:=os.make_directory_all(temporary);error!=nil && error!=.Exist {
-        return "",fmt.tprintf("could not create %s (%v); check that the project folder is writable",temporary,error)
+        return "",{},fmt.tprintf("could not create %s (%v); check that the project folder is writable",temporary,error)
     }
+    copies,copies_locked:=workspace.lock_acquire(project.path(temporary,SESSION_COPIES_LOCK,allocator=context.temp_allocator),fmt.tprintf("pid %d, mirai session start --copy",os.get_pid()))
     created,error:=os.make_directory_temp(temporary,SESSION_COPY_PREFIX+"*",context.temp_allocator)
-    if error!=nil {return "",fmt.tprintf("could not create a copy in %s (%v); check that it is writable",temporary,error)}
-    copy=project.path_absolute(created)
+    if error==nil {
+        copy=project.path_absolute(created)
+        locked:bool
+        if lock,locked=workspace.lock_acquire(project.path(copy,".mirai",SESSION_COPY_LOCK,allocator=context.temp_allocator),fmt.tprintf("pid %d, mirai session start --copy",os.get_pid()));!locked {
+            problem=fmt.tprintf("could not lock the copy %s; check that it is writable",copy)
+        }
+    }
+    if copies_locked {workspace.lock_release(&copies)}
+    if error!=nil {return "",{},fmt.tprintf("could not create a copy in %s (%v); check that it is writable",temporary,error)}
+    if problem!="" {
+        _=os.remove_all(copy)
+        return "",{},problem
+    }
     walker:=os.walker_create(folder)
     defer os.walker_destroy(&walker)
     for info in os.walker_walk(&walker) {
@@ -430,15 +451,61 @@ session_copy :: proc(folder:string) -> (copy,problem:string) {
         if path,walk_error:=os.walker_error(&walker);walk_error!=nil {problem=fmt.tprintf("could not read %s (%v)",path,walk_error)}
     }
     if problem!="" {
+        workspace.lock_release(&lock)
         _=os.remove_all(copy)
-        return "",fmt.tprintf("%s; free the disk or close what holds the file, and start again",problem)
+        return "",{},fmt.tprintf("%s; free the disk or close what holds the file, and start again",problem)
     }
-    return copy,""
+    return copy,lock,""
 }
 
-// The editor arguments of a copy: a free API port, never api.DEFAULT_PORT, which stays the one
-// of the user's editor (and of the tools that call it without a project), unless they name one.
-session_copy_args :: proc(editor_args:[]string) -> []string {
+// Deletes the copies of the project at folder whose editor ended: no session
+// start holds their SESSION_COPY_LOCK nor opens them, and neither their port
+// file nor their record names an editor of theirs that runs. A run that is
+// killed leaves its copy behind. kept counts those that could not be deleted.
+session_copies_sweep :: proc(folder:string) -> (swept,kept:int) {
+    temporary:=project.path(folder,".mirai","tmp",allocator=context.temp_allocator)
+    if !os.is_dir(temporary) {return}
+    copies,locked:=workspace.lock_acquire(project.path(temporary,SESSION_COPIES_LOCK,allocator=context.temp_allocator),fmt.tprintf("pid %d, mirai session sweeping copies",os.get_pid()))
+    if !locked {return}
+    defer workspace.lock_release(&copies)
+    entries,error:=os.read_directory_by_path(temporary,-1,context.temp_allocator)
+    if error!=nil {return}
+    for entry in entries {
+        if entry.type!=.Directory || !strings.has_prefix(entry.name,SESSION_COPY_PREFIX) {continue}
+        copy:=project.path_absolute(entry.fullpath)
+        if session_copy_live(copy) {continue}
+        if os.remove_all(copy)!=nil {kept+=1;continue}
+        swept+=1
+    }
+    return
+}
+
+// Whether a copy is being made or opened, or an editor of it runs.
+session_copy_live :: proc(copy:string) -> bool {
+    for name in ([]string{SESSION_COPY_LOCK,"session.lock"}) {
+        lock,taken,_,failed:=workspace.lock_take(project.path(copy,".mirai",name,allocator=context.temp_allocator),"mirai session sweeping copies")
+        if taken {workspace.lock_release(&lock)}
+        else if !failed {return true}
+    }
+    file,_:=session_find(copy)
+    record,_:=session_record(copy)
+    return session_copy_editor(copy,file.pid) || session_copy_editor(copy,record.pid)
+}
+
+// Whether pid is a program that runs and opens the copy: a pid reused by another
+// process does not keep a copy. One whose arguments cannot be read does.
+session_copy_editor :: proc(copy:string,pid:int) -> bool {
+    if pid<=0 || !workspace.process_alive(pid) {return false}
+    info,error:=os.process_info_by_pid(pid,{.Command_Args,.Working_Dir},context.temp_allocator)
+    if error!=nil || .Command_Args not_in info.fields {return true}
+    opened,_:=engine_arguments(info.command_args,info.working_dir)
+    return path_same(opened,copy)
+}
+
+// The editor arguments of a headless session: a free API port, never api.DEFAULT_PORT, which
+// stays the one of the user's editor (and of the tools that call it without a project), unless
+// they name one. mirai rpc --project, mcp and capture find it by the port file of the project.
+session_api_args :: proc(editor_args:[]string) -> []string {
     for arg in editor_args {if arg=="--api-port" || arg=="--no-api" {return editor_args}}
     args:=make([dynamic]string,0,len(editor_args)+2,context.temp_allocator)
     append(&args,..editor_args)
@@ -567,6 +634,14 @@ session_stop_orphans :: proc(root,folder:string) -> int {
         fmt.printfln("Orphan editor closed: pid %d, %s.",p.pid,p.project)
     }
     if closed+kept+failed==0 {fmt.println("There are no orphan editors.")}
+    if folder!="" {
+        swept,held:=session_copies_sweep(folder)
+        if swept>0 {fmt.printfln("Deleted %d copies of %s whose editor ended.",swept,folder)}
+        if held>0 {
+            failed+=1
+            fmt.eprintfln("mirai session: %d copies of %s whose editor ended could not be deleted while a process holds their files",held,folder)
+        }
+    }
     return failed>0?1:0
 }
 

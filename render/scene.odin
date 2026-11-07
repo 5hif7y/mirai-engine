@@ -294,6 +294,9 @@ Scene_State :: struct {
 	desc_instance:        [dynamic]i32, // Instance_Desc index of the last scene_set -> instance index, -1 if skipped
 	highlighted:          int,          // instances with a highlight level
 	previous:             map[Instance_Key]Gpu_Instance, // the instances before scene_set, by identity
+	displaced:            map[Instance_Key]Mesh_Handle, // the poses of the instances whose material programs move their vertices (displace.odin)
+	displaced_stale:      bool, // an instance may need a pose it lacks or have one it no longer needs: displaced_reconcile
+	material_versions:    [dynamic]u32, // of each row of the table, counted up whenever its values change
 	tlas_nodes:           [dynamic]Gpu_Bvh_Node,
 	tlas_refs:            [dynamic]u32,
 	tlas_off:             bool, // rays are traced by hardware: the tree of the instances is not kept, and stays stale until they are not
@@ -401,6 +404,8 @@ scene_init :: proc(r: ^Renderer) {
 	s.instance_keys = make([dynamic]Instance_Key, a)
 	s.desc_instance = make([dynamic]i32, a)
 	s.previous = make(map[Instance_Key]Gpu_Instance, a)
+	s.displaced = make(map[Instance_Key]Mesh_Handle, a)
+	s.material_versions = make([dynamic]u32, a)
 	s.tlas_nodes = make([dynamic]Gpu_Bvh_Node, a)
 	s.tlas_refs = make([dynamic]u32, a)
 	s.tlas_items = make([dynamic]Bvh_Item, a)
@@ -551,6 +556,7 @@ materials_grow :: proc(r: ^Renderer, rows: int) -> (changes: Material_Changes) {
 		material_range_add(s, u32(len(s.materials)))
 		append(&s.materials, gpu_material(r, DEFAULT_MATERIAL))
 	}
+	resize(&s.material_versions, len(s.materials))
 	changes.smoothest = true
 	return
 }
@@ -572,6 +578,7 @@ material_store :: proc(s: ^Scene_State, row: u32, value: Gpu_Material_Row, chang
 		program_rows_count(s, value, true)
 	}
 	held^ = value
+	if int(row) < len(s.material_versions) {s.material_versions[row] += 1}
 	material_range_add(s, row)
 }
 
@@ -685,6 +692,7 @@ materials_reach :: proc(r: ^Renderer, row: u32) {
 		s.smoothest = min(s.smoothest, material_smoothness(value))
 		s.materials_dirty = true
 	}
+	resize(&s.material_versions, len(s.materials))
 }
 
 // The lowest roughness a row can have: a roughness texture or a Surface
@@ -702,8 +710,9 @@ materials_changed :: proc(s: ^Scene_State, changes: Material_Changes) {
 		s.smoothest = 1
 		for m in s.materials {s.smoothest = min(s.smoothest, material_smoothness(m))}
 	}
-	// The alpha mode of a material decides how its instances are traced and drawn.
-	if changes.class {instances_classify(s)}
+	// The alpha mode of a material decides how its instances are traced and drawn,
+	// and its program whether they move their vertices.
+	if changes.class {instances_classify(s);s.displaced_stale=true}
 	// The rows of the batches take the classes of their materials when they are built.
 	if changes.class {s.batch.built = false}
 }
@@ -830,6 +839,7 @@ meshes_clear :: proc(r: ^Renderer) {
 	clear(&s.indices)
 	clear(&s.meshes)
 	clear(&s.skinned)
+	clear(&s.displaced)
 	clear(&s.blas_nodes)
 	clear(&s.blas_triangles)
 	clear(&s.free_meshes)
@@ -1284,6 +1294,8 @@ mesh_shown :: proc(r: ^Renderer, handle: u32) {
 	m := &s.meshes[handle]
 	// The boxes of its instances follow the pose it has now.
 	if m.skin != nil {m.skin.bounds_dirty = true}
+	// An instance whose programs move its vertices takes its pose once its mesh is there.
+	s.displaced_stale = true
 	s.batch.built = false
 	// Its native BLAS is built with the next publication.
 	s.geometry_dirty = true
@@ -1434,7 +1446,11 @@ Instance_Given :: struct {values:Vec4,wet:f32}
 instance_given :: proc "contextless" (inst:Gpu_Instance) -> Instance_Given {return {instance_values(inst),inst.wet}}
 
 @(private)
-instance_write :: proc(s:^Scene_State,index:u32,desc:Instance_Desc,previous:Mat4,given:Instance_Given) {
+instance_write :: proc(r:^Renderer,index:u32,desc:Instance_Desc,previous:Mat4,given:Instance_Given) {
+    s:=&r.scene
+    desc:=desc
+    // An instance whose material programs move its vertices shows its own pose of its mesh.
+    desc.mesh=displaced_mesh(r,desc)
     values:=given.values
     s.ray_cuts_stale=true
     count:=int(index)+1
@@ -1448,7 +1464,8 @@ instance_write :: proc(s:^Scene_State,index:u32,desc:Instance_Desc,previous:Mat4
 		was := s.instances[index].meta.x >> INSTANCE_RAY_SHIFT
 		kept := s.instances[index].meta.x & INSTANCE_MESH_MASK == u32(desc.mesh) && int(desc.mesh) < len(s.meshes) && was < max(mesh.ray_count, 1) && (mesh.stream == nil || mesh.stream.cut_missing[was] == 0)
 		cut := was << INSTANCE_RAY_SHIFT if kept else u32(ray_cut_always(mesh)) << INSTANCE_RAY_SHIFT
-		inverse, bmin, bmax, invertible := instance_placement(desc.transform, mesh.bounds_min, mesh.bounds_max)
+		reach := pose_reach(mesh)
+		inverse, bmin, bmax, invertible := instance_placement(desc.transform, mesh.bounds_min - reach, mesh.bounds_max + reach)
 		key := Instance_Key{desc.object_id, desc.copy_owner, desc.copy_variant}
 
 		// Its mesh is drawn once all its geometry is on the GPU.
@@ -1544,15 +1561,20 @@ scene_update :: proc(r:^Renderer,first:u32,instances:[]Instance_Desc,truncate:bo
             before=inst
             flags=inst.meta.w
             instance_changed_near(s,&s.instances[index])
-            spatial||=inst.meta.x&INSTANCE_MESH_MASK!=u32(desc.mesh) || inst.world!=rows_3x4(desc.transform)
             if s.instance_keys[index]==(Instance_Key{desc.object_id,desc.copy_owner,desc.copy_variant}) {
                 for row in 0..<3 {for col in 0..<4 {previous[row,col]=s.instances[index].world[row][col]}}
                 given=instance_given(inst)
             }
             instance_unlink(s,index)
         } else {append(&s.desc_instance,i32(index))}
-        instance_write(s,index,desc,previous,given)
+        instance_write(r,index,desc,previous,given)
         instance_changed_near(s,&s.instances[index])
+        if int(index)<old {
+            mesh:=s.instances[index].meta.x&INSTANCE_MESH_MASK
+            spatial||=before.meta.x&INSTANCE_MESH_MASK!=mesh || before.world!=s.instances[index].world
+            // A pose its instance no longer shows goes.
+            if before.meta.x&INSTANCE_MESH_MASK!=mesh && mesh_displaced(s,before.meta.x&INSTANCE_MESH_MASK) {s.displaced_stale=true}
+        }
         if int(index)>=old {before=INSTANCE_ABSENT}
         if !instance_shades_same(before,s.instances[index]) {occluder_moved(s,index,before,s.instances[index])}
         changed:=flags~s.instances[index].meta.w
@@ -1564,6 +1586,7 @@ scene_update :: proc(r:^Renderer,first:u32,instances:[]Instance_Desc,truncate:bo
         for index in end..<old {
             occluder_moved(s,OCCLUDERS_MANY,s.instances[index],INSTANCE_ABSENT)
             instance_changed_near(s,&s.instances[index])
+            if mesh_displaced(s,s.instances[index].meta.x&INSTANCE_MESH_MASK) {s.displaced_stale=true}
             instance_unlink(s,u32(index))
         }
         resize(&s.instances,end);resize(&s.instance_next,end);resize(&s.instance_prev,end);resize(&s.overlays,end)
@@ -1632,6 +1655,8 @@ scene_set :: proc(r: ^Renderer, instances: []Instance_Desc, lights: []Light_Desc
 	s.has_bounds = false
 	s.bounds_min = {1e30, 1e30, 1e30}
 	s.bounds_max = {-1e30, -1e30, -1e30}
+	// The poses of the instances that do not come again go.
+	if len(s.displaced) > 0 {s.displaced_stale = true}
 	motion := false
 	for given in instances {
         desc:=given
@@ -1649,7 +1674,7 @@ scene_set :: proc(r: ^Renderer, instances: []Instance_Desc, lights: []Light_Desc
             delete_key(&s.previous,key)
         }
         motion||=previous!=desc.transform
-        instance_write(s,index,desc,previous,given)
+        instance_write(r,index,desc,previous,given)
         if !found || !instance_lit_same(before,s.instances[index]) {
             instance_changed_near(s,&s.instances[index])
             if found {instance_changed_near(s,&before)}
@@ -2139,6 +2164,8 @@ upload_scene :: proc(r: ^Renderer, cmd: ^rhi.Command_List) -> bool {
 			clear(&s.light_node_ranges)
 		} else {ok = false}
 	}
+	// The programs of the instances read the tables just uploaded.
+	if ok && !displaced_record(r, cmd) {ok = false}
 	return ok
 }
 
@@ -2197,6 +2224,8 @@ scene_destroy :: proc(r: ^Renderer) {
 	delete(s.instance_keys)
 	delete(s.desc_instance)
 	delete(s.previous)
+	delete(s.displaced)
+	delete(s.material_versions)
 	delete(s.tlas_nodes)
 	delete(s.tlas_refs)
 	delete(s.tlas_items)

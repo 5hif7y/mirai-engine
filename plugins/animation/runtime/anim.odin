@@ -284,8 +284,13 @@ animation_tick :: proc(
         state:=state_get(playback,e)
         if state==nil {memory_problem(problems,e,"its animation");continue}
         content,source_error:=animation_content(sources,app,state,animation,blends,graphs,actions)
-        // Until its sources load it plays as an Animation without asset: a rig holds its rest pose.
-        if source_error==.Pending {animation.asset,animation.library,source_error={},{},.None}
+        // Until its sources load it plays on what it played (a weapon's set swapped into library
+        // takes over once loaded), or, having played nothing, as an Animation without asset: a rig
+        // holds its rest pose.
+        if source_error==.Pending {
+            previous,played,library,kept:=source_previous(sources,app,state,animation)
+            if kept {content,animation.asset,animation.library,source_error=previous,played,library,.None} else {animation.asset,animation.library,source_error={},{},.None}
+        }
         if source_error!=.None {state.program.error=source_error;program_problem(problems,e,app,animation,source_error);continue}
         if content==nil && animation.asset!={} {
             name:[base.ASSET_ID_TEXT]u8

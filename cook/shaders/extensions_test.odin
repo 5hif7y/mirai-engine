@@ -1,5 +1,7 @@
 package shaders
 
+import "core:encoding/json"
+import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:testing"
@@ -120,4 +122,25 @@ the_vertex_hook_has_a_source_and_an_include_of_its_own :: proc(t:^testing.T) {
     sources_init(&twice,context.temp_allocator)
     _,error=extensions_generate(nil,ENGINE_ROOT,"",output,"",sources,&twice,context.temp_allocator)
     testing.expect(t,strings.contains(error,"already has a vertex hook"),error)
+}
+
+// The nested views go right after the part of Frame_Data that the renderer mirrors, wherever the
+// reflection puts its end, and each field of the extensions takes up to the next one.
+@(test)
+the_frame_reflection_places_the_nested_views_after_what_the_renderer_mirrors :: proc(t:^testing.T) {
+    reflection :: proc(t:^testing.T,nested:int) -> json.Object {
+        text:=fmt.tprintf(`{{"parameters":[{{"name":"mirai_frame","type":{{"kind":"constantBuffer","elementType":{{"kind":"struct","name":"Frame_Data","fields":[`+
+            `{{"name":"frame_index","binding":{{"kind":"uniform","offset":0,"size":4}}}},`+
+            `{{"name":"moved_lights","binding":{{"kind":"uniform","offset":16,"size":64}}}},`+
+            `{{"name":"nested","binding":{{"kind":"uniform","offset":%d,"size":32}}}},`+
+            `{{"name":"portals","binding":{{"kind":"uniform","offset":%d,"size":16}}}}],"sizes":[{{"kind":"uniform","value":%d}}]}}}}}}]}}`,nested,nested+32,nested+48)
+        value,error:=json.parse_string(text,parse_integers=true,allocator=context.temp_allocator)
+        testing.expect_value(t,error,json.Error.None)
+        return value.(json.Object)
+    }
+    extensions:=Extensions{nested=true,fields=[]Frame_Field{{name="portals",type="Portals_Frame"}}}
+    testing.expect_value(t,extensions_frame_read(&extensions,reflection(t,80)),"")
+    testing.expect(t,extensions.frame_size==128 && extensions.fields[0].offset==112 && extensions.fields[0].size==16)
+    problem:=extensions_frame_read(&extensions,reflection(t,96))
+    testing.expect(t,strings.contains(problem,"nested views"),problem)
 }

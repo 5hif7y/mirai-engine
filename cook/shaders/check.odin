@@ -93,6 +93,10 @@ ENTRIES :: [Program_Domain]string{
     .Ui="float4 evaluate(Mirai_Ui_Context ctx, Parameters p) {... return ctx.color;}",
 }
 
+// The function of a Surface program that says `//! vertex`.
+@(private="file")
+VERTEX_ENTRY :: "Mirai_Vertex vertex(Mirai_Vertex_Context ctx, Parameters p) {Mirai_Vertex v=mirai_vertex_default(ctx); ... return v;}"
+
 // The stages of the engine that evaluate a program of each domain; a Surface
 // program reaches many, and the check compiles it in two of its own; a Vfx
 // program, in the stages of plugins marked `//! per vfx program`.
@@ -144,9 +148,18 @@ rules_declaration :: proc(c:^Checker) -> (name:string) {
     if c.domain==.Vfx && !("Attributes" in src.structs) {
         report(c,.Error,"mirai.declaration",src.declared_line,1,"the program has no struct Attributes",fmt.aprintf("declare `struct Attributes {{float phase;}};` inside its namespace: what it keeps of each particle between steps, up to %d bytes",ATTRIBUTE_BYTES,allocator=c.allocator))
     }
-    entries,domains:=ENTRIES,PROGRAM_DOMAINS
-    lines:=strings.split_lines(entries[c.domain],context.temp_allocator)
-    contract:=surface_parse(entries[c.domain],context.temp_allocator)
+    entries:=ENTRIES
+    rules_contract(c,entries[c.domain])
+    if c.domain==.Surface && program_directives(src.text).vertex!=nil {rules_contract(c,VERTEX_ENTRY)}
+    return src.name
+}
+
+// The functions of a contract, one per line, with their signatures.
+@(private="file")
+rules_contract :: proc(c:^Checker,entries:string) {
+    src,domains:=c.src,PROGRAM_DOMAINS
+    lines:=strings.split_lines(entries,context.temp_allocator)
+    contract:=surface_parse(entries,context.temp_allocator)
     each: for want,i in contract.functions {
         for have in src.functions {
             if have.name!=want.name {continue}
@@ -163,7 +176,6 @@ rules_declaration :: proc(c:^Checker) -> (name:string) {
         }
         report(c,.Error,"mirai.declaration",src.declared_line,1,fmt.aprintf("the program has no %s",want.name,allocator=c.allocator),lines[i])
     }
-    return src.name
 }
 
 // The line of the first function of its domain the program declares, where
@@ -578,9 +590,9 @@ program_check :: proc(options:Check_Options,allocator:=context.allocator) -> (re
     // The programs as a generation stages them, with this one as the check has it.
     files:Sources
     sources_init(&files,context.temp_allocator)
-    staged:=copy_sources(&files,path_join(options.root,"shaders/materials",allocator=context.temp_allocator),path_join(copied,"builtin",allocator=context.temp_allocator))
-    if options.project!="" {staged&&=copy_sources(&files,path_join(options.project,"shaders",allocator=context.temp_allocator),path_join(copied,"project",allocator=context.temp_allocator))}
-    for source in options.sources {staged&&=copy_sources(&files,path_clean(source.folder,context.temp_allocator),path_join(copied,"plugins",source.name,allocator=context.temp_allocator))}
+    staged:=copy_sources(&files,path_join(options.root,"shaders/materials",allocator=context.temp_allocator),path_join(copied,"builtin",allocator=context.temp_allocator))==""
+    if options.project!="" {staged&&=copy_sources(&files,path_join(options.project,"shaders",allocator=context.temp_allocator),path_join(copied,"project",allocator=context.temp_allocator))==""}
+    for source in options.sources {staged&&=copy_sources(&files,path_clean(source.folder,context.temp_allocator),path_join(copied,"plugins",source.name,allocator=context.temp_allocator))==""}
     for folder in ([]string{"builtin","project"}) {os.make_directory_all(path_join(copied,folder,allocator=context.temp_allocator))}
     os.make_directory_all(path_parent(copy_path))
     if !staged || !write_file(copy_path,transmute([]u8)text) || !write_file(path_join(include,SCHEMA_INCLUDE,allocator=context.temp_allocator),transmute([]u8)material_schema(context.temp_allocator)) {

@@ -40,8 +40,9 @@ types, scene/prefab, registry).
      default.
    - A new field that must not be zero needs a default in the read (`asset_row(..., &defaults)`),
      like `MATERIAL_DEFAULTS`.
-   - A change in what a value means raises the type's `*_VERSION`: old files fail with `Version`
-     and are imported again ([version rule](references/formats.md#versions)).
+   - A change old files need a step for raises the type's `*_VERSION` and keeps `*_OLDEST`: the
+     read branches on the file's version. A change in what a value means raises both: older files
+     fail with `Version` and are made again ([version rule](references/formats.md#versions)).
 4. **Adding an asset type.** Choose a fourcc and extension, declare the flat structs of its tables,
    write them with `document_put`/`document_put_row` and read them with `asset_rows`/`asset_row`.
    Minimal example: `asset/texture.odin` (description, `*_document`, `*_view`, `*_check`).
@@ -112,6 +113,8 @@ types, scene/prefab, registry).
   - animation, skeleton, skin and fracture: `content_test.odin`, `kinds_test.odin`,
     `skeleton_test.odin` and `fracture_test.odin` of `asset`; font, texts and prompts:
     `asset/interface_kinds_test.odin`; game data tables: `asset/records_test.odin`;
+  - versions: `asset/versions_test.odin`; a plugin's own steps, in its plugin (`.match` and
+    `.pose`: `match_assets_roundtrip_*` and `rig_shape_profiles_roundtrip_*`);
   - registry: `asset/registry_test.odin` and, in the editor,
     `content_lines_follow_registry_revisions_when_storage_and_count_are_reused`;
   - layers of an imported material:

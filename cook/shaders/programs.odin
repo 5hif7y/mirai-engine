@@ -29,6 +29,11 @@ import "core:thread"
 // the program moves and ages its particles itself. `//! births`: its function
 // births gives how many particles its emitter starts each frame. `//! prepare`:
 // its function prepare runs once a frame for each emitter, before the rest.
+// A Surface program that moves the vertices of what shows it says
+// `//! vertex [animated] [reach <metres>|reach <parameter>]` and declares its
+// function vertex (Mirai_Vertex_Context, mirai_material.slang): animated, it
+// reads the time and runs every frame; reach is how far it moves a vertex
+// from its rest, in the space of the mesh, a number or a float parameter.
 
 MAX_PARAMETERS :: 32
 PARAMETER_BYTES :: 256
@@ -71,6 +76,15 @@ Program :: struct {
     births:    bool,        // of a Vfx program: it gives how many particles its emitter starts
     prepare:   bool,        // of a Vfx program: it prepares each frame what its emitter keeps
     coverage:  bool,        // of a Surface program: its alpha is not that of the default material (SURFACE_COVERAGE_INCLUDE)
+    vertex:    Vertex_Function, // of a Surface program that moves vertices (`//! vertex`)
+}
+
+// What `//! vertex` says of the function vertex of a Surface program. reach:
+// metres in the space of the mesh, or the float parameter that gives them.
+Vertex_Function :: struct {
+    declared,animated:bool,
+    reach:f64,
+    reach_parameter:string,
 }
 
 // A resource a Vfx program reads, which each emitter binds by its name. A
@@ -105,6 +119,7 @@ Catalog :: struct {
     refused:    []string,   // the programs left out and why, one each: the others are published
     vfx:        []string,   // the Vfx programs, each with an include of its own (VFX_FOLDER/<name>/VFX_INCLUDE)
     surface:    []string,   // the Surface programs, each with an include of its own (SURFACE_FOLDER/<name>/SURFACE_INCLUDE)
+    vertex:     []string,   // of them, those with a function vertex: a stage marked `//! per vertex program` is compiled for each
 }
 
 @(private)
@@ -124,14 +139,16 @@ program_domain :: proc(name:string) -> (domain:Program_Domain,ok:bool) {
 // What the `//!` lines of a source say, read in one pass over it: the name
 // and domain of the program it declares (empty for a shared module) and the
 // line that declares them, its `//! parameter field {json}` metadata, its
-// `//! resource` and `//! stage` lines, as words, and whether it says
-// `//! moves`, `//! births` and `//! prepare`.
+// `//! resource` and `//! stage` lines, as words, whether it says
+// `//! moves`, `//! births` and `//! prepare`, and the words of its
+// `//! vertex` line (nil without one).
 Program_Directives :: struct {
     domain,name:string,
     line:int, // from 1
     metadata:[dynamic][2]string, // field, json
     resources,stages:[dynamic][]string,
     moves,births,prepare:bool,
+    vertex:[]string,
 }
 
 program_directives :: proc(text:string,allocator:=context.temp_allocator) -> (d:Program_Directives) {
@@ -159,6 +176,7 @@ program_directives :: proc(text:string,allocator:=context.temp_allocator) -> (d:
         switch words[1] {
         case "resource": append(&d.resources,words)
         case "stage": append(&d.stages,words)
+        case "vertex": if d.vertex==nil {d.vertex=words}
         case "mirai":
             if d.name!="" || len(words)!=4 || !identifier_valid(words[3]) {continue}
             if _,known:=program_domain(words[2]);known {d.domain,d.name,d.line=words[2],words[3],number}
@@ -245,6 +263,40 @@ program_stages :: proc(program:string,lines:[][]string,resources:[]Resource,allo
         append(&list,stage)
     }
     return list[:],""
+}
+
+// The function vertex of a Surface program, from the words of its `//! vertex
+// [animated] [reach <metres>|reach <parameter>]` line and the reflection of
+// its Parameters, or what is wrong with them. Without the line, none.
+@(private)
+program_vertex :: proc(program:string,words:[]string,parameters:Layout,allocator:=context.allocator) -> (vertex:Vertex_Function,problem:string) {
+    if words==nil {return}
+    vertex.declared=true
+    usage:=fmt.tprintf("%s: declare a vertex function as `//! vertex [animated] [reach <metres>|reach <float parameter>]`",program)
+    for at:=2;at<len(words);at+=1 {
+        switch words[at] {
+        case "animated":
+            if vertex.animated {return {},strings.clone(usage,allocator)}
+            vertex.animated=true
+        case "reach":
+            if at+1>=len(words) || vertex.reach!=0 || vertex.reach_parameter!="" {return {},strings.clone(usage,allocator)}
+            at+=1
+            if value,number:=strconv.parse_f64(words[at]);number {
+                if !(value>=0) || value>MAX_PARAMETER_RANGE {return {},fmt.aprintf("%s: reach is metres from 0 to %v, not %s",program,f64(MAX_PARAMETER_RANGE),words[at],allocator=allocator)}
+                vertex.reach=value
+                continue
+            }
+            for field in parameters.fields {
+                if field.name!=words[at] {continue}
+                if field.scalar!="float32" || field.count!=1 {return {},fmt.aprintf("%s: the reach %s is a parameter of one float",program,field.name,allocator=allocator)}
+                vertex.reach_parameter=strings.clone(field.name,allocator)
+            }
+            if vertex.reach_parameter=="" {return {},fmt.aprintf("%s: reach %s is neither a number nor a parameter of the program",program,words[at],allocator=allocator)}
+        case:
+            return {},strings.clone(usage,allocator)
+        }
+    }
+    return vertex,""
 }
 
 // What a new program of a domain starts as: the least that compiles and
@@ -600,7 +652,7 @@ program_loader :: proc(b:^strings.Builder,name:string,layout:Layout) {
 // Copies program sources with the bytes the repository has: a generation is
 // the same on every platform.
 @(private)
-copy_sources :: proc(files:^Sources,source,target:string) -> bool {
+copy_sources :: proc(files:^Sources,source,target:string) -> (failed:string) {
     for path in sources_below(files,source) {
         relative,_:=path_relative(path,source)
         destination:=path_join(target,relative,allocator=context.temp_allocator)
@@ -608,11 +660,11 @@ copy_sources :: proc(files:^Sources,source,target:string) -> bool {
         data:=sources_file(files,path).data
         if !strings.has_suffix(path,".slang") {
             err:os.Error
-            if data,err=os.read_entire_file(path,context.temp_allocator);err!=nil {return false}
+            if data,err=os.read_entire_file(path,context.temp_allocator);err!=nil {return fmt.tprintf("%s could not be read (%v)",path,err)}
         }
-        if !write_file(destination,data) {return false}
+        if err:=os.write_entire_file(destination,data);err!=nil {return fmt.tprintf("%s could not be written (%v)",destination,err)}
     }
-    return true
+    return ""
 }
 
 // The includes a generation writes for the stages that evaluate programs:
@@ -704,15 +756,27 @@ surface_program_source :: proc(b:^strings.Builder,name,relative:string,parameter
 // The include of a Surface program alone (SURFACE_FOLDER/<name>/SURFACE_INCLUDE),
 // with which the stages marked `//! per surface program` are compiled for it:
 // they evaluate it for every material they are given, which are its own.
+// vertex: it has a function vertex, which mirai_vertex_program calls in the
+// stages marked `//! per vertex program`.
 @(private)
-surface_program_include :: proc(name,relative:string,parameters:Layout) -> string {
+surface_program_include :: proc(name,relative:string,parameters:Layout,vertex:=false) -> string {
     own:=strings.builder_make(context.temp_allocator)
     strings.write_string(&own,"// Generated by mirai shaders. DO NOT EDIT. The stages a source marks `//! per surface program`\n// are compiled once for each Surface program, with the include of that program alone.\n")
     strings.write_string(&own,"#ifndef MIRAI_SURFACE_PROGRAMS\n#define MIRAI_SURFACE_PROGRAMS\n#include \"mirai_material.slang\"\n")
     surface_program_source(&own,name,relative,parameters)
-    fmt.sbprintf(&own,"bool mirai_evaluate_program(uint id,float4 packed[16],Mirai_Surface_Context ctx,inout Mirai_Surface value) {{value=%s::evaluate(ctx,mirai_load_%s(packed));return true;}}\n#endif\n",name,name)
+    fmt.sbprintf(&own,"bool mirai_evaluate_program(uint id,float4 packed[16],Mirai_Surface_Context ctx,inout Mirai_Surface value) {{value=%s::evaluate(ctx,mirai_load_%s(packed));return true;}}\n",name,name)
+    if vertex {
+        fmt.sbprintf(&own,"bool mirai_vertex_program(uint id,float4 packed[16],Mirai_Vertex_Context ctx,inout Mirai_Vertex value) {{value=%s::vertex(ctx,mirai_load_%s(packed));return true;}}\n",name,name)
+    } else {
+        strings.write_string(&own,NO_VERTEX_PROGRAM)
+    }
+    strings.write_string(&own,"#endif\n")
     return strings.to_string(own)
 }
+
+// The function vertex of the stages without a program, or of one that moves no vertices.
+@(private)
+NO_VERTEX_PROGRAM :: "bool mirai_vertex_program(uint id,float4 packed[16],Mirai_Vertex_Context ctx,inout Mirai_Vertex value) {return false;}\n"
 
 // The value the default material of an alpha probe gives alpha: a program
 // whose probe stores it never changes the alpha of the default.
@@ -859,7 +923,7 @@ dispatchers_write :: proc(d:^Dispatchers,include:string) -> (failed:string) {
     strings.write_string(&vfx,"bool mirai_vfx_render(uint id,float4 packed[16],uint attributes,Mirai_Vfx_Context ctx,Mirai_Vfx_Particle value,inout Mirai_Vfx_Visual visual) {return false;}\n#endif\n")
     if !write_file(path_join(include,VFX_INCLUDE,allocator=context.temp_allocator),vfx.buf[:]) {return VFX_INCLUDE}
     // The stages of the materials without a program, and those of no program.
-    if !write_file(path_join(include,SURFACE_INCLUDE,allocator=context.temp_allocator),transmute([]u8)string("// Generated by mirai shaders. DO NOT EDIT. The stages of the materials without a program.\n#ifndef MIRAI_SURFACE_PROGRAMS\n#define MIRAI_SURFACE_PROGRAMS\n#include \"mirai_material.slang\"\nbool mirai_evaluate_program(uint id,float4 packed[16],Mirai_Surface_Context ctx,inout Mirai_Surface value) {return false;}\n#endif\n")) {return SURFACE_INCLUDE}
+    if !write_file(path_join(include,SURFACE_INCLUDE,allocator=context.temp_allocator),transmute([]u8)string("// Generated by mirai shaders. DO NOT EDIT. The stages of the materials without a program.\n#ifndef MIRAI_SURFACE_PROGRAMS\n#define MIRAI_SURFACE_PROGRAMS\n#include \"mirai_material.slang\"\nbool mirai_evaluate_program(uint id,float4 packed[16],Mirai_Surface_Context ctx,inout Mirai_Surface value) {return false;}\n"+NO_VERTEX_PROGRAM+"#endif\n")) {return SURFACE_INCLUDE}
     Dispatcher :: struct {file,guard,signature,otherwise:string}
     dispatchers:=#partial [Program_Domain]Dispatcher{
         .Surface={SURFACE_COVERAGE_INCLUDE,"MIRAI_SURFACE_COVERAGE","bool mirai_program_alpha(uint id,float4 packed[16],Mirai_Surface_Context ctx,out float alpha)","return false;"},
@@ -996,7 +1060,7 @@ programs_generate :: proc(runner:^Runner,root,project,output,slangc,version,cach
     }
     os.make_directory_all(include)
     if os.exists(copied) {os.remove_all(copied)}
-    if !copy_sources(files,materials,path_join(copied,"builtin",allocator=context.temp_allocator)) {return {},strings.clone("could not copy the programs of the engine",allocator)}
+    if failed:=copy_sources(files,materials,path_join(copied,"builtin",allocator=context.temp_allocator));failed!="" {return {},fmt.aprintf("could not copy the programs of the engine: %s",failed,allocator=allocator)}
     paths:=make([dynamic]string,context.temp_allocator)
     append(&paths,..sources_in(files,materials,".slang",context.temp_allocator))
     hash:Sha256
@@ -1005,7 +1069,7 @@ programs_generate :: proc(runner:^Runner,root,project,output,slangc,version,cach
     // Every shared source contributes to the identity of the catalog.
     for path in sources_in(files,shared,".slang",context.temp_allocator) {sha_bytes(&hash,sources_file(files,path).data)}
     for entry in folders {
-        if !copy_sources(files,entry.folder,path_join(copied,entry.label,allocator=context.temp_allocator)) {return {},fmt.aprintf("could not copy the programs of %s",entry.folder,allocator=allocator)}
+        if failed:=copy_sources(files,entry.folder,path_join(copied,entry.label,allocator=context.temp_allocator));failed!="" {return {},fmt.aprintf("could not copy the programs of %s: %s",entry.folder,failed,allocator=allocator)}
         for path in sources_below(files,entry.folder) {
             if strings.has_suffix(path,".slang") {append(&paths,path)}
             relative,_:=path_relative(path,entry.folder)
@@ -1031,6 +1095,7 @@ programs_generate :: proc(runner:^Runner,root,project,output,slangc,version,cach
     dispatchers:=dispatchers_make()
     vfx_names:=make([dynamic]string,allocator)
     surface_names:=make([dynamic]string,allocator)
+    vertex_names:=make([dynamic]string,allocator)
     refused:=make([dynamic]string,allocator)
     // What each program declares, then the layouts the cache lacks, reflected at once, then the
     // catalog in the order of the sources.
@@ -1147,6 +1212,14 @@ programs_generate :: proc(runner:^Runner,root,project,output,slangc,version,cach
             }
         }
         attributes:int
+        vertex:Vertex_Function
+        if of==.Surface {
+            problem:string
+            if vertex,problem=program_vertex(name,e.said.vertex,layout,allocator);problem!="" {append(&refused,problem);continue}
+        } else if e.said.vertex!=nil {
+            append(&refused,fmt.aprintf("%s: only a Surface program moves vertices (`//! vertex`)",name,allocator=allocator))
+            continue
+        }
         if of==.Vfx {
             attributes=e.layouts[1].size
             // The include of the program alone: the stages of each program are compiled with it.
@@ -1164,19 +1237,20 @@ programs_generate :: proc(runner:^Runner,root,project,output,slangc,version,cach
             if of==.Surface {
                 folder:=path_join(include,SURFACE_FOLDER,name,allocator=context.temp_allocator)
                 os.make_directory_all(folder)
-                if !write_file(path_join(folder,SURFACE_INCLUDE,allocator=context.temp_allocator),transmute([]u8)surface_program_include(name,relative,layout)) {
+                if !write_file(path_join(folder,SURFACE_INCLUDE,allocator=context.temp_allocator),transmute([]u8)surface_program_include(name,relative,layout,vertex.declared)) {
                     append(&refused,fmt.aprintf("%s: could not write its %s",name,SURFACE_INCLUDE,allocator=allocator))
                     continue
                 }
                 append(&surface_names,strings.clone(name,allocator))
+                if vertex.declared {append(&vertex_names,strings.clone(name,allocator))}
             }
             dispatchers_add(&dispatchers,of,id,name,relative,layout,e.coverage,string(e.alpha[:]) if e.coverage else "")
         }
         moves,births,prepare:=of==.Vfx && e.said.moves,of==.Vfx && e.said.births,of==.Vfx && e.said.prepare
-        append(&programs,Program{id=id,name=strings.clone(name,allocator),domain=strings.clone(e.domain,allocator),source=relative,size=layout.size,parameters=parameters,layers=layers[:],attributes=attributes,resources=resources,stages=stages,moves=moves,births=births,prepare=prepare,coverage=e.coverage})
+        append(&programs,Program{id=id,name=strings.clone(name,allocator),domain=strings.clone(e.domain,allocator),source=relative,size=layout.size,parameters=parameters,layers=layers[:],attributes=attributes,resources=resources,stages=stages,moves=moves,births=births,prepare=prepare,coverage=e.coverage,vertex=vertex})
     }
     if failed:=dispatchers_write(&dispatchers,include);failed!="" {return {},fmt.aprintf("could not write %s",failed,allocator=allocator)}
-    catalog={fingerprint=sha_hex(&hash,allocator),compiler=strings.clone(version,allocator),programs=programs[:],refused=refused[:],vfx=vfx_names[:],surface=surface_names[:]}
+    catalog={fingerprint=sha_hex(&hash,allocator),compiler=strings.clone(version,allocator),programs=programs[:],refused=refused[:],vfx=vfx_names[:],surface=surface_names[:],vertex=vertex_names[:]}
     if !write_file(path_join(output,"catalog.json",allocator=context.temp_allocator),catalog_json(catalog,context.temp_allocator)) {return {},strings.clone("could not write catalog.json",allocator)}
     return catalog,""
 }
@@ -1213,6 +1287,13 @@ catalog_json :: proc(catalog:Catalog,allocator:=context.allocator) -> []u8 {
         if program.moves {json_key(&writer,"moves");json_bool(&writer,true)}
         if program.births {json_key(&writer,"births");json_bool(&writer,true)}
         if program.prepare {json_key(&writer,"prepare");json_bool(&writer,true)}
+        if program.vertex.declared {
+            json_key(&writer,"vertex");json_object_begin(&writer)
+            json_key(&writer,"animated");json_bool(&writer,program.vertex.animated)
+            json_key(&writer,"reach")
+            if program.vertex.reach_parameter!="" {json_string(&writer,program.vertex.reach_parameter)} else {json_float(&writer,program.vertex.reach)}
+            json_object_end(&writer)
+        }
         if len(program.resources)>0 {
             json_key(&writer,"resources");json_array_begin(&writer)
             for resource in program.resources {

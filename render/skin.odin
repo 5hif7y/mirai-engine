@@ -61,7 +61,9 @@ SKIN_REBUILD_INTERVAL :: 120
 // in the vertex pool), of the tree of its triangles and of its native BLAS.
 // Skinning writes those of a skinned one from its joints; an extension writes
 // those of an external one in the Geometry stage of the frame, from the rest
-// vertices that follow them.
+// vertices that follow them; the vertex functions of the programs of its
+// instance write those of a displaced one from the rest of its clusters, and
+// move those of a skinned one after its skin (displace.odin).
 @(private) Skin_State :: struct {
     binding:^Skin_Binding,
     joints:[]Skin_Joint,
@@ -73,6 +75,12 @@ SKIN_REBUILD_INTERVAL :: 120
     dirty,bounds_dirty,settle:bool,
     external:bool,
     vertices:u32, // that an extension writes in an external one: of its first level, or of each of its levels
+    displaced:bool, // of an instance whose material programs move the vertices of source
+    moves:bool,     // a skinned one whose instance has programs that move its vertices after its skin
+    fresh:bool,     // displaced and not written yet: its previous vertices take the first ones too
+    source:Mesh_Handle, // of a displaced one
+    reach:f32,      // how far those programs move a vertex, in its own space: the boxes of its instances grow by it
+    inputs:u64,     // what its vertices were last moved from (displaced_prepare)
     allocator:mem.Allocator,
 }
 
@@ -634,25 +642,38 @@ skins_bounds :: proc(r:^Renderer) {
         if !mesh.skin.bounds_dirty {continue}
         mesh.skin.bounds_dirty=false
         for index:=mesh.first_instance;index>=0;index=s.instance_next[index] {
-            inst:=&s.instances[index]
-            if inst.meta.w&INSTANCE_FLAG_COLLAPSED!=0 {continue}
-            before:=inst^
-            transform:=Mat4(1)
-            for row in 0..<3 {for column in 0..<4 {transform[row,column]=inst.world[row][column]}}
-            lo,hi:=transform_bounds(transform,mesh.bounds_min,mesh.bounds_max)
-            scene_changed_box(s,inst.bounds_min.xyz,inst.bounds_max.xyz)
-            scene_changed_box(s,lo,hi)
-            inst.bounds_min={lo.x,lo.y,lo.z,0};inst.bounds_max={hi.x,hi.y,hi.z,0}
-            instance_resized(s,int(index),lo,hi)
-            occluder_moved(s,u32(index),before,inst^)
-            s.tlas_items[index]={bounds_min=lo,bounds_max=hi,center=(lo+hi)*0.5}
-            if len(s.touched)<cap(s.touched) {append(&s.touched,u32(index))} else {s.instances_dirty=true}
-            changed=true
+            changed||=pose_instance_box(s,u32(index))
         }
     }
     if !changed {return}
 
     instances_moved(s)
+}
+
+// How far the programs of the instance of a pose move its vertices out of its box.
+@(private)
+pose_reach :: proc "contextless" (m:Mesh_Record) -> f32 {return m.skin.reach if m.skin!=nil else 0}
+
+// The box of an instance of a pose, from the box of the pose and its reach;
+// false for one hidden until it can be drawn.
+@(private)
+pose_instance_box :: proc(s:^Scene_State,index:u32) -> bool {
+    inst:=&s.instances[index]
+    if inst.meta.w&INSTANCE_FLAG_COLLAPSED!=0 {return false}
+    mesh:=s.meshes[inst.meta.x&INSTANCE_MESH_MASK]
+    reach:=pose_reach(mesh)
+    before:=inst^
+    transform:=Mat4(1)
+    for row in 0..<3 {for column in 0..<4 {transform[row,column]=inst.world[row][column]}}
+    lo,hi:=transform_bounds(transform,mesh.bounds_min-reach,mesh.bounds_max+reach)
+    scene_changed_box(s,inst.bounds_min.xyz,inst.bounds_max.xyz)
+    scene_changed_box(s,lo,hi)
+    inst.bounds_min.xyz=lo;inst.bounds_max.xyz=hi
+    instance_resized(s,int(index),lo,hi)
+    occluder_moved(s,index,before,inst^)
+    s.tlas_items[index]={bounds_min=lo,bounds_max=hi,center=(lo+hi)*0.5}
+    if len(s.touched)<cap(s.touched) {append(&s.touched,index)} else {s.instances_dirty=true}
+    return true
 }
 
 // The vertices of the poses that changed or settle, before the Geometry stage
@@ -679,10 +700,10 @@ poses_record :: proc(r:^Renderer,cmd:^rhi.Command_List)->bool {
         rhi.cmd_copy_buffer(cmd,row.buffer,row.offset,s.mesh_buffer,u64(handle)*size_of(Gpu_Mesh),size_of(Gpu_Mesh))
     }
     rhi.cmd_barrier_buffer(cmd,s.mesh_buffer,.Shader_Read)
-    // What an extension deforms keeps the vertices it had as its previous ones.
+    // What an extension deforms, or the programs of its instance move, keeps the vertices it had as its previous ones.
     for handle in s.skinned {
         mesh:=s.meshes[handle]
-        if mesh.skin==nil || !mesh.skin.external || !(mesh.skin.dirty || mesh.skin.settle) || mesh_pending(s,u32(handle)) {continue}
+        if mesh.skin==nil || !(mesh.skin.external || mesh.skin.displaced) || !(mesh.skin.dirty || mesh.skin.settle) || mesh_pending(s,u32(handle)) {continue}
         bytes:=u64(mesh.vertices_posed)*size_of(Gpu_Posed_Vertex)
         rhi.cmd_copy_buffer(cmd,s.vertex_buffer,u64(mesh.posed_word)*4,s.vertex_buffer,u64(mesh.previous_word)*4,bytes)
     }
@@ -691,7 +712,7 @@ poses_record :: proc(r:^Renderer,cmd:^rhi.Command_List)->bool {
     for handle in s.skinned {
         mesh:=s.meshes[handle]
         skin:=mesh.skin
-        if skin==nil || skin.external || !(skin.dirty || skin.settle) || mesh_pending(s,u32(handle)) {continue}
+        if skin==nil || skin.external || skin.displaced || !(skin.dirty || skin.settle) || mesh_pending(s,u32(handle)) {continue}
         size:=len(skin.joints)*size_of(Skin_Joint)
         palette:=rhi.frame_alloc(r.device,u64(size),16)
         if palette.ptr==nil {set_error(r,"transient ring exhausted uploading skin palette");return false}
@@ -803,7 +824,7 @@ poses_refit :: proc(r:^Renderer,cmd:^rhi.Command_List)->bool {
         skin:=s.meshes[handle].skin
         if !posing(s,handle) {continue}
         // What moved is drawn once more at rest: its previous vertices take the current ones.
-        moving:=skin.external && skin.dirty
+        moving:=(skin.external || skin.displaced) && skin.dirty
         for &joint in skin.joints {moving ||= joint.current!=joint.previous;joint.previous=joint.current}
         for &joint in skin.part_joints {moving ||= joint.current!=joint.previous;joint.previous=joint.current}
         for &weight in skin.morph_weights {moving ||= weight.x!=weight.y;weight.y=weight.x}

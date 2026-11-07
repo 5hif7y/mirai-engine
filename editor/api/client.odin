@@ -56,7 +56,8 @@ client_post :: proc(port:int,path,body:string,timeout_ms:int,allocator:runtime.A
         }
         if head_end>=0 && length>=0 && len(data)>=head_end+length {break}
     }
-    if head_end<0 {return 0,nil,client_error(allocator,BAD_RESPONSE,"the Mirai editor at 127.0.0.1:%d closed the connection without answering",port)}
+    if len(data)==0 {return 0,nil,client_error(allocator,CLOSED,"the Mirai editor at 127.0.0.1:%d closed the connection without answering",port)}
+    if head_end<0 {return 0,nil,client_error(allocator,BAD_RESPONSE,"the Mirai editor at 127.0.0.1:%d closed the connection in the middle of its answer",port)}
     available:=len(data)-head_end
     if length>=0 && available<length {return 0,nil,client_error(allocator,BAD_RESPONSE,"the answer was cut short")}
     count:=length>=0?length:available

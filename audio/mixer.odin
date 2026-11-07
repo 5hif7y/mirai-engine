@@ -2,6 +2,7 @@ package mirai_audio
 
 import "base:runtime"
 import "core:sync"
+import "core:thread"
 
 // A mixer of sounds held in memory or streamed, with voices, buses and
 // positional audio, that renders interleaved f32 frames into a buffer of the
@@ -11,7 +12,9 @@ import "core:sync"
 // everything else belongs to one other thread (the game thread). They share
 // no lock: what the game thread asks for travels in a queue that the audio
 // thread empties at the start of every chunk it renders, and what the audio
-// thread has to tell comes back in atomics that mixer_update reads.
+// thread has to tell comes back in atomics that mixer_update reads. Sounds
+// that decode as they play are decoded by a third thread of the mixer, when
+// it has one, into rings the audio thread reads without waiting (feed.odin).
 
 Error :: enum u8 {
     None,
@@ -30,6 +33,9 @@ Mixer_Desc :: struct {
     sound_capacity:int,   // 256 when zero
     stream_capacity:int,  // sounds that are streamed; 4 when zero
     stream_frames:int,    // frames buffered ahead for every stream, rounded up to a power of two; half a second when zero
+    feed_capacity:int,    // voices that can play sounds kept encoded at once, those stolen and not yet let go included; a quarter more than voice_capacity when zero
+    feed_frames:int,      // frames buffered ahead for each of them, rounded up to a power of two; two lossless blocks when zero. A lossless file of blocks longer than half of it is decoded whole when it loads
+    decoder_thread:bool,  // decode on a thread of the mixer; false: voice_play and mixer_update decode on the calling thread
     command_capacity:int, // commands the game thread can queue between two chunks, rounded up to a power of two; 1024 when zero
     speed_of_sound:f32,   // meters per second, for Doppler; 343 when zero
     allocator:runtime.Allocator, // context.allocator when unset
@@ -38,6 +44,9 @@ Mixer_Desc :: struct {
 // Frames mixed at a time: commands and parameter changes take effect at the
 // start of a chunk and are ramped across it.
 CHUNK_FRAMES :: 256
+// Bounds of a desc: past them the sizes of its memory would not be numbers.
+MIXER_CAPACITY_MAX :: 1<<16
+MIXER_RING_FRAMES_MAX :: 1<<24
 PITCH_MIN :: f32(1.0/64)
 PITCH_MAX :: f32(64)
 
@@ -48,9 +57,11 @@ Mixer_Stats :: struct {
     voices_stolen:u64,    // voices ended to make room for a new one
     voices_rejected:u64,  // voices not started: no room, and nothing of lower or equal priority to steal
     commands_dropped:u64, // requests lost because the command queue was full
-    stream_underruns:u64, // chunks in which a stream had no data ready
+    underruns:u64,        // chunks in which a voice that decodes as it plays had nothing decoded to play
     streams_busy:u64,     // plays of a stream that was already playing
+    feeds_busy:u64,       // plays of a sound kept encoded refused because every feed was taken
     sounds:int,
+    sound_bytes:int,      // memory the sounds hold: samples, encoded bytes and the decoders of streams
 }
 
 @(private) ONE :: u64(1)<<32 // a source frame in the 32.32 fixed point of a voice cursor
@@ -99,8 +110,19 @@ Mixer :: struct {
     bus_count:int,
     bus_shadows:[]Bus_Shadow,
     reverb_shadow:Reverb_Shadow,
-    streams:[]Stream,
+    free_feeds:[]u32,free_feed_count:int, // feeds of the pool
     counters:Mixer_Stats,
+
+    // Feeds: the pool first, then one per stream.
+    feeds:[]Feed,
+    pool_feeds:int,
+    feed_frames:int,
+    feed_rings:[]i16,  // the rings of the pool
+    feed_planes:[]i32, // a lossless block of a feed of the pool, being decoded
+    feeder:^thread.Thread,
+    feeder_wake:sync.Futex,
+    feeder_quit:bool,
+    pumping:u32, // a decoder is filling the feeds
 
     // Audio thread.
     voices:[]Mix_Voice,
@@ -111,7 +133,7 @@ Mixer :: struct {
     reverb:Reverb_Unit,  // the room
     reverb_bus:u16,      // where the room returns
     bus_reverbs:[]Reverb_Unit,
-    scratch:[]f32,     // source frames of a stream, laid out in a row
+    scratch:[]f32,     // source frames of a voice that plays from a feed, laid out in a row
     listener:Listener,
     listener_serial:u32,
 
@@ -119,7 +141,7 @@ Mixer :: struct {
     finished:[]u32,        // per voice slot: generation of the voice that last ended there
     sound_released:[]u32,  // per sound slot: 1 once no voice plays it any more
     voices_active:i32,
-    stream_underruns:u64,
+    underruns:u64,
 }
 
 mixer_create :: proc(desc:Mixer_Desc) -> (m:^Mixer,error:Error) {
@@ -127,7 +149,8 @@ mixer_create :: proc(desc:Mixer_Desc) -> (m:^Mixer,error:Error) {
     if allocator.procedure==nil {allocator=context.allocator}
     channels:=desc.channels if desc.channels!=0 else 2
     if channels<1 || channels>2 || desc.sample_rate<0 || desc.sample_rate>384000 {return nil,.Invalid_Desc}
-    if desc.voice_capacity<0 || desc.bus_capacity<0 || desc.bus_capacity>int(max(u16)) || desc.sound_capacity<0 || desc.stream_capacity<0 {return nil,.Invalid_Desc}
+    if desc.voice_capacity<0 || desc.bus_capacity<0 || desc.bus_capacity>int(max(u16)) || desc.sound_capacity<0 || desc.stream_capacity<0 || desc.feed_capacity<0 || desc.feed_capacity>MIXER_CAPACITY_MAX || desc.voice_capacity>MIXER_CAPACITY_MAX || desc.stream_capacity>MIXER_CAPACITY_MAX || desc.command_capacity>MIXER_CAPACITY_MAX {return nil,.Invalid_Desc}
+    if desc.feed_frames<0 || desc.feed_frames>MIXER_RING_FRAMES_MAX || desc.stream_frames<0 || desc.stream_frames>MIXER_RING_FRAMES_MAX {return nil,.Invalid_Desc}
     failed:runtime.Allocator_Error
     if m,failed=new(Mixer,allocator);failed!=nil {return nil,.Out_Of_Memory}
     m.allocator=allocator
@@ -137,6 +160,15 @@ mixer_create :: proc(desc:Mixer_Desc) -> (m:^Mixer,error:Error) {
     if error=mixer_init(m,desc);error!=.None {
         mixer_destroy(m)
         return nil,error
+    }
+    if desc.decoder_thread {
+        context.allocator=allocator
+        if m.feeder=thread.create(feeder_main);m.feeder==nil {
+            mixer_destroy(m)
+            return nil,.Out_Of_Memory
+        }
+        m.feeder.data=m
+        thread.start(m.feeder)
     }
     return m,.None
 }
@@ -151,6 +183,11 @@ mixer_init :: proc(m:^Mixer,desc:Mixer_Desc) -> Error {
     for commands<(desc.command_capacity if desc.command_capacity>0 else 1024) {commands*=2}
     stream_frames:=CHUNK_FRAMES*4
     for stream_frames<(desc.stream_frames if desc.stream_frames>0 else m.sample_rate/2) {stream_frames*=2}
+    pool:=desc.feed_capacity if desc.feed_capacity>0 else voices+voices/4+1
+    feed_frames:=CHUNK_FRAMES*4
+    for feed_frames<(desc.feed_frames if desc.feed_frames>0 else LOSSLESS_BLOCK_FRAMES*2) {feed_frames*=2}
+    m.feed_frames=feed_frames
+    m.pool_feeds=pool
     failed:runtime.Allocator_Error
     if m.commands.items,failed=make([]Command,commands,allocator);failed!=nil {return .Out_Of_Memory}
     if m.sounds,failed=make([]Sound_Slot,sounds,allocator);failed!=nil {return .Out_Of_Memory}
@@ -167,14 +204,25 @@ mixer_init :: proc(m:^Mixer,desc:Mixer_Desc) -> Error {
     reverb_init(m,&m.reverb) or_return
     if m.bus_reverbs,failed=make([]Reverb_Unit,buses,allocator);failed!=nil {return .Out_Of_Memory}
     for &unit in m.bus_reverbs {reverb_init(m,&unit) or_return}
-    if m.streams,failed=make([]Stream,streams,allocator);failed!=nil {return .Out_Of_Memory}
-    // The source frames of a chunk of a stream at its fastest, and the frame after them.
-    if m.scratch,failed=make([]f32,(CHUNK_FRAMES*int(STREAM_STEP_MAX>>32)+4)*2,allocator);failed!=nil {return .Out_Of_Memory}
-    for &stream in m.streams {
-        if stream.ring,failed=make([]f32,stream_frames*2,allocator);failed!=nil {return .Out_Of_Memory}
-        stream.voice=-1
+    // The source frames of a chunk of a feed at its fastest, and the frame after them.
+    if m.scratch,failed=make([]f32,(CHUNK_FRAMES*int(FEED_STEP_MAX>>32)+4)*2,allocator);failed!=nil {return .Out_Of_Memory}
+    if m.feeds,failed=make([]Feed,pool+streams,allocator);failed!=nil {return .Out_Of_Memory}
+    if m.free_feeds,failed=make([]u32,pool,allocator);failed!=nil {return .Out_Of_Memory}
+    if m.feed_rings,failed=make([]i16,pool*feed_frames*2,allocator);failed!=nil {return .Out_Of_Memory}
+    if m.feed_planes,failed=make([]i32,feed_frames,allocator);failed!=nil {return .Out_Of_Memory}
+    for &f,i in m.feeds[:pool] {
+        f.ring16=m.feed_rings[i*feed_frames*2:][:feed_frames*2]
+        f.capacity=u64(feed_frames)
+        // The first feed is handed out first.
+        m.free_feeds[i]=u32(pool-1-i)
     }
-    for &slot in m.sounds {slot.generation=1;slot.stream=-1}
+    m.free_feed_count=pool
+    for &f in m.feeds[pool:] {
+        if f.ring32,failed=make([]f32,stream_frames*2,allocator);failed!=nil {return .Out_Of_Memory}
+        f.capacity=u64(stream_frames)
+        f.stream=true
+    }
+    for &slot in m.sounds {slot.generation=1;slot.feed=-1}
     // Slot 0 is handed out first.
     for &shadow,i in m.shadows {
         shadow.generation=1
@@ -191,11 +239,13 @@ mixer_init :: proc(m:^Mixer,desc:Mixer_Desc) -> Error {
 // The audio thread must have stopped rendering before this is called.
 mixer_destroy :: proc(m:^Mixer) {
     if m==nil {return}
+    feeder_stop(m)
     allocator:=m.allocator
     for &slot in m.sounds {
         if slot.state!=.Free {sound_slot_free(m,&slot)}
     }
-    for stream in m.streams {delete(stream.ring,allocator)}
+    for f in m.feeds {delete(f.ring32,allocator)}
+    delete(m.feeds,allocator);delete(m.free_feeds,allocator);delete(m.feed_rings,allocator);delete(m.feed_planes,allocator)
     delete(m.commands.items,allocator)
     delete(m.sounds,allocator);delete(m.sound_released,allocator)
     delete(m.shadows,allocator);delete(m.free_voices,allocator)
@@ -204,7 +254,7 @@ mixer_destroy :: proc(m:^Mixer) {
     delete(m.voice_scratch,allocator);delete(m.reverb_input,allocator);delete(m.reverb.memory,allocator)
     for unit in m.bus_reverbs {delete(unit.memory,allocator)}
     delete(m.bus_reverbs,allocator)
-    delete(m.streams,allocator);delete(m.scratch,allocator)
+    delete(m.scratch,allocator)
     free(m,allocator)
 }
 
@@ -216,16 +266,23 @@ mixer_stats :: proc(m:^Mixer) -> Mixer_Stats {
     stats:=m.counters
     stats.frames_rendered=mixer_clock(m)
     stats.voices_active=int(sync.atomic_load_explicit(&m.voices_active,.Relaxed))
-    stats.stream_underruns=sync.atomic_load_explicit(&m.stream_underruns,.Relaxed)
+    stats.underruns=sync.atomic_load_explicit(&m.underruns,.Relaxed)
     return stats
 }
 
-// Once per frame on the game thread: frees the voices that ended and the
-// sounds that were destroyed, and decodes ahead for the streams that play.
+// Once per frame on the game thread: frees the voices that ended, the feeds
+// they let go of and the sounds that were destroyed, and, without a decoder
+// thread, decodes ahead for the voices that decode as they play.
 mixer_update :: proc(m:^Mixer) {
     for &shadow,i in m.shadows {
         if !shadow.active || sync.atomic_load_explicit(&m.finished[i],.Acquire)!=shadow.generation {continue}
         voice_shadow_free(m,u32(i))
+    }
+    if m.feeder==nil {mixer_decode(m)}
+    for &f,i in m.feeds {
+        if feed_phase(&f)!=.Done {continue}
+        feed_phase_set(&f,.Free)
+        if !f.stream {m.free_feeds[m.free_feed_count]=u32(i);m.free_feed_count+=1}
     }
     for &slot,i in m.sounds {
         if slot.state!=.Releasing {continue}
@@ -233,10 +290,7 @@ mixer_update :: proc(m:^Mixer) {
             slot.release_sent=command_push(m,{kind=.Sound_Release,index=u32(i)})
             continue
         }
-        if sync.atomic_load_explicit(&m.sound_released[i],.Acquire)!=0 {sound_slot_free(m,&slot)}
-    }
-    for &stream in m.streams {
-        if stream.voice>=0 {stream_fill(m,&stream)}
+        if sync.atomic_load_explicit(&m.sound_released[i],.Acquire)!=0 && !sound_feeds_busy(m,u32(i)) {sound_slot_free(m,&slot)}
     }
 }
 
@@ -287,6 +341,7 @@ commands_apply :: proc "contextless" (m:^Mixer) {
                 voice_begin(m,v,command.start)
             } else {
                 // The slot was stolen: what plays there fades out first.
+                if v.has_next {feed_release(m,&v.next)}
                 v.next=command.start;v.has_next=true
             }
         case .Voice_Stop,.Voice_Pause,.Voice_Volume,.Voice_Pitch,.Voice_Pan,.Voice_Loop,.Voice_Fade,.Voice_Place,.Voice_Lowpass,.Voice_Reverb:

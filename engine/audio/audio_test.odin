@@ -428,14 +428,19 @@ a_source_heard_alone_plays_as_it_is_set_and_follows_its_changes :: proc(t:^testi
     source.sound,source.bus,source.loop,source.pitch=HUM,BUS_MUSIC,true,2
     voice:=play_source(&f.app,{},source)
     testing.expect(t,voice!={} && mixer.bus_count(m)>int(BUS_MUSIC),"it plays in its bus")
-    out:=make([]f32,9600*2,context.temp_allocator) // twice the sound at twice its speed
-    mixer.mixer_render(m,out)
-    mixer.mixer_update(m)
+    // Twice the sound at twice its speed, a frame of the game at a time.
+    render :: proc(m:^mixer.Mixer) {
+        out:=make([]f32,960*2,context.temp_allocator)
+        for _ in 0..<10 {
+            mixer.mixer_render(m,out)
+            mixer.mixer_update(m)
+        }
+    }
+    render(m)
     testing.expect(t,playing(&f.app,voice),"a loop goes on")
     source.loop=false
     source_tune(&f.app,voice,source)
-    mixer.mixer_render(m,out)
-    mixer.mixer_update(m)
+    render(m)
     testing.expect(t,!playing(&f.app,voice),"once it does not loop, it ends")
 }
 

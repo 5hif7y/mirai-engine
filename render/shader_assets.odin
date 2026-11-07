@@ -109,6 +109,7 @@ frame_layout_of :: proc(assets:^Shader_Assets) -> Frame_Layout {
     instance_ids,_:=frame["instance_ids"].(json.Boolean)
     size:=whole(frame["size"])
     core:=size_of(Gpu_Frame)+(NESTED_VIEW_CAPACITY*size_of(Gpu_Nested) if nested else 0)
+    if size==0 && !nested {size=core}
     if size<core || size>65536 {return layout}
     extensions,_:=frame["extensions"].(json.Array)
     for entry in extensions {

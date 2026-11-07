@@ -15,9 +15,11 @@ Shared_Struct :: struct {
     last:string,  // the last field the mirror has: those after it belong to the generation (nested views, extensions); "": all
     guard:string, // a define the struct exists under; "": always
 }
+// The last field of Frame_Data that render.Gpu_Frame mirrors: what a generation adds goes after it.
+FRAME_MIRROR_LAST :: "moved_lights"
 @(private)
 SHARED_STRUCTS :: []Shared_Struct{
-    {slang="Frame_Data",odin="Gpu_Frame",last="moved_lights"},
+    {slang="Frame_Data",odin="Gpu_Frame",last=FRAME_MIRROR_LAST},
     {slang="Nested_View",odin="Gpu_Nested",guard="MIRAI_FRAME_NESTED"},
     {slang="Vertex",odin="Gpu_Vertex"},
     {slang="Thumbnail_Vertex",odin="Gpu_Thumbnail_Vertex"},

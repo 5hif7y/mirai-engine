@@ -78,7 +78,7 @@ World_Target :: enum u8 {
 World_Widget :: struct {
     asset:base.Asset_Id `mirai:"kind=.ui"`, // the interface it shows; the paths of its bindings name components of this entity first
     size:[2]f32 `mirai:"min=0"`, // of its surface, in layout units
-    sizing:ui.World_Sizing,      // Meters: scale is meters per layout unit. Screen: window points per layout unit, at any distance
+    sizing:ui.World_Sizing,      // Meters: scale is meters per layout unit. Screen: window points per layout unit at any distance, times the scale of the screens (UI_Settings.reference)
     scale:f32 `mirai:"min=0"`,   // 0: a centimeter, or a point
     facing:ui.World_Facing,      // Fixed follows the rotation of the entity
     pivot:ui.Anchor,             // the point of the panel that sits at the entity

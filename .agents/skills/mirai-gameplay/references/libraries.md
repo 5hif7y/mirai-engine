@@ -525,7 +525,8 @@ one per local player that has screens or sees a `World_Widget`.
   - `target` `Overlay`: a panel that follows the entity, drawn over the scene. With one player it is
     built in the window's context; with split screen, in that of each local player, placed for
     their camera (a `Billboard` faces that camera and a `Screen` one has its size in the player's
-    part) and drawn only in their view.
+    part) and drawn only in their view. A `Screen` one scales with the screens of its player
+    (`UI_Settings.reference` and `UI_Preferences.scale`), so it keeps their size.
   - `target` `Mesh`: the panel is drawn into a renderer texture of `size` by `pixels` texels per
     unit, which the slot `slot` of the material of the entity's mesh shows as base color, lit and
     covered like the scene, or as emission of `emission` nits; what the entity draws (its mesh, or

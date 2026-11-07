@@ -505,11 +505,19 @@ the_instances_of_an_entity_are_found_after_others_go :: proc(t:^testing.T) {
 widgets_out_of_sight_are_not_built_and_the_nearest_come_first :: proc(t:^testing.T) {
     view:=Player_View{camera={position={0,0,5},forward={0,0,-5},up={0,1,0},fov_y=90,near=0.1,far=100},rect={0,0,1000,1000}}
     widget:=WORLD_WIDGET_DEFAULT
-    _,ahead:=widget_seen(&view,widget,{0,0,0})
-    _,behind:=widget_seen(&view,widget,{0,0,10})
-    _,aside:=widget_seen(&view,widget,{20,0,4})
-    _,edge:=widget_seen(&view,widget,{5.5,0,0}) // its panel, 2 m wide, reaches into the view
+    _,ahead:=widget_seen(&view,widget,{0,0,0},{},1)
+    _,behind:=widget_seen(&view,widget,{0,0,10},{},1)
+    _,aside:=widget_seen(&view,widget,{20,0,4},{},1)
+    _,edge:=widget_seen(&view,widget,{5.5,0,0},{},1) // its panel, 2 m wide, reaches into the view
     testing.expect(t,ahead && !behind && !aside && edge)
+    // A Screen widget keeps the size of the screens: the reference fitted to the view, times the
+    // player's scale; a Meters one does not change.
+    on_screen:=widget
+    on_screen.sizing,on_screen.scale=.Screen,2
+    testing.expect_value(t,widget_unit(&view,on_screen,{},1),f32(2))
+    testing.expect_value(t,widget_unit(&view,on_screen,{reference={2000,1000}},1),f32(1))
+    testing.expect_value(t,widget_unit(&view,on_screen,{reference={2000,1000}},1.5),f32(1.5))
+    testing.expect_value(t,widget_unit(&view,widget,{reference={2000,1000}},1.5),widget.scale)
     app:host.App
     _,mesh:=mesh_seen(&app,&view,core.Entity(7),{0,0,10})
     testing.expect(t,mesh,"a mesh not drawn yet is seen: the frame that draws it says where it is")

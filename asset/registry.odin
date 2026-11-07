@@ -19,7 +19,7 @@ import "mirai:std/serial"
 REGISTRY_HEAD :: 4096
 REGISTRY_MAX_DEPENDENCIES :: 1<<20
 REGISTRY_CACHE_MAGIC :: u32('M')|u32('R')<<8|u32('E')<<16|u32('G')<<24
-REGISTRY_CACHE_VERSION :: 3
+REGISTRY_CACHE_VERSION :: 4 // of its layout; a cache or index of another one, or of another container VERSION, is not read
 // The packed index of a folder of cooked assets, inside it: what a scan of
 // the folder would find, written by whoever cooked it. registry_load reads it
 // instead of looking at the files.
@@ -778,6 +778,7 @@ registry_save :: proc(r:^Registry,path:string) -> bool {
     }
     serial.write_u32(&w,REGISTRY_CACHE_MAGIC)
     serial.write_u32(&w,REGISTRY_CACHE_VERSION)
+    serial.write_u32(&w,VERSION)
     serial.write_varint(&w,u64(count))
     for &file in r.files {
         if _,held:=registry_memory_find(r,file.path);held {continue}
@@ -836,7 +837,9 @@ registry_cache_read :: proc(path:string,files:^[dynamic]Registry_File,dependenci
     if error!=.None {return error==.Not_Found?.Not_Found:.IO}
     defer delete(data,allocator)
     r:=serial.reader_init(data)
-    ok:=serial.read_u32(&r)==REGISTRY_CACHE_MAGIC && serial.read_u32(&r)==REGISTRY_CACHE_VERSION
+    // What a scan saw depends on how this build reads a header: a cache of another layout or
+    // container version, as an older build writes it, is read again from the files.
+    ok:=serial.read_u32(&r)==REGISTRY_CACHE_MAGIC && serial.read_u32(&r)==REGISTRY_CACHE_VERSION && serial.read_u32(&r)==VERSION
     count:=serial.read_count(&r,4)
     for _ in 0..<count {
         if !ok {break}

@@ -238,5 +238,5 @@ api_asset_stale :: proc(a:^host.Assets,id:base.Asset_Id) -> string {
     file:asset.Asset
     if asset.asset_take(&file,data,context.temp_allocator)!=.None {return ""}
     defer asset.asset_close(&file)
-    return asset.version_message(&file,&a.types,path,context.temp_allocator)
+    return asset.version_message(&file,&a.types,path,allocator=context.temp_allocator)
 }

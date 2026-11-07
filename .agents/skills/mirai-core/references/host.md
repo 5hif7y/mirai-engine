@@ -473,10 +473,11 @@ row.
 - **An `.anim` is compressed once per input** (`host/content_animation.odin`).
   `App_Desc.animation_cache` (the editor and the player pass `project.ANIMATION_CACHE` of the
   project) keeps the compression as the cooked document a shipped game carries, named by the asset
-  and a hash of the `.anim`, the skeletons its clips name, `asset.ANIMATION_VERSION`,
-  `anim.COMPRESS_VERSION` and the config. A load takes it only when it is whole and of that asset
-  with the clips, tracks and markers of the `.anim`; else it compresses and writes it, removing the
-  other entries of the asset. Authoring reads the source `.anim`, never the cache.
+  and a hash of the `.anim`, the skeletons its clips name, the container `asset.VERSION`,
+  `asset.ANIMATION_VERSION`, `anim.COMPRESS_VERSION` and the config. A load takes it only when it
+  is whole and of that asset with the clips, tracks and markers of the `.anim` (by name, place,
+  root and skeleton); else it compresses and writes it, removing the other entries of the asset.
+  Authoring reads the source `.anim`, never the cache.
 - **A compression runs in a job** with two workers or more, at once otherwise: the main thread
   reads the `.anim` and its skeletons, the job builds the library, and the main thread takes it and
   writes the cache at the start of the frame after the job ended (`app_content_adopt` in

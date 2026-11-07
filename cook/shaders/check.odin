@@ -578,9 +578,9 @@ program_check :: proc(options:Check_Options,allocator:=context.allocator) -> (re
     // The programs as a generation stages them, with this one as the check has it.
     files:Sources
     sources_init(&files,context.temp_allocator)
-    staged:=copy_sources(&files,path_join(options.root,"shaders/materials",allocator=context.temp_allocator),path_join(copied,"builtin",allocator=context.temp_allocator))
-    if options.project!="" {staged&&=copy_sources(&files,path_join(options.project,"shaders",allocator=context.temp_allocator),path_join(copied,"project",allocator=context.temp_allocator))}
-    for source in options.sources {staged&&=copy_sources(&files,path_clean(source.folder,context.temp_allocator),path_join(copied,"plugins",source.name,allocator=context.temp_allocator))}
+    staged:=copy_sources(&files,path_join(options.root,"shaders/materials",allocator=context.temp_allocator),path_join(copied,"builtin",allocator=context.temp_allocator))==""
+    if options.project!="" {staged&&=copy_sources(&files,path_join(options.project,"shaders",allocator=context.temp_allocator),path_join(copied,"project",allocator=context.temp_allocator))==""}
+    for source in options.sources {staged&&=copy_sources(&files,path_clean(source.folder,context.temp_allocator),path_join(copied,"plugins",source.name,allocator=context.temp_allocator))==""}
     for folder in ([]string{"builtin","project"}) {os.make_directory_all(path_join(copied,folder,allocator=context.temp_allocator))}
     os.make_directory_all(path_parent(copy_path))
     if !staged || !write_file(copy_path,transmute([]u8)text) || !write_file(path_join(include,SCHEMA_INCLUDE,allocator=context.temp_allocator),transmute([]u8)material_schema(context.temp_allocator)) {

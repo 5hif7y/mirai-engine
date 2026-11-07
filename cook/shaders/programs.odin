@@ -600,7 +600,7 @@ program_loader :: proc(b:^strings.Builder,name:string,layout:Layout) {
 // Copies program sources with the bytes the repository has: a generation is
 // the same on every platform.
 @(private)
-copy_sources :: proc(files:^Sources,source,target:string) -> bool {
+copy_sources :: proc(files:^Sources,source,target:string) -> (failed:string) {
     for path in sources_below(files,source) {
         relative,_:=path_relative(path,source)
         destination:=path_join(target,relative,allocator=context.temp_allocator)
@@ -608,11 +608,11 @@ copy_sources :: proc(files:^Sources,source,target:string) -> bool {
         data:=sources_file(files,path).data
         if !strings.has_suffix(path,".slang") {
             err:os.Error
-            if data,err=os.read_entire_file(path,context.temp_allocator);err!=nil {return false}
+            if data,err=os.read_entire_file(path,context.temp_allocator);err!=nil {return fmt.tprintf("%s could not be read (%v)",path,err)}
         }
-        if !write_file(destination,data) {return false}
+        if err:=os.write_entire_file(destination,data);err!=nil {return fmt.tprintf("%s could not be written (%v)",destination,err)}
     }
-    return true
+    return ""
 }
 
 // The includes a generation writes for the stages that evaluate programs:
@@ -996,7 +996,7 @@ programs_generate :: proc(runner:^Runner,root,project,output,slangc,version,cach
     }
     os.make_directory_all(include)
     if os.exists(copied) {os.remove_all(copied)}
-    if !copy_sources(files,materials,path_join(copied,"builtin",allocator=context.temp_allocator)) {return {},strings.clone("could not copy the programs of the engine",allocator)}
+    if failed:=copy_sources(files,materials,path_join(copied,"builtin",allocator=context.temp_allocator));failed!="" {return {},fmt.aprintf("could not copy the programs of the engine: %s",failed,allocator=allocator)}
     paths:=make([dynamic]string,context.temp_allocator)
     append(&paths,..sources_in(files,materials,".slang",context.temp_allocator))
     hash:Sha256
@@ -1005,7 +1005,7 @@ programs_generate :: proc(runner:^Runner,root,project,output,slangc,version,cach
     // Every shared source contributes to the identity of the catalog.
     for path in sources_in(files,shared,".slang",context.temp_allocator) {sha_bytes(&hash,sources_file(files,path).data)}
     for entry in folders {
-        if !copy_sources(files,entry.folder,path_join(copied,entry.label,allocator=context.temp_allocator)) {return {},fmt.aprintf("could not copy the programs of %s",entry.folder,allocator=allocator)}
+        if failed:=copy_sources(files,entry.folder,path_join(copied,entry.label,allocator=context.temp_allocator));failed!="" {return {},fmt.aprintf("could not copy the programs of %s: %s",entry.folder,failed,allocator=allocator)}
         for path in sources_below(files,entry.folder) {
             if strings.has_suffix(path,".slang") {append(&paths,path)}
             relative,_:=path_relative(path,entry.folder)

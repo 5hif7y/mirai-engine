@@ -96,14 +96,13 @@ Input and layout:
 - F1 releases keyboard and mouse without pausing. A click in the scene gives them back to the game
   and does not reach it; with several local players, it chooses that of the view where it lands
   (`inp.focus`).
-- Play minimizes the left panel and hides Details and the bottom panel. Tab opens AI and focuses
-  the message; with AI open the game continues with neutral input and the relative mouse is
-  released.
-- A game that binds Tab (`input_map_takes`) gets it while it has the input, as a shipped game
-  would; its chat opens with Tab after F1.
+- Play minimizes the left panel and hides Details and the bottom panel. The chat opens only in
+  `Paused` (Tab, or the AI action), where clicks in the scene select the paused entities it refers
+  to; resuming closes it and gives the input back.
 - With the Play running the shortcuts belong to the game except F5 and Shift+F5 (stop), F6
-  (pause), F1, which never reaches it, and Tab unless the game binds it; `Esc` asks for Stop. The viewport receives no edit
-  gestures (`hovered` false). Stop restores the layout and the mouse from before the Play.
+  (pause) and F1, which never reaches it; Tab is the game's. `Esc` asks for Stop. The viewport
+  receives no edit gestures (`hovered` false). Stop restores the layout and the mouse from before
+  the Play.
 - `Paused` keeps the world and uses the editor camera; `play.step` runs exactly the ticks it
   asks for, and its network continues between steps
   ([network pause](../../mirai-networking/references/multiplayer.md#the-tick)). Outside the pause

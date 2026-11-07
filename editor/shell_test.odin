@@ -239,6 +239,10 @@ the_editor_shell_keeps_the_compact_create_and_details_panels :: proc(t:^testing.
     app.platform=p
     session.headless=false
     layout_before_play:=g.layout
+    // The chat opens only in the pause.
+    play_chat_set(&session,true)
+    testing.expect(t,!session.play_chat_open)
+    session.mode=.Paused
     play_chat_set(&session,true)
     for size in ([2][2]f32{{1440,900},{800,420}}) {
         for _ in 0..<3 {
@@ -249,7 +253,8 @@ the_editor_shell_keeps_the_compact_create_and_details_panels :: proc(t:^testing.
         _,right_shown:=ui.widget_rect(&ctx,shell_id(&g,"right"))
         _,editor_tab:=ui.widget_rect(&ctx,shell_id(&g,"library_tab",int(Library_Tab.Editor)+1))
         testing.expect(t,left_shown && left.y+left.h<=size.y-16)
-        testing.expect(t,!right_shown && !editor_tab && g.rects.bottom.h==0)
+        // In the pause Details stays beside the chat, for the entities it refers to.
+        testing.expect(t,right_shown && !editor_tab && g.rects.bottom.h==0)
         ui.id_push(&ctx,shell_id(&g,"left"))
         ui.id_push(&ctx,shell_id(&g,"ai_chat"))
         prompt:=ui.id(&ctx,"prompt")
@@ -262,6 +267,10 @@ the_editor_shell_keeps_the_compact_create_and_details_panels :: proc(t:^testing.
     _,chat_hidden:=ui.widget_rect(&ctx,shell_id(&g,"left"))
     _,launcher:=ui.widget_rect(&ctx,shell_id(&g,"library_reopen_button"))
     testing.expect(t,!chat_hidden && launcher)
+    session.mode=.Play
+    shell_test_frame(&session,{size={1440,900},pointer_absent=true})
+    _,launcher=ui.widget_rect(&ctx,shell_id(&g,"library_reopen_button"))
+    testing.expect(t,!launcher,"while the game plays the chat has no launcher")
     g.layout=layout_before_play
     world.graphics.show_fps=true
     labels:=[3]string{"Paint","Terrain","Placement"}

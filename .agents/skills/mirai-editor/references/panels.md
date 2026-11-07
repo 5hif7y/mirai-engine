@@ -43,11 +43,12 @@ corner lands on Close. The contextual toolbar, below:
 
 **Shared left panel:** tabs Editor, Content Browser (the startup one), World ([world](#world)) and
 AI. It folds like Tab in Edit; with the chat folded, the AI action of View shows it again, and in
-Play it stays minimized ([Play](editor.md#play)). **Hierarchy** shows the outliner or, with an asset
-document in front, the hierarchy its plugin provides (`Asset_Document_Provider.hierarchy`). Each
-document type has its tabs (`DOCUMENT_LIBRARY_TABS`): a scene all, a prefab all but World, an asset
-document Content, AI and Git (and Hierarchy if its plugin builds it). If the chosen one is not there, the first that is shown (`library_tab_shown`) and the choice
-is kept for the other documents.
+Play it stays minimized; the chat opens only in the pause ([Play](editor.md#play)). **Hierarchy**
+shows the outliner or, with an asset document in front, the hierarchy its plugin provides
+(`Asset_Document_Provider.hierarchy`). Each document type has its tabs (`DOCUMENT_LIBRARY_TABS`): a
+scene all, a prefab all but World, an asset document Content, AI and Git (and Hierarchy if its
+plugin builds it). If the chosen one is not there, the first that is shown (`library_tab_shown`) and
+the choice is kept for the other documents.
 
 **Details** (right panel) is seen with a selection, or if the walkthrough of a review shows a
 deleted entity ([review](ai-review.md#finish-revert-and-retry)), and in a wide enough window. An

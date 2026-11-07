@@ -365,15 +365,6 @@ input_map_unbind :: proc "contextless" (m:^Input_Map,action:Action) {
     m.binding_count=kept
 }
 
-// Whether a binding of the map takes a code, as its own or in its chord.
-input_map_takes :: proc "contextless" (m:^Input_Map,code:Input_Code) -> bool {
-    for &binding in m.bindings[:min(m.binding_count,BINDING_CAPACITY)] {
-        for c in binding.codes[:min(binding.count,len(binding.codes))] {if c==code {return true}}
-        for c in binding.chord[:min(binding.chord_count,CHORD_CAPACITY)] {if c==code {return true}}
-    }
-    return false
-}
-
 // The values of the actions of the map are below it.
 @(private)
 action_end :: #force_inline proc "contextless" (m:^Input_Map) -> int {

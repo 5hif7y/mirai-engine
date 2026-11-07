@@ -492,9 +492,7 @@ advance :: proc(s:^Session) -> bool {
     play_input_update(s)
     camera_preview_frame(s)
     player_processes_input(s)
-    tab_to_game:=play_tab_to_game(s)
-    app.game_input_excluded={}
-    if run_find(s,0)!=nil {app.game_input_excluded={.F1} if tab_to_game else {.F1,.Tab}}
+    app.game_input_excluded=run_find(s,0)!=nil?{.F1}:{}
     editor_input:=app.ui_input
     if (s.mode==.Play || simulating(s)) && app.game_input_blocked {
         app.ui_input={size=editor_input.size,scale=editor_input.scale,safe=editor_input.safe,dt=editor_input.dt,pointer=editor_input.pointer,pointer_absent=true,view=editor_input.view}
@@ -503,7 +501,7 @@ advance :: proc(s:^Session) -> bool {
     game_frame(s)
     app.ui_input=editor_input
     // The Tab of the game does not move the focus of the editor's panels.
-    if tab_to_game {
+    if s.mode==.Play {
         app.ui_input.keys_down-={.Tab}
         app.ui_input.keys_pressed-={.Tab}
         app.ui_input.keys_repeated-={.Tab}

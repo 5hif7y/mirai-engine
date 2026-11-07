@@ -7,16 +7,19 @@
 //! parameter distance {"default":2,"min":0,"max":100,"group":"Assembly"}
 //! parameter turn {"default":3.1415927,"min":-31.4159,"max":31.4159,"group":"Assembly"}
 //! parameter reach {"default":3,"min":0,"max":200,"group":"Assembly"}
+//! parameter color {"default":[0.8,0.8,0.8],"min":0,"max":1,"color":true}
+//! parameter roughness {"default":0.6,"min":0.045,"max":1}
 // The pieces of a mesh fly into place as progress goes from 0 to 1, as a
 // piece of a building forms: each from distance along direction, turning by
 // turn around an axis of its own, one after another by its number. A vertex
 // takes the number of its piece from uv1.x and the pivot of its piece from
 // its color, a place in the bounds of the mesh from their low corner (0) to
 // their high one (1), as Pivot Painter bakes it. reach covers distance and
-// what the turn moves the farthest vertex from its pivot. The surface is that
-// of the material.
+// what the turn moves the farthest vertex from its pivot. The surface is a
+// plain one of color and roughness: a program of a project moves its pieces
+// the same way over the surface it evaluates.
 namespace Pieces {
-struct Parameters {float3 direction;float progress;float pieces;float spread;float distance;float turn;float reach;};
+struct Parameters {float3 direction;float progress;float pieces;float spread;float distance;float turn;float reach;float3 color;float roughness;};
 // v turned by angle around the unit axis k (Rodrigues).
 float3 turned(float3 v, float3 k, float angle) {
     float c = cos(angle), s = sin(angle);
@@ -40,6 +43,9 @@ Mirai_Vertex vertex(Mirai_Vertex_Context ctx, Parameters p) {
     return v;
 }
 Mirai_Surface evaluate(Mirai_Surface_Context ctx, Parameters p) {
-    return mirai_surface_default(ctx);
+    Mirai_Surface s = mirai_surface_default(ctx);
+    s.base_color = p.color;
+    s.roughness = p.roughness;
+    return s;
 }
 }

@@ -868,7 +868,7 @@ material_program_shows_on_what_the_camera_sees :: proc(t: ^testing.T) {
 	testing.expectf(t, rhi.device_validation_errors(f.device) == 0, "validation: %s", rhi.device_validation_message(f.device))
 }
 
-// The parameters of the Pieces program that send its one piece distance
+// The parameters of the Pieces program that send its one red piece distance
 // metres along +X at progress 0, without turning it.
 @(private = "file")
 pieces_material :: proc(t: ^testing.T, pieces: ^Program, progress: f64) -> Material_Desc {
@@ -877,7 +877,7 @@ pieces_material :: proc(t: ^testing.T, pieces: ^Program, progress: f64) -> Mater
 	m.program_id = pieces.id
 	m.custom_params = program_defaults(pieces)
 	Value :: struct {name: string, value: [4]f64}
-	for v in ([]Value{{"progress", {progress, 0, 0, 0}}, {"spread", {}}, {"turn", {}}, {"direction", {1, 0, 0, 0}}, {"distance", {3, 0, 0, 0}}, {"reach", {3, 0, 0, 0}}}) {
+	for v in ([]Value{{"progress", {progress, 0, 0, 0}}, {"spread", {}}, {"turn", {}}, {"direction", {1, 0, 0, 0}}, {"distance", {3, 0, 0, 0}}, {"reach", {3, 0, 0, 0}}, {"color", {1, 0, 0, 0}}}) {
 		testing.expectf(t, program_parameter_set(&m.custom_params, program_parameter(pieces, v.name), v.value), "Pieces takes %s", v.name)
 	}
 	return m
@@ -919,8 +919,10 @@ material_program_moves_the_vertices_the_camera_the_rays_and_the_motion_see :: pr
 			there, away := Vec3{3, 1, 0}, Vec3{0, 1, 0}
 			if progress == 1 {there, away = away, there}
 			frames(t, r, above, 2)
-			testing.expectf(t, near_bytes(read_albedo(t, &f, above, there), {255, 0, 0, 0}, 3), "%v progress %v: the camera sees the piece where its program put it", provider, progress)
-			testing.expectf(t, near_bytes(read_albedo(t, &f, above, away), {255, 255, 255, 0}, 3), "%v progress %v: and the floor where it is not", provider, progress)
+			seen, left := read_albedo(t, &f, above, there), read_albedo(t, &f, above, away)
+			// The pivot in its vertex color (grey) tints its red.
+			testing.expectf(t, seen.r > 100 && seen.g < 30 && seen.b < 30, "%v progress %v: the camera sees the piece where its program put it: %v", provider, progress, seen)
+			testing.expectf(t, near_bytes(left, {255, 255, 255, 0}, 3), "%v progress %v: and the floor where it is not: %v", provider, progress, left)
 			shaded := screen_color(t, &f, side, {there.x, 0, 0})
 			lit := screen_color(t, &f, side, {away.x, 0, 0})
 			testing.expectf(t, lit.g > shaded.g + 40, "%v progress %v: the shadow falls under the moved piece: %v vs %v", provider, progress, lit, shaded)
@@ -934,7 +936,8 @@ material_program_moves_the_vertices_the_camera_the_rays_and_the_motion_see :: pr
 	materials_update(r, {pieces_material(t, pieces, 0.5)}, {1})
 	frames(t, r, above, 1)
 	now := Vec3{3 * 0.125, 1, 0}
-	testing.expectf(t, near_bytes(read_albedo(t, &f, above, now), {255, 0, 0, 0}, 3), "the piece is half way: %v", read_albedo(t, &f, above, now))
+	half := read_albedo(t, &f, above, now)
+	testing.expectf(t, half.r > 100 && half.g < 30 && half.b < 30, "the piece is half way: %v", half)
 	moving := target_at(t, &f, r.targets.motion, above, now)
 	// From 3 to 0.375 m along X, 5 m under a camera of 60 degrees: 0.45 of the image.
 	testing.expectf(t, moving.x > 0.3 && moving.x < 0.6 && abs(moving.y) < 0.02, "the pixel comes from where the piece was: %v", moving)
@@ -2123,3 +2126,4 @@ material_mirrored_uvs_share_their_bitangent :: proc(t:^testing.T) {
     testing.expectf(t,abs(left.x-0.5)<0.03 && abs(mirrored.x+0.5)<0.03 && abs(left.z)<0.03 && abs(mirrored.z)<0.03,"+X of the map follows u: %v and %v",left.xyz,mirrored.xyz)
     testing.expectf(t,rhi.device_validation_errors(f.device)==0,"validation: %s",rhi.device_validation_message(f.device))
 }
+

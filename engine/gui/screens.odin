@@ -160,7 +160,7 @@ plan_widgets :: proc(gui:^Gui,app:^host.App,world:core.World_Ref,widgets:core.Re
             continue
         }
         for p in first..=last {
-            distance,seen:=widget_seen(&gui.views[p],widget,position)
+            distance,seen:=widget_seen(&gui.views[p],widget,position,gui.settings,gui.preferences.scale)
             if seen {
                 append(&gui.candidates,Widget_Candidate{entity=e,row=row,placed=placed,player=p,distance=distance})
             } else if instance:=instance_find(gui,e,instance_slot(true,p));instance!=nil {
@@ -207,7 +207,7 @@ plan_widgets :: proc(gui:^Gui,app:^host.App,world:core.World_Ref,widgets:core.Re
             mesh=mesh,variant=ui.style_variant(base.text_get(widget.variant[:])),
             panel={
                 position=transform.position,rotation=transform.rotation,size=widget.size,facing=facing,sizing=widget.sizing,
-                unit=widget.scale,pivot=widget.pivot,density=density,depth_test=widget.depth_test,passive=widget.passive,offscreen=widget.target==.Mesh,
+                unit=widget_unit(&gui.views[c.player],widget,gui.settings,gui.preferences.scale) if widget.target==.Overlay else widget.scale,pivot=widget.pivot,density=density,depth_test=widget.depth_test,passive=widget.passive,offscreen=widget.target==.Mesh,
             },
         })
     }

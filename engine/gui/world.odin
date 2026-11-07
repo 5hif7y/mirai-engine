@@ -61,13 +61,21 @@ views_update :: proc(gui:^Gui,app:^host.App,players,focus:int) {
 // which grows with the distance for a Screen one. One on a mesh is seen with
 // its mesh (mesh_seen).
 @(private)
-widget_seen :: proc(view:^Player_View,widget:World_Widget,position:[3]f32) -> (distance:f32,seen:bool) {
+widget_seen :: proc(view:^Player_View,widget:World_Widget,position:[3]f32,settings:UI_Settings,scale:f32) -> (distance:f32,seen:bool) {
     extent:=linalg.length(widget.size)
+    return sphere_seen(view,position,extent*widget_unit(view,widget,settings,scale),widget.sizing==.Screen)
+}
+
+// What a layout unit of a widget is: meters, or window points for a Screen one, which scales with
+// the screens of its player (UI_Settings.reference fitted to the part of the view, times the
+// player's scale) so it keeps their size.
+@(private)
+widget_unit :: proc "contextless" (view:^Player_View,widget:World_Widget,settings:UI_Settings,scale:f32) -> f32 {
     switch widget.sizing {
-    case .Meters: return sphere_seen(view,position,extent*(widget.scale>0?widget.scale:0.01),false)
-    case .Screen: return sphere_seen(view,position,extent*(widget.scale>0?widget.scale:1),true)
+    case .Meters: return widget.scale>0?widget.scale:0.01
+    case .Screen: return (widget.scale>0?widget.scale:1)*surface_scale(view.rect.zw,settings,scale)
     }
-    return
+    return 1
 }
 
 // Whether the camera of a view sees a sphere, and how far its center is. A

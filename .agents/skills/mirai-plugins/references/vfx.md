@@ -30,7 +30,7 @@ version asks to write it again). An effect is like a material: entities name it
     without light: nits, or what the exposed image shows, the default), size and color curves over
     life, how it is drawn (`render`, `blend`, `lit`, `sort`, `material`, `mesh`) and sub-UV
     (`flipbook`, `flipbook_speed`);
-  - placement of `Mesh` particles (Niagara's mesh facing): `facing` (`Particle_Facing`),
+  - placement of `Mesh` particles: `facing` (`Particle_Facing`),
     `spin_axis`, `mesh_rotation` (a quaternion x y z w) and `mesh_scale` (per axis, times `size`).
     A vertex `v` goes to `position + W(F · R_axis(rotation) · Q_mesh · (v ⊙ mesh_scale · size))`:
     `W` is the sim-to-world vector transform (`local_space`), `rotation` already holds `spin · age`,

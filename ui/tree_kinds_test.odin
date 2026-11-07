@@ -317,6 +317,9 @@ paths_reach_components_through_entities_and_copy_only_what_is_read :: proc(t:^te
     tree_node(&tree,root,{kind=.Text,name="clock",text="{time:mm:ss}",fields={{"time","Test_Clock.seconds"},{},{},{}}})
     party:=tree_node(&tree,root,{kind=.List,name="party",bind_items="Test_Hero.party"})
     tree_node(&tree,party,{kind=.Text,name="member",text="{health}/{armor}",fields={{"health","Test_Health.health"},{"armor","Test_Health.armor"},{},{}}})
+    // A number names an element of an array: an entity, through it a component, or a value.
+    tree_node(&tree,root,{kind=.Progress,name="second",bind_value="Test_Hero.party.1.Test_Health.health"})
+    tree_node(&tree,root,{kind=.Progress,name="note",bind_value="Test_Hero.notes.511"})
     instance:Tree_Instance
     testing.expect(t,tree_instance_init(&instance,&tree,host))
     defer tree_instance_destroy(&instance)
@@ -343,15 +346,29 @@ paths_reach_components_through_entities_and_copy_only_what_is_read :: proc(t:^te
     testing.expect_value(t,member(&instance,values,items,0),10.0)
     testing.expect_value(t,member(&instance,values,items,1),30.0)
     testing.expect_value(t,member(&instance,values,items,2),0.0)
-    // Nothing moved: nothing is copied. The notes change: nothing either.
+    testing.expect_value(t,bound_number(values,instance.bounds[6].value),30.0)
+    testing.expect_value(t,bound_number(values,instance.bounds[7].value),0.0)
+    // Nothing moved: nothing is copied. A note no node reads changes: nothing either.
     w.players.notes[0]=7
     changed,_=tree_values_refresh(&instance,host,1)
     testing.expect(t,!changed,"a field nothing reads changes nothing")
+    w.players.notes[511]=9
+    changed,_=tree_values_refresh(&instance,host,1)
+    testing.expect(t,changed && bound_number(values,instance.bounds[7].value)==9,"the element a number names is read")
     // Another target: its health, though no stamp moved.
     w.players.target=2
     changed,_=tree_values_refresh(&instance,host,1)
     testing.expect(t,changed)
     testing.expect_value(t,bound_number(values,instance.bounds[2].value),10.0)
+    // An element past the end of its array is not found.
+    bad:Widget_Tree
+    testing.expect(t,tree_init(&bad))
+    defer tree_destroy(&bad)
+    tree_node(&bad,-1,{kind=.Progress,name="past",bind_value="Test_Hero.party.3.Test_Health.health"})
+    past:Tree_Instance
+    tree_instance_init(&past,&bad,host)
+    defer tree_instance_destroy(&past)
+    testing.expect(t,past.failure.node==0,"an index past the array fails like a missing field")
     // A root without its source is not found.
     _,missing=tree_values_refresh(&instance,host,9)
     testing.expect_value(t,missing,base.name_hash("Test_Hero"))

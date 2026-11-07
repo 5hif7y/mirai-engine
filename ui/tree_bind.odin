@@ -11,8 +11,9 @@ import "mirai:std/serial"
 
 // How the nodes of a tree read the data of the game. A binding is a path: it
 // names a source first (a component of the entity the tree is built for, or
-// a storage), dots go into the structs it holds, and past a field of type
-// Entity the next name is a component of that entity
+// a storage), dots go into the structs it holds, a number after an array is
+// its element ("Hotbar.slots.2.count"), and past a field of type Entity the
+// next name is a component of that entity
 // ("Player_Stats.target.Nameplate_Data.health"). Inside a List the paths of
 // the node it holds start at its element: a field of it, or for an array of
 // entities a component of the element. A List that names a component alone
@@ -237,11 +238,23 @@ bind_resolve :: proc(instance:^Tree_Instance,scope:Bind_Scope,path:string) -> (r
         case .Struct:
             field:=serial.schema_field(schema,s.type,hash)
             if field==nil {return}
-            t:=serial.schema_type(schema,field.type)
+            type:=field.type
+            t:=serial.schema_type(schema,type)
             s.offset+=field.offset
-            if rest=="" {return s.region,s.offset,field.type,true}
+            // A number after an array names its element: "build.2.key".
+            for t!=nil && t.kind==.Array && rest!="" {
+                segment,after:=rest,""
+                if dot:=strings.index_byte(rest,'.');dot>=0 {segment,after=rest[:dot],rest[dot+1:]}
+                element,parsed:=strconv.parse_uint(segment,10)
+                if !parsed {break}
+                e:=serial.schema_type(schema,t.elem)
+                if e==nil || element>=uint(t.count) {return}
+                s.offset+=u32(element)*e.size
+                type,t,rest=t.elem,e,after
+            }
+            if rest=="" {return s.region,s.offset,type,true}
             #partial switch t.kind {
-            case .Struct: s.type=field.type
+            case .Struct: s.type=type
             case .Entity: s.kind=.Entity
             case:         return
             }

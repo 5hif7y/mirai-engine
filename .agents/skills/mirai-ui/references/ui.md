@@ -395,8 +395,9 @@ The node types are in `Node_Kind` (`tree.odin`) and the events in `Tree_Event`.
     input and Escape emits `Closed` so the game hides it. `Radial` gives the focus to the node in
     the direction of the left stick (`Input.aim`), of the arrows or of the pointer.
 - **Paths.** The `.ui` says what it reads: a binding is a path that starts at a component of the
-  interface entity or at a world storage and follows its fields (`Inventory.equipped.icon`). An
-  `Entity` field leads to the component that the next segment names (`Hero.target.Health.value`).
+  interface entity or at a world storage and follows its fields (`Inventory.equipped.icon`); a
+  number after an array names its element (`Hotbar.slots.2.count`). An `Entity` field leads to
+  the component that the next segment names (`Hero.target.Health.value`).
   Inside a `List` the path starts at the element; in a widget of another `.ui`, one with `@` starts
   at the instance's `data`.
   - `ui` does not know the world: whoever creates the instance gives it a `Bind_Host` with the type

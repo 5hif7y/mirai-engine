@@ -450,6 +450,7 @@ emitter_desc :: proc(m:^effect.Particle_Info,app:^host.App,id:u64) -> (desc:Emit
         attractor=m.attractor,attractor_strength=m.attractor_strength,
         collision=m.collision,bounce=m.bounce,friction=m.friction,collision_life=m.collision_life,
         render=m.render,blend=m.blend,material=material,mesh=mesh,blended=blended,
+        facing=m.facing,spin_axis=m.spin_axis,mesh_rotation=m.mesh_rotation,mesh_scale=m.mesh_scale,
         stretch=m.stretch,soft=m.soft,intensity=m.intensity,flipbook=m.flipbook,flipbook_speed=m.flipbook_speed,
         size_curve=m.size_over_life,color_curve=m.color_over_life,
     },ready

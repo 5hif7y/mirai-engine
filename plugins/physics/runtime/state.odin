@@ -118,6 +118,7 @@ Link :: struct {
     follow:sim.Transform,
     follow_linear:[3]f32,
     refused:bool,        // the simulation did not accept the shape: not asked again until the collider changes
+    height_asked:f32,    // character: the height of the capsule its Character_Move asked in the last step
 }
 
 // Who holds a body as kinematic, heading for a pose in every step: a

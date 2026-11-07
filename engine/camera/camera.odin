@@ -39,8 +39,11 @@ Camera_Follow :: struct {
     offset:[3]f32 `mirai:"unit=m"`, // from the target to the pivot, in the axes of the vertical of the target: world axes without one
     distance:f32 `mirai:"min=0,unit=m"`, // Orbit: from the pivot to the camera
     half_life:f32 `mirai:"min=0,unit=s"`, // time the pivot takes to close half of its distance to the target; 0: rigid
+    up_half_life:f32 `mirai:"min=0,unit=s"`, // the same along the up of the target; 0: half_life
     probe_radius:f32 `mirai:"min=0,unit=m"`, // Orbit: of the sphere kept clear from the pivot to the camera; 0: nothing pulls it in
     shoulder:[2]f32 `mirai:"unit=m"`, // Orbit: right and up of the camera, from the pivot to where its arm starts
+    look_up_offset:[3]f32 `mirai:"unit=m"`,   // Orbit: right, up and back of the camera added to where its arm starts when it looks straight up, in proportion to the pitch
+    look_down_offset:[3]f32 `mirai:"unit=m"`, // Orbit: the same looking straight down
     dead_zone:[3]f32 `mirai:"min=0,unit=m,section=Framing"`, // half the box, along the right, up and back of the camera, the target moves in before the pivot follows
     look_ahead:f32 `mirai:"min=0,unit=s"`, // the pivot leads the target by how far it goes across the ground in this time
     look_ahead_max:f32 `mirai:"min=0,unit=m"`, // 0: no limit
@@ -76,6 +79,7 @@ Camera_Follow_State :: struct {
     ready:bool,
     written:core.Transform, // what the last frame left in the transform
     wrote:bool,
+    shakes:[CAMERA_SHAKES]Shake_Playing, // the sequence shakes it plays over its view (camera_shake)
 }
 
 CAMERA_FOLLOW_DEFAULT :: Camera_Follow{
@@ -275,8 +279,10 @@ camera_follow :: proc(
     seats:core.Read(input.Seat),moves:core.Read(input.Move_Input),shown:core.Ref(Cameras),
     seat_state:core.Ref(input.Seats),look_actions:input.Frame_Input_Of(input.Look_Action),queries:core.Ref(core.World_Queries),look_input:^Camera_Input,changes:^Camera_Changes,
     views:core.Ref(Camera_Views),verticals:core.Read(core.Vertical),frame:core.Frame_Time,time:core.Time,problems:^core.Problems,
+    shakes:^Camera_Shakes,
 ) {
     for change in core.take(&changes.queue) {mode_take(follows,cameras,worlds,change,problems)}
+    shakes_take(follows,shakes,problems)
     for item in shown.overrides {
         if !item.active || item.fov<=0 {continue}
         if camera:=core.get(cameras,item.camera);camera!=nil && (camera.fov!=item.fov || camera.near!=item.near) {camera.fov,camera.near=item.fov,item.near}
@@ -366,6 +372,7 @@ mode_take :: proc(follows:^core.Table(Camera_Follow),cameras:^core.Table(render.
     follow.state.blend=change.blend
     follow.state.written=state.written
     follow.state.wrote=state.wrote
+    follow.state.shakes=state.shakes // a shake goes on through a change of mode
     if follow.mode==.Orbit && !follow.aim && (follow.min_pitch!=follow.max_pitch || follow.min_pitch==0) {
         follow.state.handoff=looked
         follow.state.handing=true
@@ -441,6 +448,15 @@ dead_zone_follow :: proc "contextless" (center,goal,zone:[3]f32,rotation:mm.Quat
     return moved
 }
 
+// What the pitch adds to where the arm of an Orbit starts, in the axes of the
+// camera: look_up_offset looking straight up (the camera below the pivot,
+// negative pitch), look_down_offset straight down, nothing level.
+look_offset :: proc "contextless" (follow:Camera_Follow,pitch:f32) -> [3]f32 {
+    share:f32=pitch/(0.5*math.PI)
+    if !(abs(share)<=1) {share=share>0?1:(share<0?-1:0)}
+    return share<0?follow.look_up_offset*(-share):follow.look_down_offset*share
+}
+
 @(private)
 arm_tune :: proc "contextless" (arm:^Spring_Arm,follow:Camera_Follow) {
     arm.probe_radius,arm.margin=follow.probe_radius,follow.arm_margin
@@ -488,7 +504,7 @@ follow_one :: proc(
     facing:=row.rotation
     if own,found:=core.get(worlds,e);found {facing=own.rotation}
     s.zone=dead_zone_follow(s.zone,goal,follow.dead_zone,facing)
-    pivot:=follow_update(&s.pivot,s.zone,follow.half_life,dt)
+    pivot:=follow_update_split(&s.pivot,s.zone,follow.half_life,follow.up_half_life,up,dt)
     world_position:[3]f32
     world_rotation:mm.Quat
     look,aiming:=core.get(moves,target)
@@ -512,7 +528,7 @@ follow_one :: proc(
         world_rotation=vertical*orbit_rotation(orbit)
         probe:=Arm_Probe{query,target}
         collide:=follow.probe_radius>0?arm_query:nil
-        origin:=pivot
+        origin:=pivot+mm.quat_rotate(world_rotation,look_offset(follow^,follow.looking.y))
         if side:=mm.quat_rotate(world_rotation,[3]f32{follow.shoulder.x,follow.shoulder.y,0});follow.shoulder!={} {
             // What stands beside the target brings the shoulder in, as the arm.
             arm_tune(&s.side,follow^)
@@ -528,6 +544,7 @@ follow_one :: proc(
         world_rotation=vertical*mm.quat_from_euler({follow.looking.y,follow.looking.x,0})
 
     }
+    world_rotation*=shakes_advance(s,dt)
     if core.world_set(row,core.read(transforms),parents,e,world_position,world_rotation) {
         s.written,s.wrote=row^,true
     }

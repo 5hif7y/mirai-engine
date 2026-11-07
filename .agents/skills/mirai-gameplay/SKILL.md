@@ -38,6 +38,8 @@ the same attributes and no private paths. Declaration and parameter binding:
 - Slow or fast world time with the player at normal speed (bullet time: `core.Clock` and
   `core.Own_Pace`): [own pace](../mirai-core/references/core.md#core-storages).
 - Cinematics (plugin `cinematics`): [cinematics.md](references/cinematics.md).
+- Attacks, combos, dashes, skills and hit reactions with costs, cooldowns, charges and damage
+  (plugin `abilities`): [abilities](../mirai-abilities/SKILL.md); no state machines.
 - Enemies and NPCs (patrol, chase and attack, phased bosses, tactical bots, hordes, use of the
   environment): [enemies with minds](../mirai-plugins/references/behavior.md#enemies-with-minds);
   no state machines, trees or planners.

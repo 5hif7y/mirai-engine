@@ -94,6 +94,10 @@ inertial_value :: proc "contextless" (x0,v0,t,t1:f32) -> f32 {
     c3:=-.5*(3*a*e2+12*e*v+20*x)/e3
     return f32(((((c5*s+c4)*s+c3)*s+.5*a)*s+v)*s+x)
 }
+// The share of an offset that a transition of duration, started at rest, still has at t: 1 when it
+// starts and 0 from duration on, along the curve that pose transitions follow. For a value that
+// changes along with a pose (a direction its clip travels in), so both arrive together.
+inertial_remaining :: proc "contextless" (t,duration:f32) -> f32 {return inertial_value(1,0,t,duration)}
 @(private)
 inertial_offset :: #force_inline proc "contextless" (offset:math.Vec3,speed,t,end:f32) -> math.Vec3 {
     length:=linalg.length(offset)

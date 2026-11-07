@@ -242,10 +242,8 @@ Every turn rereads the whole context: the cost grows with its size and with the 
 - **Closed assignment.** The prompt of a session or subagent names a concrete item, what done is
   and how it is verified; "solve section X" is not an assignment. The final report has at most 300
   words and does not copy diffs or outputs.
-- **Few at a time.** A session has no more than 4 sessions or subagents working at the same time;
-  the rest wait for their batch. A child session does not launch subagents except for large,
-  independent parts. After a cutoff by limit they are resumed in batches, not with a message to
-  all.
+- **Child sessions.** A child session does not launch subagents except for large, independent
+  parts. After a cutoff by limit they are resumed in batches, not with a message to all.
 - **Model and effort per task.** Research, audits, triage, documentation and merges without
   conflicts: a cheaper model (Sonnet) or medium effort. Implementing: high effort. xhigh only to
   design architecture, never in a session that coordinates others.

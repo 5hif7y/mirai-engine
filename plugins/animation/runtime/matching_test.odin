@@ -382,11 +382,34 @@ match_play_refuses_a_lower_priority_and_a_waiting_play_starts_once_when_the_blen
 }
 
 @(test)
+the_travel_of_a_jump_turns_with_its_blend_and_never_through_zero :: proc(t:^testing.T) {
+    forward,back,side:=mm.Vec3{0,0,1},mm.Vec3{0,0,-1},mm.Vec3{1,0,0}
+    testing.expect(t,linalg.length(travel_turn(forward,back,1)-forward)<1e-5,"a jump starts in the direction it leaves")
+    testing.expect(t,linalg.length(travel_turn(forward,back,0)-back)<1e-5,"and ends in the one of its clip")
+    for remaining in ([?]f32{.9,.5,.1}) {testing.expectf(t,abs(linalg.length(travel_turn(forward,back,remaining))-1)<1e-5,"forward to back keeps a direction at %v",remaining)}
+    testing.expect(t,linalg.length(travel_turn(forward,side,.5)-linalg.normalize(forward+side))<1e-5,"half way to the side is the diagonal")
+    testing.expect(t,travel_turn({},side,.5)==side,"from standing it is the new direction")
+    previous:=f32(1)
+    for step in 1..=20 {
+        share:=lib.inertial_remaining(f32(step)*.01,.2)
+        testing.expectf(t,share<=previous && share>=0,"the share left only decreases: %v after %v",share,previous)
+        previous=share
+    }
+    testing.expect(t,previous<1e-4 && lib.inertial_remaining(.2,.2)==0 && lib.inertial_remaining(0,.2)==1)
+}
+
+@(test)
 match_play_hands_back_when_the_body_leaves_its_mode_and_reports_the_end_of_its_clip :: proc(t:^testing.T) {
     f:Match_Fixture;defer match_fixture_free(&f)
     if !testing.expect(t,match_fixture(t,&f)) {return}
+    // A clip that walks tells the direction it travels in, which the warping corrects from.
+    for _ in 0..<10 {testing.expect(t,match_step(&f,.1,GROUND,velocity={0,0,1.5},desired={0,0,1.5}))}
+    walking,_:=animation_match(&f.playback,f.rig)
+    testing.expectf(t,walking.speed>0 && linalg.length(walking.travel-mm.Vec3{0,0,1})<1e-3,"the walk travels along +Z: %v",walking.travel)
     // On the second tick: the blend starts from the pose of the first, with no history before it.
     testing.expect(t,match_step(&f,.1,GROUND) && match_step(&f,.1,GROUND,match_test_play(&f,"vault",GROUND)))
+    forced,_:=animation_match(&f.playback,f.rig)
+    testing.expectf(t,forced.forced && forced.travel=={},"a clip of match_play tells no travel: %v",forced.travel)
     testing.expect(t,match_step(&f,.1,AIR))
     value,_:=animation_match(&f.playback,f.rig)
     testing.expect(t,!value.forced && value.mode==AIR && match_test_events(&f,.Exited,"vault")==1 && match_test_events(&f,.Finished,"vault")==0,"leaving its mode hands the rig back to matching")
@@ -671,6 +694,31 @@ a_jump_nothing_forces_waits_the_hold_after_the_one_before :: proc(t:^testing.T) 
         jumps=value.jumps
     }
     testing.expectf(t,last>=0 && gap!=max(int) && f32(gap)*dt>=info.hold-1e-4,"jumps come at least %.2f s apart, not %d ticks",info.hold,gap)
+}
+
+// With stationary_speed, a body that turns around passes through rest for a tick: it goes on
+// with the clips that travel. One that pushes into a wall goes nowhere and stands.
+@(test)
+a_body_that_turns_around_does_not_stand_midway_and_one_against_a_wall_stands :: proc(t:^testing.T) {
+    f:Match_Fixture;defer match_fixture_free(&f)
+    if !testing.expect(t,match_fixture(t,&f)) {return}
+    f.graphs.matches[0].profile.info.stationary_speed=.15
+    dt:=f32(1.0/60)
+    idle:=base.name_hash("idle")
+    speed:=f32(1.4)
+    for _ in 0..<60 {testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,speed},desired={0,0,speed}))}
+    rested:=false
+    for tick in 0..<30 {
+        speed=max(speed-20*dt,-1.4)
+        rested||=abs(speed)<.15
+        testing.expect(t,match_step(&f,dt,GROUND,velocity={0,0,speed},desired={0,0,-1.4}))
+        value,_:=animation_match(&f.playback,f.rig)
+        testing.expectf(t,value.clip!=idle,"tick %d at %.2f m/s: a body that turns around walks on, not %v",tick,speed,value)
+    }
+    testing.expect(t,rested,"the turn passes through rest")
+    for _ in 0..<30 {testing.expect(t,match_step(&f,dt,GROUND,desired={0,0,1.4},wall={0,0,-1}))}
+    value,_:=animation_match(&f.playback,f.rig)
+    testing.expectf(t,value.clip==idle,"a body that pushes into a wall stands: %v",value)
 }
 
 @(test)

@@ -9,9 +9,9 @@ import mm "mirai:std/math"
 import sim "plugins:physics/runtime/sim"
 
 // The actions the seat that drives a Character moves it with, with
-// input.Look_Action: move is an Axis2 (x right, y forward), jump a Button.
+// input.Look_Action: move is an Axis2 (x right, y forward), jump, sprint and crouch Buttons.
 @(actions)
-Walk_Action :: enum u8 {Move,Jump}
+Walk_Action :: enum u8 {Move,Jump,Sprint,Crouch}
 
 // Their bindings when input.mirai of the project does not name them.
 @(storage,host)
@@ -21,6 +21,8 @@ walk_actions_default :: proc "contextless" () -> Walk_Actions {
     return {defaults={
         .Move=input.action_default(.Axis2,input.binding_keys(.A,.D,.S,.W),input.binding_gamepad_stick(.Left)),
         .Jump=input.action_default(.Button,input.binding_key(.Space),input.binding_gamepad_button(.South)),
+        .Sprint=input.action_default(.Button,input.binding_key(.Left_Shift),input.binding_gamepad_button(.Left_Stick)),
+        .Crouch=input.action_default(.Button,input.binding_key(.Left_Control),input.binding_gamepad_button(.Right_Stick)),
     }}
 }
 

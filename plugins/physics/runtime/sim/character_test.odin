@@ -658,6 +658,12 @@ a_crouched_character_passes_under_a_low_ceiling_and_stands_up_only_in_the_open :
     test_steps(&w,30)
     testing.expect(t,near(character_position(&w,ch).y,0,0.01) && test_standing(&w,ch))
     testing.expect(t,!character_set_height(&w,ch,0.5),"a capsule shorter than its diameter and step does not fit")
+    // A wall it leans on crouched does not keep it crouched.
+    test_static_box(&w,{3,2,0.2},{0,2,-16})
+    testing.expect(t,character_set_height(&w,ch,1.1))
+    test_walk(&w,ch,{0,0,-1},90)
+    testing.expectf(t,character_position(&w,ch).z>-15.85,"leans on the wall at %v",character_position(&w,ch))
+    testing.expect(t,character_set_height(&w,ch,1.8),"stands up against the wall")
 }
 
 // The up turns toward the opposite of the gravity at up_speed, by the shortest way and about the feet, and

@@ -373,7 +373,9 @@ writes.
   the support it finds, so leaving an edge already moves as in the air even if locomotion saw it
   supported.
   - Walking (with `Walk`): velocity over the ground plane relative to it, with acceleration or
-    braking.
+    braking. Holding the `sprint` action raises the top speed to `sprint_speed` while the move
+    points within 60° of where it looks, and moving back loses `backward_slowdown` of it; both
+    apply in the air as well.
   - Jumping: the edge of the `jump` action among the buttons of the `Move_Input`, supported or
     during the coyote time after leaving an edge, gives the `launch` that reaches `Walk.jump_height`
     and makes `MODE_FALLING` the mode.
@@ -454,8 +456,8 @@ the world ([own pace](../../mirai-core/references/core.md#core-storages)).
     like `Camera` but looking where the camera looks if it has `facing` (aiming), and like `Camera`
     otherwise. For a body whose camera changes mode or that aims with another
     ([modes](../../mirai-gameplay/references/control.md#modes)).
-- A player's sensitivity is the scale of their `look` bindings. `move` and `jump` belong to
-  `physics` (`Walk_Action`) and `look` to `engine/input` (`Look_Action`)
+- A player's sensitivity is the scale of their `look` bindings. `move`, `jump` and `sprint`
+  belong to `physics` (`Walk_Action`) and `look` to `engine/input` (`Look_Action`)
   ([actions](../../mirai-gameplay/references/control.md#actions)).
 - Without a seat, before `locomotion_step` takes its initial look or where another end decides
   (`core.Remote`), it does not touch it: what an AI or the network wrote stays. If `input.mirai`

@@ -31,6 +31,8 @@ setup_classifies_clips_by_the_words_of_their_name :: proc(t:^testing.T) {
         {"Idle",.Walking,true},{"MM_Walk_Fwd",.Walking,true},{"JogStart",.Walking,false},{"Sprint_Turn_180",.Walking,false},{"running",.Walking,true},
         {"Fall_Loop",.Falling,true},{"InAir",.Falling,true},{"Jump_Loop",.Falling,true},{"Jump_Start",.Jumping,false},{"TakeOff",.Jumping,false},
         {"Jump",.Jumping,false},{"Land",.Landing,false},{"Jump_Land",.Landing,false},{"Swim_Idle",.Swimming,true},{"Fly",.Flying,true},
+        {"Crouch_Idle",.Crouching,true},{"Crouch_NE",.Crouching,true},{"CrouchWalk_Fwd",.Crouching,true},{"Slide_Start",.Sliding,false},
+        {"KneeSliding",.Sliding,true},{"Slide_Loop",.Sliding,true},
         {"Chair_Sit",.None,false},{"Stairs_Up",.None,false},{"Wave",.None,false},
     }
     for c in cases {

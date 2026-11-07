@@ -23,6 +23,19 @@ follow_update :: proc "contextless" (f:^Follow,target:math.Vec3,half_life:f32,dt
     return f.position
 }
 
+// follow_update with its own half-life along `up` (a unit vector) for the part
+// of the motion along it; up_half_life 0 takes half_life.
+follow_update_split :: proc "contextless" (f:^Follow,target:math.Vec3,half_life,up_half_life:f32,up:math.Vec3,dt:f32) -> math.Vec3 {
+    if up_half_life<=0 || up_half_life==half_life {return follow_update(f,target,half_life,dt)}
+    along :: proc "contextless" (v,up:math.Vec3) -> f32 {return v.x*up.x+v.y*up.y+v.z*up.z}
+    vertical:=Follow{position=up*along(f.position,up),velocity=up*along(f.velocity,up)}
+    across:=Follow{position=f.position-vertical.position,velocity=f.velocity-vertical.velocity}
+    follow_update(&vertical,up*along(target,up),up_half_life,dt)
+    follow_update(&across,target-up*along(target,up),half_life,dt)
+    f.position,f.velocity=across.position+vertical.position,across.velocity+vertical.velocity
+    return f.position
+}
+
 // A camera that turns around a point at a distance. `yaw` turns around Y; at
 // yaw and pitch 0 the camera is on the +Z side of the target, looking at it.
 Orbit :: struct {

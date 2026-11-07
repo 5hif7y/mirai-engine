@@ -735,7 +735,18 @@ instance" are `-32602`; the rest, `-32000`
   `mirai rpc asset.import_status --wait-until importing=false`. While it runs, another import and
   whatever writes assets fail saying what is being imported. Reimporting keeps ids and files;
   `into` (the id of the prefab, texture or sound of the import) updates it from a moved or renamed
-  source
+  source. `image` (`color`, `data`, `normal`, `normal_green_down`) says what an image imported on its
+  own holds, over its settings and its name (a packed metallic-roughness or a mask is `data`); a
+  source in the project keeps the choice in its settings
+- `asset.reload`: reads again asset files changed on disk outside the editor (a tool, a script,
+  `mirai import`, another session) so the scene and Play use what they hold now: the registry looks
+  at them again and what is loaded from them (meshes, textures, materials, the prefabs and scenes
+  Play spawns from, plugin documents, sounds, texts, interfaces) is replaced where it is. `assets`
+  names them (paths, also of a file that is new or gone, or ids), each read again; without it, the
+  whole asset folder is looked at and what changed is read. Answers
+  `{reloaded:[{path,asset,kind}],removed,unsaved,stale}`: an `unsaved` file keeps its changes
+  (`asset.discard` takes the file); `stale` are prefabs whose placed instances are behind their file,
+  which `prefab.refresh` brings up as an edit. Refused in Play and while an import runs
   ([identity](../../mirai-imports/references/imports.md#identity-and-reimport)).
 - `asset.detach`: `asset` (path or id) is a part that leaves its owner: it is left without `owner`
   and shown alone; the import keeps writing it and leaves it out
@@ -792,9 +803,12 @@ instance" are `-32602`; the rest, `-32000`
     a JSON number (ids have 53 bits) and `texts` gives, by path of a `core.Text` field, the text of
     each language (`""`: the language the game is written in).
   - `records.set {records,row,values?,texts?,name?}` and `records.add {records,name,values?,texts?,
-    after?}`: `values` are fields of the row over what it has (a new row starts at the default of
-    the type). A `core.Record` is given as `{table,row}`, as the name of a row or as `table/row`; a
-    `core.Text`, as its original text.
+    after?}`: each key of `values` is a field of the row or the path of a part of one
+    (`input.hold`, `windows[2].to`), and its value is that part whole: an object or a list leaves
+    what it does not give at the default of the type (zeros where it has none; the `core.Text`
+    ids stay), while what no key names keeps its value (a new row starts at the default). To
+    change one nested field, name its path. A `core.Record` is given as `{table,row}`, as the name
+    of a row or as `table/row`; a `core.Text`, as its original text.
   - `records.remove {records,rows}`, `records.rename {records,row,name}` and
     `records.move {records,row,to}`.
   - `records.import {records,file}` reads a CSV (RFC 4180, UTF-8) whose header is `name` and paths

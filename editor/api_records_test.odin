@@ -259,17 +259,25 @@ records_ref_names_a_row_by_name_or_table_and_name :: proc(t:^testing.T) {
 }
 
 // The values of records.set and records.add take a core.Record by the name of
-// its row and a core.Text by its source text; partial objects keep the rest.
+// its row and a core.Text by its source text. A field given as an object or a
+// list is given whole (what it leaves out goes back to the default); a path
+// changes only its part; the fields not named keep theirs.
 @(test)
 records_values_take_row_names_and_source_texts :: proc(t:^testing.T) {
     f:Csv_Fixture
     csv_fixture(&f)
     row:=Csv_Weapon{damage=1,stats={speed=4,weight=5}}
     texts:=make([dynamic]Records_Api_Text,context.temp_allocator)
+    default:=Csv_Weapon{stats={weight=9}}
+    f.c.default=([^]u8)(&default)[:size_of(default)]
+    row.lines[1].pause=3
+    row.lines[0].text.id=77
     message:=records_api_values_put(&f.c,([^]u8)(&row)[:size_of(row)],`{"damage": 7, "ammo": "data/crates/small", "title": "Sword", "stats": {"speed": 2}, "lines": [{"pause": 1.5}, {"text": "Bye"}]}`,&texts)
     testing.expect_value(t,message,"")
     testing.expect_value(t,row.damage,7)
-    testing.expect_value(t,row.stats,Csv_Stats{2,5})
+    testing.expect_value(t,row.stats,Csv_Stats{2,9})
+    testing.expect_value(t,row.lines[1].pause,0)
+    testing.expect_value(t,row.lines[0].text.id,77)
     testing.expect_value(t,row.lines[0].pause,1.5)
     testing.expect_value(t,row.ammo,core.Record(Csv_Ammo){CRATES,21})
     testing.expect_value(t,len(texts),2)
@@ -280,6 +288,14 @@ records_values_take_row_names_and_source_texts :: proc(t:^testing.T) {
     named:=records_api_values_put(&f.c,([^]u8)(&row)[:size_of(row)],`{"ammo": "small"}`,&texts)
     testing.expectf(t,strings.has_prefix(named,"values.ammo: small is a row of 2 tables"),"%s",named)
     testing.expect_value(t,row.damage,7)
+    // A path changes only its part.
+    clear(&texts)
+    testing.expect_value(t,records_api_values_put(&f.c,([^]u8)(&row)[:size_of(row)],`{"stats.weight": 4, "lines[1].pause": 2}`,&texts),"")
+    testing.expect_value(t,row.stats,Csv_Stats{2,4})
+    testing.expect_value(t,row.lines[1].pause,2)
+    testing.expect_value(t,row.lines[0].pause,1.5)
+    nested:=records_api_values_put(&f.c,([^]u8)(&row)[:size_of(row)],`{"stats.wait": 1}`,&texts)
+    testing.expectf(t,strings.contains(nested,"stats.wait") && strings.contains(nested,"speed, weight"),"%s",nested)
 }
 
 // texts are by field path and language code; a path that is no core.Text

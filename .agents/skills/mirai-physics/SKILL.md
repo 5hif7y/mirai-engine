@@ -153,7 +153,8 @@ with networking ([networking](../mirai-networking/SKILL.md)).
     pairs, inertia, islands, uncolored constraints); `far` (the same scene 20 km from the origin).
   - Integration: `collision`, `forces`, `geometry`, `joints`, `manipulation`, `reload`,
     `static`, `teleport`, `fluids`, `sync` (sealed rows against the full reconciliation);
-    locomotion: `locomotion` (walk, jump, coyote, layers, flight, swimming, modes), `planet` (own
+    locomotion: `locomotion` (walk, jump, coyote, layers, flight, swimming, modes),
+    `locomotion_moves` (crouch, slide, mantle, tactical sprint, ledge jump), `planet` (own
     vertical: walking, jumping and rollback on a planet, crossing fields) and `locomotion_seat`
     (seat control, relative forward). Editor: `collision`, `api_collision`, `colliders`,
     `view_mode`. `destruct`: `integration`; its model `plugins/destruct/runtime/fracture`:

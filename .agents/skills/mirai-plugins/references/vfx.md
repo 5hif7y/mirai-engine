@@ -474,6 +474,11 @@ In each view:
 - **sprites** (`Blend`): over the lit image, before TAA; the emitters from farthest to nearest.
   - `Billboard` (faces the camera, with rotation), `Velocity` (stretched according to `stretch`),
     `Horizontal` (plane in XZ) and `Ribbon` (each particle joined to the next in the list).
+  - `Mesh` particles whose material blends (alpha mode `blend`, `Emitter_Desc.blended`): their
+    mesh with `particle_mesh_blend.vert` and the sprites' fragment, placed as in the G-buffer, so
+    their color, opacity and curves fade them as a sprite's, additive or covering by alpha as the
+    effect says; their texture is read through the material's map at the uv of their vertices,
+    and a mesh without texture is whole. They are drawn in effect views too.
   - Material from the table. With a Surface program, each fragment runs it facing the camera (the
     `particle_sprite` pipeline with the program's fragment, `Stage_Pipeline_Desc.program`), with
     `uv0` in the flipbook frame, `uv1` in the next, the particle's color in `vertex_color` and what
@@ -490,8 +495,9 @@ In each view:
     (`.Glass_Depth`).
 - **effects** (`Effect`): the sprites of the emitters of a `Particles` node, in the effect view of
   its texture, with the same sorted list and the same pipelines; none of them is drawn in the
-  world's views, and `Mesh` particles are not drawn in them.
-- **meshes** (`Gbuffer`): `Mesh` particles in the G-buffer with `particle_mesh.vert` and the
+  world's views, and `Mesh` particles are not drawn in them but those whose material blends.
+- **meshes** (`Gbuffer`): `Mesh` particles (but those whose material blends) in the G-buffer with
+  `particle_mesh.vert` and the
   engine's fragment, or that of the Surface program of their materials, one draw per program
   (`pass_mesh_programs`): rotation about an axis of their own, motion vectors from their velocity
   and the emitter's material or the mesh's, which the plugin tells the renderer each frame

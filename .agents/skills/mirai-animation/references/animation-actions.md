@@ -29,7 +29,10 @@ blends a local copy of its description.
 asks for Play/Simulation.
 
 - The layer of an action is reserved by leaving `Animation.layers[layer-1].clip=0`: Fire rejects a
-  layer that the component occupies (`ReservedLayer`).
+  layer that the component occupies (`ReservedLayer`). A pose of `animation_play` faded to
+  `animation_weight(…, 0)` keeps its clip to come back to, so it still occupies the layer;
+  `animation_stop(animation, layer, fade)` fades it out and frees the layer in the same tick, and the
+  action cross-fades from what is fading.
 - Fire replaces the action of the layer if its priority reaches the active one and the active one
   allows it: Allow cancels immediately, Finish_Section defers the cancellation until the section
   ends and Deny rejects.
@@ -38,7 +41,10 @@ asks for Play/Simulation.
   event that does not fit is `animation.action_events`.
 
 `Action_Runtime.events` is cleared every tick and carries Started, Completed, Interrupted, Section,
-Window_Begin and Window_End, with hashes that the API returns as names.
+Window_Begin and Window_End, with hashes that the API returns as names. To ask what an action is
+doing instead of following its events, `action_playing(runtime, entity, name)` (with a read-only
+`core.Ref(Action_Runtime)`) gives its time and section hash while it plays, from Fire until it
+completes or is interrupted (not while it fades out).
 
 - An advance that crosses a whole window emits Begin and End; an exit or interruption closes the
   open ones. Jumps only process played intervals.
@@ -89,6 +95,9 @@ Discovery and memory:
 - `actions_test.odin`: roundtrip, invalid references and policies, windows and sections,
   cancellation, copies, queues, weighted extraction, clocks and distance.
 - `actions_retry_a_first_fire_when_profile_preparation_has_no_memory`.
+- `action_playing_answers_while_an_action_plays_and_animation_stop_frees_a_layer_that_weight_zero_keeps`:
+  the query through Fire, Section and Cancel, and a layer that weight 0 keeps and `animation_stop`
+  frees.
 - `actions_discover_changed_components_retry_requests_and_compact_generational_rows_through_world_copies`:
   discovery by stamp, lack of memory and generational recycling.
 - `discovery_bench_test.odin` (with `MIRAI_BENCH`): optional preparation without stable allocations.

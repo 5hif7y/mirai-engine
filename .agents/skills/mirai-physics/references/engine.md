@@ -378,7 +378,25 @@ writes.
     apply in the air as well.
   - Jumping: the edge of the `jump` action among the buttons of the `Move_Input`, supported or
     during the coyote time after leaving an edge, gives the `launch` that reaches `Walk.jump_height`
-    and makes `MODE_FALLING` the mode.
+    and makes `MODE_FALLING` the mode. While the button stays down, for up to `Walk.jump_rise`, each
+    tick tops the speed up back to the one it jumped with (as Unreal's `JumpMaxHoldTime`), until it
+    is let go or something stops the rise; a ledge jump is not lengthened.
+  - Tactical sprint (with `Tactical_Sprint`, `locomotion_moves.odin`): sprinting forward on the
+    ground with `min_energy` starts it (`Character.sprint_active`, energy left by
+    `tactical_energy`). Its top speed and jump speed grow by their step every `step_time` up to
+    their multipliers (`tactical_boost`), which also the animation bridge reads; the acceleration
+    multiplier acts only on the ground. Energy is spent per second (not in the air with
+    `pause_falling`), per jump and per slide start, and comes back `recharge_delay` after it was
+    last spent. It ends without energy, going down in the air past `fall_grace` (`Character.fall_time`: a jump still rising does not count), crouched, sliding or out of
+    walking and falling, or after `grace` without sprinting; back within `grace` it keeps its ramp.
+    Without energy it sprints as `Walk` says.
+  - Ledge jump (with `Ledge_Jump`): standing at `min_speed` for `min_time`, `locomotion_step`
+    checks the ground ahead before the move (`ledge_drop_ahead`, own rule): a sphere almost as
+    wide as the capsule meets nothing for `reach` along the velocity over the ground, and a ray
+    down from there meets no ground within `min_drop` under the feet. Then `ledge_ready` is set,
+    and a jump adds `added_speed` along that velocity (clamped to `max_speed` across the up) and
+    `up_speed` over the jump's rise. `ledge_jumping` lasts until it stands again; meanwhile air
+    control steers without slowing it below its speed. It costs no tactical energy.
   - In the air: control bounded by `Walk.air_control`; it does not climb ground that is too steep.
   - Flying (`MODE_FLYING`, with `Fly`): velocity on the three axes according to yaw and pitch,
     `Airborne` and without gravity; it lasts until another mode is requested.

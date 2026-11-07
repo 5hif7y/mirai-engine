@@ -101,19 +101,6 @@ Import_Written :: struct {
     path:string, // under the asset folder
 }
 
-// Whether an image holds linear data or a normal map by what its name says; any other is a color.
-@(private)
-image_use :: proc(path:string) -> importer.Image_Use {
-    name:=strings.to_lower(filepath.stem(path),context.temp_allocator)
-    for part in ([?]string{"normal","nrm","_n"}) {
-        if strings.contains(name,part) {return .Normal}
-    }
-    for part in ([?]string{"rough","metal","orm","occlusion","_ao","height","displace","mask","specular","data"}) {
-        if strings.contains(name,part) {return .Data}
-    }
-    return .Color
-}
-
 @(private)
 import_say :: proc(s:^Session,format:string,args:..any) {
     text:=fmt.tprintf(format,..args)
@@ -139,7 +126,9 @@ import_busy :: proc(s:^Session) -> string {
 // the import (importer.profile_totals) for asset.import_status.
 // rig, when given, has the rig, rig_crotch and rig_neck that replace the
 // source's settings, which a model inside the project keeps for its next import.
-import_file :: proc(s:^Session,source:string,into:base.Asset_Id={},folder:="",profiled:=false,rig:Maybe(importer.Import_Settings)=nil) -> bool {
+// image, when given, is the use of an image that replaces its settings the same
+// way; without it, its settings say, else its name (sources.image_use).
+import_file :: proc(s:^Session,source:string,into:base.Asset_Id={},folder:="",profiled:=false,rig:Maybe(importer.Import_Settings)=nil,image:Maybe(importer.Image_Use)=nil) -> bool {
     a:=s.app.assets
     if a==nil || a.registry.root=="" {
         import_say(s,"There is no asset folder to import into")
@@ -185,7 +174,16 @@ import_file :: proc(s:^Session,source:string,into:base.Asset_Id={},folder:="",pr
         }
     case .Image:
         if folder=="" {destination="textures"}
-        options.image=image_use(source)
+        options.image=sources.image_use(source)
+        if use,given:=image.?;given {
+            stored,_,settings_error:=importer.settings_load(importer.source_path(options,source))
+            if settings_error.code!=.None {
+                import_say(s,"%s: %s",name,settings_error.message)
+                return false
+            }
+            options.settings,options.ignore_stored=stored,true
+            options.image=use
+        }
     case .Sound: if folder=="" {destination="sounds"}
     case .Font: if folder=="" {destination="fonts"}
     case .Strings: if folder=="" {destination="texts"}
@@ -205,6 +203,11 @@ import_file :: proc(s:^Session,source:string,into:base.Asset_Id={},folder:="",pr
     if _,given:=rig.?;given && kind!=.Model {
         import_job_free(job)
         import_say(s,"%s is not a model: only a model takes a rig",name)
+        return false
+    }
+    if _,given:=image.?;given && kind!=.Image {
+        import_job_free(job)
+        import_say(s,"%s is not an image: only an image imported on its own takes a use; the textures of a model take theirs from its materials",name)
         return false
     }
     if claimed && folder!="" {

@@ -313,10 +313,11 @@ Components that describe the scene and `render_sync`, which carries it to the re
   - `sky_active` gives the one that is on; `sky_environment`, what the renderer receives.
 - **`View_Volume`** (`view_volume.odin`), a value of [volume](#volume): how views look where it
   applies: its `exposure`, a `tint` that multiplies the image before the display and up to 8 effect
-  layers (`layers`). Each view takes it at its camera (`camera_view`, `camera_local_views`; the
-  editor's in `render_sync`); a camera with `Exposure` keeps its own. When blending, numbers are
-  interpolated and modes and layers pass at half weight; one that adds adds its compensation,
-  multiplies its tint and puts its layers after. The layers of the main view are the renderer's;
+  layers (`layers`), each weighted by its `fade`: the share of the image it leaves as it read it.
+  Each view takes it at its camera (`camera_view`, `camera_local_views`; the editor's in
+  `render_sync`); a camera with `Exposure` keeps its own. When blending, numbers are interpolated
+  and modes and layers pass at half weight; one that adds adds its compensation, multiplies its
+  tint and puts its layers after. The layers of the main view are the renderer's;
   each player of a split screen runs those of where they are, in their slot
   (`view_postprocess_sync`, `render.Camera.slot`), and they are given to the renderer only when
   they change. Sky and sun light does not change by volume.
@@ -326,7 +327,10 @@ Components that describe the scene and `render_sync`, which carries it to the re
   `coat_roughness`, `coat_color`, `coat_ior`, `fuzz`, `fuzz_color`, `fuzz_roughness`, `anisotropy`,
   `anisotropy_rotation`, `unlit`, `emission_mode`) or of a non-texture parameter of the program;
   textures by the name of a map of `MATERIAL_MAP_NAMES` or of a texture of the program; and, with
-  `own_overlays`, its overlays instead of those of the first slot's material.
+  `own_overlays`, its overlays instead of those of the first slot's material. It is `shared`:
+  several game functions animate values of one entity, each setting and dropping only its own names
+  with `material_override_value_set` and `material_override_value_drop` instead of writing the
+  whole override over what another gave.
 - **`Highlight`**: the editor's selection outline; it replaces the entity's `Outline`.
 - **`Outline`**: the game's outline, with one of the 15 styles of `Outline_Styles`, a project
   setting (the same in all its scenes) with the color, the fill and what is seen behind another

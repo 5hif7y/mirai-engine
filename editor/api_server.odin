@@ -142,9 +142,8 @@ api_port_file_path :: proc(s:^Session) -> string {
 @(private)
 api_port_file_write :: proc(s:^Session,port:int) {
     if !s.has_project {return}
-    engine,_:=os.get_executable_directory(context.temp_allocator)
-    engine,_=strings.replace_all(engine,"\\","/",context.temp_allocator)
-    data,error:=json.marshal(api.Port_File{port,os.get_pid(),s.project_root,engine,build.engine_stamp_of(engine,context.temp_allocator),build.target_stamp_of(s.project_root,.Editor,context.temp_allocator),s.headless},{pretty=true},context.temp_allocator)
+    engine:=engine_folder_here()
+    data,error:=json.marshal(api.Port_File{port,os.get_pid(),s.project_root,engine,s.engine_stamp,build.target_stamp_of(s.project_root,.Editor,context.temp_allocator),s.headless},{pretty=true},context.temp_allocator)
     if error!=nil {return}
     path:=api_port_file_path(s)
     _=os.make_directory_all(path[:strings.last_index_byte(path,'/')])

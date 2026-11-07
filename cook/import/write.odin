@@ -317,8 +317,9 @@ texture_detail :: proc(format:asset.Texture_Format,width,height,mips:int) -> str
 }
 
 // The outputs of earlier imports are looked for under the assets folder of
-// the project at options.root, else under options.root, else under folder:
-// what a game was built into is no output of an import.
+// the project at options.root, else under options.root, else under folder
+// (only there with Earlier_Outside.Copy): what a game was built into is no
+// output of an import.
 @(private)
 writer_init :: proc(w:^Writer,folder:string,options:Import_Options,report:^Import_Report,allocator:mem.Allocator) -> bool {
     w^={options=options,folder=folder,report=report,allocator=allocator}
@@ -331,7 +332,7 @@ writer_init :: proc(w:^Writer,folder:string,options:Import_Options,report:^Impor
         return writer_fail(w,.Write,"the folder %s could not be created",folder)
     }
     w.search=folder
-    if options.root!="" {
+    if options.root!="" && options.outside!=.Copy {
         w.search=options.root
         if assets:=project.folder_path(options.root,.Assets,context.temp_allocator);os.exists(project.path(options.root,project.PROJECT_FILE,allocator=context.temp_allocator)) && os.is_dir(assets) {w.search=assets}
     }
@@ -442,6 +443,9 @@ write_model :: proc(w:^Writer,model:^Imported_Model) -> bool {
     animation:=len(parts)
     if len(model.animations)>0 {append(&parts,Part{kind=asset.KIND_ANIMATION,name=name,extension=".anim",earlier=-1,shared=-1})}
     parts_plan(w,parts[:])
+    for &p in parts {
+        if p.earlier>=0 && !earlier_writable(w,&w.earlier[p.earlier]) {return false}
+    }
     reasons:=make([]string,len(model.materials),context.temp_allocator)
     parts_own(w,model,jobs[:],parts[:],first_material,reasons)
 

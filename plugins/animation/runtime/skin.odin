@@ -299,6 +299,10 @@ animation_skin :: proc(
         if !usable {continue}
         shown.anchor=anchor
         bones:=len(pose.local) if !rigid else 0
+        // Not drawn in the last frame (new, or shown again): it shows the pose and the weights of the
+        // tick, not an interpolation from those of a tick it was not drawn in, as the rest pose of a
+        // weapon that is shown the tick its action starts.
+        fresh:=!instance.valid
         if !instance.valid {
             local,local_error:=make([]mm.Transform,bones,app.allocator)
             world_pose,world_error:=make([]mm.Transform,bones,app.allocator)
@@ -334,7 +338,7 @@ animation_skin :: proc(
             playing:=morph_playing(morphs.ptr,entity)
             composed:=playing!=nil && playing.mesh==rig.id && playing.revision==rig.revision && len(playing.current)==len(rig.morphs) && len(playing.previous)==len(rig.morphs)
             for &target,t in rig.morphs {
-                value:=mm.lerp(playing.previous[t],playing.current[t],alpha) if composed else target.weight
+                value:=mm.lerp(playing.previous[t],playing.current[t],1 if fresh else alpha) if composed else target.weight
                 morphed ||= value!=instance.morph_weights[t]
                 instance.morph_weights[t]=value
             }
@@ -342,7 +346,8 @@ animation_skin :: proc(
         work_index:=-1
         if !rigid {
             // Without a change in the last tick, previous and local are the same pose.
-            exact:=alpha>=1 || pose.changed!=playback.ptr.frame
+            // Shown as it is in this tick, it stays so until the next one rather than going back.
+            exact:=alpha>=1 || fresh || pose.changed!=playback.ptr.frame || instance.exact==pose.changed+1
             basis:=mm.TRANSFORM_IDENTITY
             if parent,exists:=core.get(parents,owner);exists && parent.entity!=core.NONE {
                 parent_world,parent_placed:=core.get(worlds,parent.entity)

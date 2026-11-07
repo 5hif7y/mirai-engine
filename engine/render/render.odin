@@ -199,6 +199,7 @@ Post_Process_Layer :: struct {
     material:base.Asset_Id, // a material whose program is a PostProcess one
     after_tonemap:bool,
     enabled:bool,
+    fade:f32 `mirai:"min=0,max=1"`, // the share of the image it leaves as it read it: 0 the whole effect, 1 none
 }
 
 
@@ -207,7 +208,9 @@ Post_Process_Layer :: struct {
 // the program of the material, or of one of MATERIAL_VALUE_NAMES;
 // texture_names, of a texture of the program or of one of MATERIAL_MAP_NAMES.
 // With own_overlays its overlays replace those of the material of the first slot.
-@(component)
+// Several functions write it, in loop order: each sets and drops only the
+// names it gives (material_override_value_set, material_override_value_drop).
+@(component,shared)
 Material_Override :: struct {
     count:u32,
     slots:[MATERIAL_OVERRIDE_CAPACITY]u8,
@@ -1493,6 +1496,37 @@ material_override_texture :: proc "contextless" (o:^Material_Override,slot:int,n
         if stored==name && int(o.texture_slots[i])==slot {return o.textures[i],true}
     }
     return
+}
+
+// Where an entity keeps the value it gives a name of a slot; -1 without one.
+material_override_find :: proc "contextless" (o:^Material_Override,slot:int,name:u64) -> int {
+    for stored,i in o.names[:min(int(o.count),len(o.names))] {
+        if stored==name && int(o.slots[i])==slot {return i}
+    }
+    return -1
+}
+
+// Gives a name of a slot a value, leaving the other names as they are; false
+// when the override holds MATERIAL_OVERRIDE_CAPACITY values of other names.
+material_override_value_set :: proc "contextless" (o:^Material_Override,slot:int,name:u64,value:[4]f32) -> bool {
+    if at:=material_override_find(o,slot,name);at>=0 {
+        o.values[at]=value
+        return true
+    }
+    if int(o.count)>=len(o.names) || slot<0 || slot>=MATERIAL_SLOTS {return false}
+    o.slots[o.count],o.names[o.count],o.values[o.count]=u8(slot),name,value
+    o.count+=1
+    return true
+}
+
+// Takes the value of one name of a slot away: that of the material shows again.
+material_override_value_drop :: proc "contextless" (o:^Material_Override,slot:int,name:u64) {
+    count:=min(int(o.count),len(o.names))
+    if i:=material_override_find(o,slot,name);i>=0 {
+        o.slots[i],o.names[i],o.values[i]=o.slots[count-1],o.names[count-1],o.values[count-1]
+        o.slots[count-1],o.names[count-1],o.values[count-1]=0,0,{}
+        o.count=u32(count-1)
+    }
 }
 
 // Forgets what the renderer has: the next sync sends everything.

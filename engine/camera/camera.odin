@@ -80,6 +80,8 @@ Camera_Follow_State :: struct {
     written:core.Transform, // what the last frame left in the transform
     wrote:bool,
     shakes:[CAMERA_SHAKES]Shake_Playing, // the sequence shakes it plays over its view (camera_shake)
+    fov_base:f32,         // the fov of its render.Camera without the shakes, while fov_shaken
+    fov_shaken:bool,
 }
 
 CAMERA_FOLLOW_DEFAULT :: Camera_Follow{
@@ -281,6 +283,13 @@ camera_follow :: proc(
     views:core.Ref(Camera_Views),verticals:core.Read(core.Vertical),frame:core.Frame_Time,time:core.Time,problems:^core.Problems,
     shakes:^Camera_Shakes,
 ) {
+    // The lens is the one of the mode or the override; the shakes go over it again below.
+    for row in 0..<core.count(follows) {
+        if s:=&core.at(follows,row).state;s.fov_shaken {
+            if camera:=core.get(cameras,core.entity_at(follows,row));camera!=nil {shakes_fov_restore(camera,s)}
+            s.fov_shaken=false
+        }
+    }
     for change in core.take(&changes.queue) {mode_take(follows,cameras,worlds,change,problems)}
     shakes_take(follows,shakes,problems)
     for item in shown.overrides {
@@ -322,7 +331,7 @@ camera_follow :: proc(
         }
         vertical:=core.vertical_of(verticals,target)
         if placed,ok:=core.get(worlds,target);ok && core.has(verticals,target) {vertical=vertical_between(vertical,placed,frame.alpha)}
-        follow_one(e,follow,target,transforms,worlds,parents,moves,vertical,core.world_query(world,queries),frame,time.dt)
+        follow_one(e,follow,target,transforms,worlds,parents,moves,vertical,core.world_query(world,queries),frame,time.dt,core.get(cameras,e))
     }
 }
 
@@ -464,12 +473,14 @@ arm_tune :: proc "contextless" (arm:^Spring_Arm,follow:Camera_Follow) {
 }
 
 // vertical: the frame of the vertical of the target. tick: seconds of a fixed
-// tick, which the velocity of the target is measured over.
+// tick, which the velocity of the target is measured over. camera: its lens,
+// which its shakes widen; nil without one.
 @(private)
 follow_one :: proc(
     e:core.Entity,follow:^Camera_Follow,target:core.Entity,transforms:^core.Table(core.Transform),
     worlds:core.Read(core.World_Transform),parents:core.Read(core.Parent),
     moves:core.Read(input.Move_Input),vertical:mm.Quat,query:core.World_Query,frame:core.Frame_Time,tick:f32,
+    camera:^render.Camera=nil,
 ) {
     placed,has_target:=core.get(worlds,target)
     row:=core.get(transforms,e)
@@ -544,7 +555,9 @@ follow_one :: proc(
         world_rotation=vertical*mm.quat_from_euler({follow.looking.y,follow.looking.x,0})
 
     }
-    world_rotation*=shakes_advance(s,dt)
+    turn,widen:=shakes_advance(s,dt)
+    world_rotation*=turn
+    if camera!=nil {shakes_fov(camera,s,widen)}
     if core.world_set(row,core.read(transforms),parents,e,world_position,world_rotation) {
         s.written,s.wrote=row^,true
     }

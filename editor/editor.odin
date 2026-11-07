@@ -106,7 +106,7 @@ Run :: struct {
 USAGE_TEXT :: `Usage: [--project <folder>] [--scene <path>] [--headless] [--hidden] [--no-gpu] [--frames <n>] [--capture <png>] [--validation]
      [--width <points>] [--height <points>] [--density <x>] [--engine <folder>] [--api-port <port>] [--no-api]
      [--share [port]] [--join <invitation>] [--name <name>] [--preferences]
-  --api-port    port of the agent API (JSON-RPC and MCP); 7940 if missing
+  --api-port    port of the agent API (JSON-RPC and MCP); 7940 if missing, or a free one when it is taken; 0: a free one, never 7940
   --no-api      without the agent API
   --share       shares the scene with other editors; port 7950 if missing. Prints the invitation code
   --join        joins the session of another editor with the code of its invitation (K7Q2-9XMA-PL3F-0B2C)
@@ -136,6 +136,7 @@ Options :: struct {
     headless,no_gpu,validation,hidden:bool,
     preferences:bool, // a headless editor keeps the preferences of the editor too
     api_port:int,    // of the agent API; 0: the default one
+    api_port_any:bool, // --api-port 0: a free one the system picks, never the default, which stays the user's editor's
     no_api:bool,
     name:string,     // in a shared session
     share:int,       // >0: shares the scene on this port; <0: the default one
@@ -181,6 +182,7 @@ Session :: struct {
     requests:Requests,
     project_root:string, // absolute, with forward slashes
     engine_root:string,  // empty when unknown: Build cannot run
+    engine_stamp:string, // of the binaries it started from (build.engine_stamp_of): a build of the engine afterwards changes the one beside them
     assets_root:string,
     has_project:bool,    // the folder has a project.mirai
     settings_unsaved:bool, // a setting changed that the file of its layer does not have yet
@@ -432,6 +434,7 @@ open :: proc(info:^core.World_Info,args:[]string) -> (s:^Session,code:int) {
     }
     s.project_root=strings.clone(root)
     s.engine_root=strings.clone(engine)
+    s.engine_stamp=engine_stamp_here()
     s.assets_root=strings.clone(assets)
     s.has_project=has_project
     if has_project {s.build.sources=code_fingerprint(root)}
@@ -1129,7 +1132,7 @@ session_destroy :: proc(s:^Session) {
     s.copied=nil
     console_destroy(s.console)
     settings_engine_free(s)
-    delete(s.project_root);delete(s.engine_root);delete(s.assets_root);delete(s.capture);delete(s.gpu_lost_before)
+    delete(s.project_root);delete(s.engine_root);delete(s.engine_stamp);delete(s.assets_root);delete(s.capture);delete(s.gpu_lost_before)
     for arg in s.args {delete(arg)}
     delete(s.args)
     s.project_root,s.engine_root,s.assets_root,s.capture,s.gpu_lost_before,s.args="","","","","",{}
@@ -1172,7 +1175,11 @@ options_read :: proc(args:[]string) -> (o:Options,ok:bool) {
         case "--preferences": o.preferences=true
         case "--no-gpu":     o.no_gpu=true
         case "--validation": o.validation=true
-        case "--api-port":   o.api_port=number(args,&i) or_return
+        case "--api-port":
+            text:=value(args,&i) or_return
+            port,parsed:=strconv.parse_int(text,10)
+            if !parsed || port<0 || port>65535 {return o,false}
+            if port==0 {o.api_port_any=true} else {o.api_port=port}
         case "--no-api":     o.no_api=true
         case "--name":       o.name=value(args,&i) or_return
         case "--launcher":   o.launcher=true

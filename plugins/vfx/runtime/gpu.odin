@@ -40,7 +40,8 @@ import "plugins:vfx/runtime/effect"
 //
 // Sprites and ribbons are drawn in the Blend stage, over the lit scene before
 // TAA, behind and in front of glass. Mesh particles are drawn in the Gbuffer
-// stage and lit like the scene. Nothing a frame does allocates: the tables of
+// stage and lit like the scene, but for those whose material blends: they
+// are drawn with the sprites, with their fragment. Nothing a frame does allocates: the tables of
 // a pool are made when its world gives its first emitters, and again when it
 // asks another capacity.
 
@@ -93,6 +94,7 @@ Program_Pipelines :: struct {
     emit,simulate,stage:erender.Pipeline,
     sprite:[effect.PARTICLE_NAME_BYTES+32]u8, // the vertex stage of its sprites
     mesh:[effect.PARTICLE_NAME_BYTES+32]u8, // the vertex stage of its mesh particles, for the G-buffer pipeline of the view
+    mesh_blend:[effect.PARTICLE_NAME_BYTES+32]u8, // that of its mesh particles whose material blends, drawn with the sprites
     using span:Program_Span,
 }
 
@@ -141,6 +143,7 @@ Emitter_Desc :: struct {
     blend:effect.Particle_Blend,
     material:erender.Material_Handle, // its Surface program, or its base color (its texture is the flipbook), opacity and emission
     mesh:[3]u32,              // of Mesh particles: the vertices of a draw of its clusters (erender.mesh_draw_range) and the mesh of the scene
+    blended:bool,             // of Mesh particles: its material blends (alpha mode Blend), so they are drawn over the lit scene with the sprites
     stretch:f32,              // Velocity: seconds of motion the sprite spans
     soft:f32,                 // metres over which a sprite fades into the surface behind it
     intensity:f32,            // multiplies the color
@@ -665,7 +668,7 @@ pool_prepare :: proc(sync:^Particle_Sync,pass:^erender.Pass,reset:bool) -> bool 
         if d.event!=.None {
             if t:=pool_slot_find(pool,d.event_target);t>=0 {target=u32(t)+1}
         }
-        if d.render==.Mesh {pool.meshes=true} else {pool.sprites=true}
+        if d.render==.Mesh && !d.blended {pool.meshes=true} else {pool.sprites=true}
         if bit:=u64(1)<<(uint(at)%64);s.fresh || pool.dirty[at/64]&bit!=0 {
             emitter_row(&g,s,pool.capacity)
             pool.dirty[at/64]&~=bit
@@ -893,6 +896,7 @@ programs_span :: proc(sync:^Particle_Sync,app:^host.App) -> (left_out:bool) {
                 each.stage=erender.stage_pipeline(app,{stage=.Simulate,shader=fmt.tprintf("particle_stage__%s",name),name="particle stage"})
                 base.text_set(each.sprite[:],fmt.tprintf("particle_sprite__%s",name))
                 base.text_set(each.mesh[:],fmt.tprintf("particle_mesh__%s",name))
+                base.text_set(each.mesh_blend[:],fmt.tprintf("particle_mesh_blend__%s",name))
             }
             span=&each.span
         }
@@ -953,7 +957,7 @@ particles_frame :: proc(sync:^Particle_Sync,app:^host.App) -> bool {
     // view, and their meshes stay whole: they draw every cluster of level 0.
     for &s in pool.slots[:pool.slot_end] {
         if !s.live || s.desc.render!=.Mesh {continue}
-        erender.frame_gbuffer_mesh(app,erender.Mesh_Handle(s.desc.mesh[1]),s.desc.material)
+        if !s.desc.blended {erender.frame_gbuffer_mesh(app,erender.Mesh_Handle(s.desc.mesh[1]),s.desc.material)}
         erender.frame_mesh_whole(app,erender.Mesh_Handle(s.desc.mesh[1]))
     }
     erender.frame_pass(app,.Blend,particles_volumes,sync)
@@ -1173,7 +1177,7 @@ groups :: proc "contextless" (size,group:u32) -> u32 {return (size+group-1)/grou
 draw_list :: proc(pool:^Pool,eye:[4]f32,origin:[3]f32,meshes:bool,view:erender.Texture_Handle=0) -> []Pool_Draw {
     count:=0
     for &s,at in pool.slots[:pool.slot_end] {
-        if !s.live || (s.desc.render==.Mesh)!=meshes || s.desc.view!=view {continue}
+        if !s.live || (s.desc.render==.Mesh && !s.desc.blended)!=meshes || s.desc.view!=view {continue}
         place:=erender.origin_point({s.desc.transform[0,3],s.desc.transform[1,3],s.desc.transform[2,3]},origin)
         pool.draws[count]={u32(at),linalg.length(place-eye.xyz) if eye.w>0.5 else linalg.dot(place,eye.xyz)}
         count+=1
@@ -1218,8 +1222,9 @@ pool_bind_frame :: proc(pass:^erender.Pass,sync:^Particle_Sync) {
 // slot first of the pool and emitter_first of the table of emitters. fields: Pool.fields_at.
 Simulate_Params :: struct {mode,emitters,count,parity,step,last,stage,iteration,program,first,emitter_first,fields:u32}
 
-// Sprites and ribbons over the lit scene, on the side of glass of the pass;
-// at the Effect stage, those of the effect view of the pass over nothing.
+// Sprites, ribbons and the mesh particles whose material blends over the lit
+// scene, on the side of glass of the pass; at the Effect stage, those of the
+// effect view of the pass over nothing.
 @(private)
 particles_sprites :: proc(pass:^erender.Pass,user:rawptr) {
     sync:=cast(^Particle_Sync)user
@@ -1242,15 +1247,19 @@ particles_sprites :: proc(pass:^erender.Pass,user:rawptr) {
         // The stage of its program, with the fragment of the Surface program of its material.
         desc:=&pool.slots[draw.slot].desc
         additive:=desc.blend==.Additive
+        mesh:=desc.render==.Mesh
         stage:=erender.Stage_Pipeline_Desc{stage=.Blend,shader="particle_sprite",blend=.Additive if additive else .Premultiplied,name="particles additive" if additive else "particles blended"}
-        if own:=program_pipelines(&sync.pipelines,desc.program.id);own!=nil {stage.shader,stage.fragment=base.text_get(own.sprite[:]),"particle_sprite"}
+        if mesh {stage.shader,stage.fragment="particle_mesh_blend","particle_sprite"}
+        if own:=program_pipelines(&sync.pipelines,desc.program.id);own!=nil {stage.shader,stage.fragment=base.text_get(own.mesh_blend[:] if mesh else own.sprite[:]),"particle_sprite"}
         stage.program=erender.pass_material_program(pass,desc.material)
         pipeline:=erender.pass_stage_pipeline(pass,stage)
         if pipeline==0 {continue}
         erender.pass_pipeline(pass,pipeline)
         params:=Params{emitter=draw.slot,pass=u32(pass.glass)}
         erender.pass_params(pass,&params,size_of(params))
-        erender.pass_draw_indexed_indirect(pass,state,u64(draw.slot)*size_of(Gpu_State)+u64(offset_of(Gpu_State,draw)))
+        // A mesh draws its clusters without indices, as in the G-buffer.
+        at:=u64(draw.slot)*size_of(Gpu_State)+u64(offset_of(Gpu_State,draw))
+        if mesh {erender.pass_draw_indirect(pass,state,at)} else {erender.pass_draw_indexed_indirect(pass,state,at)}
     }
     erender.pass_end(pass)
 }

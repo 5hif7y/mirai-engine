@@ -976,14 +976,17 @@ animation_play :: proc(animation:^Animation,clip:string,fade:f32=-1,loop:Maybe(b
     return true
 }
 
-// The weight of a layer, reached over its fade; layer 0 is the weight of the component.
+// The weight of a layer, reached over its fade; layer 0 is the weight of the component. A layer at
+// weight 0 keeps its clip, to come back to with a higher weight, so it stays taken for actions;
+// animation_stop frees it.
 animation_weight :: proc(animation:^Animation,layer:int,weight:f32) -> bool {
     if animation==nil || layer<0 || layer>ANIMATION_LAYERS || !finite(weight) {return false}
     if layer==0 {animation.weight=mm.saturate(weight)} else {animation.layers[layer-1].weight=mm.saturate(weight)}
     return true
 }
 
-// Fades a layer out over fade seconds (below zero: its own fade); layer 0 stops the clip of the component where it is.
+// Fades a layer out over fade seconds (below zero: its own fade) and frees it at once for an action,
+// which cross-fades from what is fading; layer 0 stops the clip of the component where it is.
 animation_stop :: proc(animation:^Animation,layer:int,fade:f32=-1) -> bool {
     if animation==nil || layer<0 || layer>ANIMATION_LAYERS || !finite(fade) {return false}
     if layer==0 {animation.playing=false;return true}

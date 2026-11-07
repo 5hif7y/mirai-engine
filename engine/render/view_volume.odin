@@ -81,7 +81,7 @@ postprocess_effects :: proc(a:^host.Assets,layers:[POST_PROCESS_CAPACITY]Post_Pr
     for layer in layers {
         if !layer.enabled || layer.material=={} {continue}
         if effect,usable:=host.assets_postprocess(a,layer.material);usable {
-            effect.after_tonemap=layer.after_tonemap
+            effect.after_tonemap,effect.fade=layer.after_tonemap,layer.fade
             effects.entries[effects.count]=effect
             effects.count+=1
         }

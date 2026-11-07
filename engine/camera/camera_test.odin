@@ -382,8 +382,9 @@ a_shake_channel_joins_its_keys_by_their_slopes :: proc(t:^testing.T) {
     testing.expect(t,shake_channel_at({},1)==0,"a channel without keys adds nothing")
 }
 
-// A camera turns its view by the shakes asked of it, at their rate and scale, blended in and out,
-// until they end; one asked again while it plays starts over when single and adds another when not.
+// A camera turns its view and widens its perspective lens by the shakes asked of it, at their rate
+// and scale, blended in and out, until they end; one asked again while it plays starts over when
+// single and adds another when not.
 @(test)
 a_camera_plays_sequence_shakes_over_its_view_until_they_end :: proc(t:^testing.T) {
     f:=test_make()
@@ -446,14 +447,79 @@ a_camera_plays_sequence_shakes_over_its_view_until_they_end :: proc(t:^testing.T
     shakes_take(&f.follows,&shakes,&problems)
     testing.expect(t,core.problem_find(&problems,camera,"camera.shake")!=nil,"a shake without length is a problem")
     testing.expect(t,core.problem_find(&problems,body,"camera.shake")!=nil,"and one asked of what does not follow")
+
+    zoom:Shake_Sequence
+    zoom.fov.keys[0]={value=0.2}
+    zoom.fov.count=1
+    zoom.length,zoom.scale=1,0.5
+    camera_shake(&shakes,camera,zoom)
+    shakes_take(&f.follows,&shakes,&problems)
+    lens:=core.get(&f.cameras,camera)
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)
+    testing.expectf(t,close(lens.fov,1.3,1e-5),"the lens of its mode plus scale times its key: %v",lens.fov)
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)
+    testing.expectf(t,close(lens.fov,1.3,1e-5),"and not more each frame: %v",lens.fov)
+    lens.projection=.Orthographic
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)
+    testing.expect(t,lens.fov==1.2,"an orthographic lens keeps its own")
+    lens.projection=.Perspective
+    for &p in following.state.shakes {
+        if p.sequence.fov.count>0 {p.sequence.scale=100}
+    }
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,0.1)
+    testing.expect(t,lens.fov==SHAKE_FOV_MAX,"and a perspective one stays below pi")
+    shake_test_look(f,&transforms,&parents,&moves,camera,body,1)
+    testing.expect(t,lens.fov==1.2,"ended: the lens is its own again")
 }
 
 // How far up the camera looks after following its body dt seconds.
 @(private="file")
 shake_test_look :: proc(f:^Camera_Test,transforms:^core.Table(core.Transform),parents:^core.Table(core.Parent),moves:^core.Table(input.Move_Input),camera,body:core.Entity,dt:f32) -> f32 {
     following:=core.get(&f.follows,camera)
-    follow_one(camera,following,body,transforms,core.read(&f.worlds),core.read(parents),core.read(moves),1,{},{dt=dt,alpha=1},dt)
+    follow_one(camera,following,body,transforms,core.read(&f.worlds),core.read(parents),core.read(moves),1,{},{dt=dt,alpha=1},dt,core.get(&f.cameras,camera))
     placed,_:=core.get(core.read(transforms),camera)
     ahead:=mm.quat_rotate(placed.rotation,{0,0,-1})
     return math.asin(ahead.y) // how far up it looks
+}
+
+@(test)
+a_mode_blend_sheds_the_lag_the_old_pivot_had_as_that_mode_would_have :: proc(t:^testing.T) {
+    f:=test_make()
+    defer test_free(f)
+    camera,body:=core.create(&f.es),core.create(&f.es)
+    core.add(&f.cameras,camera,render.CAMERA_DEFAULT)
+    core.add(&f.follows,camera,Camera_Follow{mode=.Follow,half_life=0.1})
+    test_place(f,camera,{})
+    test_place(f,body,{})
+    test_settle(f)
+    frame:=core.Frame_Time{dt=0.125,alpha=1}
+    v:Camera_View
+    // The pivot trails its goal by 8 m, as after a fast move: the camera drawn is 8 m behind.
+    follow:=core.get(&f.follows,camera)
+    follow.state.ready=true
+    follow.state.pivot.position,follow.state.zone={-8,0,0},{0,0,0}
+    view_update(&v,camera,{},body,core.read(&f.cameras),core.read(&f.follows),core.read(&f.worlds),frame)
+    testing.expect(t,close_vec(v.lag,{-8,0,0}) && close(v.lag_half_life,0.1),"the view keeps the lag of the pivot it saw")
+
+    // A new mode with a long blend: the old mode would have closed its lag in a few half-lives.
+    follow.state.changes=1
+    follow.state.blend={2,.Linear}
+    follow.state.pivot.position=follow.state.zone
+    test_place(f,camera,{10,0,0})
+    view_update(&v,camera,{},body,core.read(&f.cameras),core.read(&f.follows),core.read(&f.worlds),frame)
+    shed:=f32(8*(1-math.exp(-math.LN2*0.125/0.1)))
+    want:=shed+(10-shed)*(0.125/2)
+    testing.expectf(t,v.blending && close(v.pose.position.x,want,0.01),"what it left sheds the lag: %v, want %v",v.pose.position.x,want)
+    for _ in 0..<3 {view_update(&v,camera,{},body,core.read(&f.cameras),core.read(&f.follows),core.read(&f.worlds),frame)}
+    testing.expectf(t,v.blending && v.pose.position.x>7.5,"half a second in, the lag is gone and only the framing still blends: %v",v.pose.position.x)
+
+    // Another camera (an override) keeps blending from what it drew.
+    other:=core.create(&f.es)
+    core.add(&f.cameras,other,render.CAMERA_DEFAULT)
+    test_place(f,other,{20,0,0})
+    test_settle(f)
+    v2:Camera_View
+    v2.camera,v2.pose,v2.lag,v2.lag_half_life=camera,{position={0,0,0},rotation=1},{-8,0,0},0.1
+    view_update(&v2,other,{0.5,.Linear},body,core.read(&f.cameras),core.read(&f.follows),core.read(&f.worlds),frame)
+    testing.expect(t,v2.from_half_life==0,"entering another camera sheds nothing")
 }

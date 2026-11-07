@@ -99,7 +99,7 @@ actions_segment_sections_and_windows_copy_state_and_obey_cancellation_without_st
     reserve_description:=core.free(&descriptions,entity);reserve_description.layers[0].clip=base.name_hash("wave")
     clear(&requests.queue.items);testing.expect(t,action_fire(&requests,entity,"attack"));testing.expect(t,actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,&problems))
     refused:=core.problem_find(&problems,entity,"animation.action_layer")
-    testing.expect(t,refused!=nil && strings.contains(core.problem_text(refused),"action 'attack' cannot play: its layer 1 plays a clip of animation_play") && actions.states[0].layers[0]==before)
+    testing.expect(t,refused!=nil && strings.contains(core.problem_text(refused),"action 'attack' cannot play: its layer 1 holds a clip of animation_play") && actions.states[0].layers[0]==before)
     clear(&requests.queue.items);for _ in 0..<REQUEST_CAPACITY {testing.expect(t,action_fire(&requests,entity,"attack"))};testing.expect(t,!action_fire(&requests,entity,"attack"))
 }
 
@@ -325,4 +325,33 @@ actions_retry_a_first_fire_when_profile_preparation_has_no_memory :: proc(t:^tes
     context=saved;app.allocator=saved.allocator;actions.allocator=saved.allocator;cache.allocator=saved.allocator
     testing.expect(t,prepared && len(requests.queue.items)==1 && len(actions.plans)==0 && !action_state(&actions,entity).layers[0].active)
     testing.expect(t,actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,nil) && len(requests.queue.items)==0 && action_state(&actions,entity).layers[0].active && actions.events.items[0].kind==.Started)
+}
+
+@(test)
+action_playing_answers_while_an_action_plays_and_animation_stop_frees_a_layer_that_weight_zero_keeps :: proc(t:^testing.T) {
+    entities:core.Entities;core.entities_init(&entities);defer core.entities_destroy(&entities);entity:=core.create(&entities)
+    descriptions:core.Table(Animation);defer core.table_destroy(&descriptions);description:=ANIMATION_DEFAULT;description.actions={3,4};core.add(&descriptions,entity,description);core.table_settle(&descriptions,&entities)
+    cache:=Actions_Assets{allocator=context.allocator};defer actions_assets_free(&cache);append(&cache.contents,Action_Content{id={3,4},checked=1,revision=1,profile=action_test_profile(),valid=true})
+    host_assets:host.Assets;app:=host.App{assets=&host_assets,allocator=context.allocator};playback:Playback;defer playback_free(&playback)
+    actions:Action_Runtime;defer actions_runtime_free(&actions);requests:Action_Requests;defer delete(requests.queue.items)
+    problems:core.Problems
+    _,_,playing:=action_playing({&actions},entity,"attack");testing.expect(t,!playing)
+    // A pose faded out to weight 0 keeps its clip, so the layer stays taken.
+    testing.expect(t,animation_play(core.get(&descriptions,entity),"wave",layer=1) && animation_weight(core.get(&descriptions,entity),1,0))
+    testing.expect(t,action_fire(&requests,entity,"attack") && actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,&problems))
+    _,_,playing=action_playing({&actions},entity,"attack")
+    testing.expect(t,core.problem_find(&problems,entity,"animation.action_layer")!=nil && !playing)
+    // animation_stop frees it in the same tick.
+    core.problems_clear(&problems)
+    testing.expect(t,animation_stop(core.get(&descriptions,entity),1,.3) && core.get(&descriptions,entity).layers[0].fade==.3)
+    testing.expect(t,action_fire(&requests,entity,"attack") && actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,&problems))
+    time,section,ok:=action_playing({&actions},entity,"attack")
+    testing.expect(t,core.problem_find(&problems,entity,"animation.action_layer")==nil && ok && time==0 && section==base.name_hash("windup"))
+    _,_,playing=action_playing({&actions},entity,"interrupt");testing.expect(t,!playing)
+    _,_,playing=action_playing({&actions},core.NONE,"attack");testing.expect(t,!playing)
+    testing.expect(t,action_section(&requests,entity,"attack","recover") && actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,&problems))
+    time,section,ok=action_playing({&actions},entity,"attack");testing.expect(t,ok && time==1 && section==base.name_hash("recover"))
+    // Cancelled, it fades out and no longer plays.
+    testing.expect(t,action_cancel(&requests,entity,"attack") && actions_prepare(&actions,&requests,&cache,core.read(&descriptions),&playback,&app,&problems))
+    _,_,playing=action_playing({&actions},entity,"attack");testing.expect(t,!playing && actions.states[0].layers[0].finishing)
 }

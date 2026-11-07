@@ -147,7 +147,8 @@ or interleave its own passes.
     - Ordered PostProcess programs read the last image a pass wrote (`Display`, or `Taa` of
       `Resolve` or of an [own pass](views.md#render-pipelines) in its place), exposed (mid gray is
       0.18), and write alternating targets, before the tonemap. The stack's targets are created
-      when an active entry uses them.
+      when an active entry uses them. An effect's result goes back toward what it read by its
+      `fade`; one faded out does not run, though a limited inspection counts it.
     - Besides that image, the effects read only what the `Output` stage declares in
       `stage_contract`: the linear depth, the normal and the mask of the [outlines](#outlines).
       Each effect measures its time with its side and its place in the list

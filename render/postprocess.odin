@@ -4,7 +4,9 @@ import "core:fmt"
 import "mirai:rhi"
 
 POSTPROCESS_CAPACITY :: 8
-Postprocess_Desc :: struct {program:u32,params:[16]Vec4,after_tonemap,enabled:bool}
+// fade: the share of the image the effect leaves as it read it, 0 to 1 (0: the whole effect; 1:
+// it does not run, though a limited inspection still counts it).
+Postprocess_Desc :: struct {program:u32,params:[16]Vec4,fade:f32,after_tonemap,enabled:bool}
 Postprocess_List :: struct {count:u32,entries:[POSTPROCESS_CAPACITY]Postprocess_Desc}
 
 // The effects of each side of the tonemap a view runs, the first ones of
@@ -35,7 +37,7 @@ postprocess_list :: proc "contextless" (r:^Renderer,camera:Camera)->^Postprocess
 postprocess_active :: proc(p:^Pass,after:bool)->bool {
     list:=postprocess_list(p.r,p.camera)
     for &effect in list.entries[:list.count] {
-        if effect.enabled && effect.after_tonemap==after && effect.program!=0 {return true}
+        if effect.enabled && effect.after_tonemap==after && effect.program!=0 && effect.fade<1 {return true}
     }
     return false
 }
@@ -70,12 +72,14 @@ postprocess_passes :: proc(p:^Pass,source:rhi.Texture,after:bool)->rhi.Texture {
     outlined:=highlight_drawn_in(p)
     if !outlined {mask=r.dummy_texture}
     current:=source
-    written:=0
+    counted:=0
     limit:=postprocess_limit(p.inspection,after)
     list:=postprocess_list(r,p.camera)
     for &effect,index in list.entries[:list.count] {
         if !effect.enabled || effect.after_tonemap!=after || effect.program==0 {continue}
-        if written>=limit {break}
+        if counted>=limit {break}
+        counted+=1
+        if !(effect.fade<1) {continue}
         target:=postprocess_next(r,t,current,after)
         if target==0 {break}
         name:[32]u8
@@ -90,7 +94,7 @@ postprocess_passes :: proc(p:^Pass,source:rhi.Texture,after:bool)->rhi.Texture {
         rhi.cmd_begin_render_pass(cmd,&pass)
         rhi.cmd_bind_pipeline(cmd,r.pipelines[.Postprocess_Ldr if after else .Postprocess_Hdr])
         // Before the tonemap an effect sees the image exposed (postprocess.frag).
-        params:=Gpu_Post_Parameters{program=effect.program,exposed=0 if after else 1,outlined=1 if outlined else 0,values=effect.params}
+        params:=Gpu_Post_Parameters{program=effect.program,exposed=0 if after else 1,outlined=1 if outlined else 0,fade=max(effect.fade,0),values=effect.params}
         set_params(cmd,&params)
         rhi.cmd_bind_texture(cmd,SLOT_PASS0,current)
         rhi.cmd_bind_texture(cmd,SLOT_PASS1,depth)
@@ -99,7 +103,7 @@ postprocess_passes :: proc(p:^Pass,source:rhi.Texture,after:bool)->rhi.Texture {
         rhi.cmd_bind_texture(cmd,SLOT_PASS4,mask)
         rhi.cmd_draw(cmd,3)
         rhi.cmd_end_render_pass(cmd)
-        current=target;written+=1
+        current=target
     }
     return current
 }

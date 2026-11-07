@@ -51,6 +51,7 @@ authoring_skeleton_register :: proc(s:^editor.Session) {
     socket:=Socket_Set_Params{offset=mm.TRANSFORM_IDENTITY}
     authoring_method_register(s,{name="skeleton.create",summary="Creates a .skeleton from its bones, parents before children, and its named sockets; an omitted transform of a bone is identity.",params=Skeleton_Create_Params,params_info=type_info_of(Skeleton_Create_Params),defaults=create,run=authoring_skeleton_create},Authoring_Write_Result,type_info_of(Authoring_Write_Result))
     authoring_method_register(s,{name="skeleton.bone.set",summary="Replaces the name and rest pose of a bone; its path and parent stay, since meshes and tracks refer to them.",params=Skeleton_Bone_Set_Params,params_info=type_info_of(Skeleton_Bone_Set_Params),defaults=&bone,run=authoring_bone_set},Authoring_Write_Result,type_info_of(Authoring_Write_Result))
+    authoring_bone_add_register(s)
     authoring_method_register(s,{name="skeleton.socket.set",summary="Creates, replaces or removes a named socket of a .skeleton.",params=Socket_Set_Params,params_info=type_info_of(Socket_Set_Params),defaults=&socket,run=authoring_socket_set},Authoring_Write_Result,type_info_of(Authoring_Write_Result))
 }
 

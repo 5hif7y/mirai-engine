@@ -100,21 +100,23 @@ inspect :: proc(s:^editor.Session,call:^api.Call) {
     if u.kit=={} {serial.text_write_raw(w,"null")} else {serial.text_write_string(w,core.record_name(kits,u.kit) if core.record_name(kits,u.kit)!="" else "missing row")}
     row_write(w,"ability",abilities,u.ability)
     active:=ab.ability_sheet(abilities,u.ability)
-    local:i64
+    at:ab.Ability_Time
     if active!=nil {
-        local=i64(time.tick-u.start) if time.tick>=u.start else 0
-        api.write_key(w,"seconds");api.write_number(w,f32(local)*dt)
+        at={local=i64(time.tick-u.start) if time.tick>=u.start else 0,own=u.own}
+        api.write_key(w,"seconds");api.write_number(w,f32(at.local)*dt)
+        api.write_key(w,"own_seconds");api.write_number(w,at.own*dt)
         api.write_key(w,"duration");api.write_number(w,active.duration)
         api.write_key(w,"windows")
         serial.text_write_raw(w,"[")
         listed:=0
         for &win,i in active.windows {
-            if !ab.ability_window_open(win,dt,local) {continue}
+            if !ab.ability_window_open(win,dt,at) {continue}
             if listed>0 {serial.text_write_raw(w,",")}
             serial.text_write_raw(w,"{")
             api.write_int(w,"index",i64(i),true)
             api.write_key(w,"from");api.write_number(w,win.from)
             api.write_key(w,"to");api.write_number(w,win.to)
+            if win.clock==.Own {api.write_text(w,"clock","own")}
             if win.cancel_into!=0 {bits_write(s,w,"cancel_into",ab.Ability_Tag,u64(win.cancel_into))}
             if win.hitbox.shape!=.None {api.write_text(w,"hitbox",fmt.tprintf("%v",win.hitbox.shape))}
             if win.cue!=ab.CUE_NONE {api.write_text(w,"cue",value_name(s,ab.Ability_Cue,i64(win.cue)))}
@@ -148,6 +150,7 @@ inspect :: proc(s:^editor.Session,call:^api.Call) {
         serial.text_write_raw(w,"{")
         row_write(w,"ability",abilities,b.ability,true)
         api.write_key(w,"seconds_ago");api.write_number(w,f32(time.tick-b.tick)*dt if time.tick>=b.tick else 0)
+        if b.running && u.ability!={} && u.start==b.run {api.write_key(w,"waits_for_running");serial.text_write_raw(w,"true")}
         serial.text_write_raw(w,"}")
         listed+=1
     }
@@ -200,7 +203,7 @@ inspect :: proc(s:^editor.Session,call:^api.Call) {
             case a==nil: api.write_text(w,"blocked","its row is missing")
             case ab.ability_check(a,text[:])!="": api.write_text(w,"blocked",fmt.tprintf("its sheet is not valid: %s",ab.ability_check(a,text[:])))
             case:
-                block:=ab.start_block(&params,time.tick,dt,e,&u,kit,active,local,a,ref)
+                block:=ab.start_block(&params,time.tick,dt,e,&u,kit,active,at,a,ref)
                 api.write_text(w,"blocked",block_text(block))
             }
             serial.text_write_raw(w,"}")

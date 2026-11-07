@@ -792,8 +792,8 @@ agents_test_step :: proc(f:^Nav_Test,g:^Agents_Test) {
         &g.roamings,&f.disabled,{&f.transforms,core.read(&f.parents),&f.places,&f.jumps},&f.requests,time,&f.problems)
     agents_test_settle(f,g)
     navigation_crossing(core.read(&g.paths),&f.moves,core.read(&f.characters),core.read(&g.walks),core.read(&f.motions),core.read(&g.worlds),core.ref(&f.state),time)
-    no_slides:core.Table(phys.Slide);no_mantles:core.Table(phys.Mantle)
-    phys.locomotion_step(&f.characters,&f.moves,&g.inputs,core.read(&g.walks),core.read(&g.flights),core.read(&g.swims),core.read(&no_slides),core.read(&no_mantles),core.read(&f.character_states),core.read(&f.motions),core.read(&f.transforms),core.read(&f.parents),core.read(&g.remotes),core.ref(&f.state),{},{},&g.loco,time,core.CLOCK_DEFAULT,&f.problems)
+    no_slides:core.Table(phys.Slide);no_mantles:core.Table(phys.Mantle);no_tacticals:core.Table(phys.Tactical_Sprint);no_ledges:core.Table(phys.Ledge_Jump)
+    phys.locomotion_step(&f.characters,&f.moves,&g.inputs,core.read(&g.walks),core.read(&g.flights),core.read(&g.swims),core.read(&no_slides),core.read(&no_mantles),core.read(&no_tacticals),core.read(&no_ledges),core.read(&f.character_states),core.read(&f.motions),core.read(&f.transforms),core.read(&f.parents),core.read(&g.remotes),core.ref(&f.state),{},{},&g.loco,time,core.CLOCK_DEFAULT,&f.problems)
     agents_test_settle(f,g)
     phys.physics_step(
         &f.state,core.ref(&f.physics_settings),&f.requests,&f.events,&f.meshes,&f.app,time,

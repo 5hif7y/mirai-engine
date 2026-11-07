@@ -1,5 +1,6 @@
 package physics
 
+import cmath "core:math"
 import "core:math/linalg"
 import "core:testing"
 import input "mirai:engine/input"
@@ -17,6 +18,8 @@ Moves_Test :: struct {
     walk:Walk,
     slide:Maybe(Slide),
     mantle:Maybe(Mantle),
+    tactical:Maybe(Tactical_Sprint),
+    ledge:Maybe(Ledge_Jump),
     asked:f32,
 }
 
@@ -50,6 +53,8 @@ moves_tick :: proc(f:^Moves_Test,move:[3]f32,ticks:=1,buttons:=input.Action_Mask
         found.height=sim.character_desc(&f.w,f.ch).height
         found.cramped=found.height<f.asked-HEIGHT_EPSILON
         given:=input.Move_Input{move=move,look_yaw=yaw,buttons=buttons}
+        f.loco.ledge_ready=false
+        if ledge,has:=f.ledge.?;has {ledge_ready_update(&f.loco,ledge,found,sim.character_velocity(&f.w,f.ch),&f.w,f.ch)}
         if mantle,has:=f.mantle.?;has && (f.loco.mode==MODE_WALKING || f.loco.mode==MODE_FALLING || f.loco.mode==MODE_CROUCHING) {
             if wanted,from_ground:=mantle_wanted(&f.loco,mantle,found,given,TEST_JUMP);wanted {
                 facing:=mm.quat_rotate(mm.quat_axis_angle({0,1,0},yaw),{0,0,-1})
@@ -60,7 +65,7 @@ moves_tick :: proc(f:^Moves_Test,move:[3]f32,ticks:=1,buttons:=input.Action_Mask
         if f.loco.mode==MODE_MANTLING {
             m=mantle_move(&f.loco,f.mantle.?,1,sim.character_position(&f.w,f.ch),given,TEST_JUMP,dt)
         } else {
-            m=locomotion_move(&f.loco,f.walk,{},nil,f.slide,found,1,given,TEST_JUMP,TEST_SPRINT,TEST_CROUCH,sim.character_velocity(&f.w,f.ch),f.w.gravity,dt)
+            m=locomotion_move(&f.loco,f.walk,{},nil,{slide=f.slide,tactical=f.tactical,ledge=f.ledge},found,1,given,TEST_JUMP,TEST_SPRINT,TEST_CROUCH,sim.character_velocity(&f.w,f.ch),f.w.gravity,dt)
         }
         f.asked=f.loco.crouched?f.walk.crouch_height:sim.CHARACTER_DESC_DEFAULT.height
         if abs(sim.character_desc(&f.w,f.ch).height-f.asked)>HEIGHT_EPSILON {_=sim.character_set_height(&f.w,f.ch,f.asked)}
@@ -203,4 +208,203 @@ jump_facing_a_ledge_mantles_onto_it_where_it_fits :: proc(t:^testing.T) {
         testing.expectf(t,state.standing && abs(at.y-c.top)<0.05 && at.z<-1.05,"%v: stands on the top at %v",c,at)
         testing.expect_value(t,f.loco.mode,MODE_WALKING)
     }
+}
+
+// With crouch_toggle a press crouches and the next stands; a press at a sprint slides, at least at
+// min_speed, and the slide ends standing when it moves. A press in the air within buffer of the
+// landing slides on landing even from a run under start_speed, raised to min_speed.
+@(test)
+crouch_toggles_and_a_press_in_the_air_slides_on_landing :: proc(t:^testing.T) {
+    f:Moves_Test
+    testing.expect(t,moves_init(&f,{0,0,0}))
+    defer sim.world_destroy(&f.w)
+    f.walk.crouch_toggle=true
+    f.slide=SLIDE_DEFAULT
+    moves_tick(&f,{},20)
+    moves_tick(&f,{},1,CROUCH)
+    moves_tick(&f,{},20)
+    testing.expect_value(t,f.loco.mode,MODE_CROUCHING)
+    moves_tick(&f,{},1,CROUCH)
+    moves_tick(&f,{},20)
+    testing.expect_value(t,f.loco.mode,MODE_WALKING)
+    // A run at 3: crouch does not slide on the ground.
+    f.walk.max_speed=3
+    moves_tick(&f,{0,0,-1},40)
+    moves_tick(&f,{0,0,-1},1,CROUCH)
+    moves_tick(&f,{0,0,-1},2)
+    testing.expect_value(t,f.loco.mode,MODE_CROUCHING)
+    moves_tick(&f,{0,0,-1},1,CROUCH)
+    moves_tick(&f,{0,0,-1},40)
+    testing.expect_value(t,f.loco.mode,MODE_WALKING)
+    // Jump, press crouch in the air: it slides on landing at min_speed and stands up after it.
+    moves_tick(&f,{0,0,-1},1,JUMP)
+    moves_tick(&f,{0,0,-1},10)
+    moves_tick(&f,{0,0,-1},1,CROUCH)
+    landed:=false
+    for _ in 0..<90 {
+        moves_tick(&f,{0,0,-1})
+        if f.loco.mode==MODE_SLIDING {landed=true;break}
+    }
+    testing.expect(t,landed,"the press in the air slides on landing")
+    moves_tick(&f,{0,0,-1},10)
+    testing.expect_value(t,f.loco.mode,MODE_SLIDING)
+    testing.expectf(t,flat_speed(&f)>=SLIDE_DEFAULT.min_speed-0.05,"slides at least at min_speed: %v",flat_speed(&f))
+    moves_tick(&f,{0,0,-1},80)
+    testing.expect_value(t,f.loco.mode,MODE_WALKING)
+    testing.expect(t,!f.loco.crouch_on,"moving at the end of the slide stands up")
+}
+
+@(private="file") SPRINT :: input.Action_Mask(1)<<u64(TEST_SPRINT)
+
+// Sprint held forward starts a tactical sprint: its top speed ramps to speed_multiplier times
+// sprint_speed and it spends cost_per_second. Let go for less than grace it goes on at the same
+// ramp. Without energy it sprints plainly and does not start again until energy comes back,
+// recharge_delay after it was last spent, at recharge per second.
+@(test)
+a_tactical_sprint_ramps_up_spends_its_energy_and_recharges_after_its_delay :: proc(t:^testing.T) {
+    f:Moves_Test
+    testing.expect(t,moves_init(&f,{0,0,40}))
+    defer sim.world_destroy(&f.w)
+    f.walk.sprint_speed=5.5
+    tactical:=TACTICAL_SPRINT_DEFAULT
+    f.tactical=tactical
+    top:=f.walk.sprint_speed*tactical.speed_multiplier
+    moves_tick(&f,{},20)
+    moves_tick(&f,{0,0,-1},6,SPRINT)
+    testing.expect(t,f.loco.sprint_active,"sprint held forward with energy starts it")
+    testing.expectf(t,flat_speed(&f)<0.85*top,"it ramps up: %v after 0.1 s",flat_speed(&f))
+    moves_tick(&f,{0,0,-1},54,SPRINT)
+    testing.expectf(t,abs(flat_speed(&f)-top)<0.1,"at speed_multiplier after its ramp: %v",flat_speed(&f))
+    testing.expectf(t,abs(f.loco.sprint_spent-tactical.cost_per_second)<0.5,"a second spends cost_per_second: %v",f.loco.sprint_spent)
+    moves_tick(&f,{0,0,-1},15)
+    testing.expect(t,f.loco.sprint_active,"let go for less than grace it goes on")
+    moves_tick(&f,{0,0,-1},10,SPRINT)
+    testing.expectf(t,abs(flat_speed(&f)-top)<0.1,"back at once at the end of its ramp: %v",flat_speed(&f))
+    moves_tick(&f,{0,0,-1},31)
+    testing.expect(t,!f.loco.sprint_active,"let go past grace it ends")
+    // Out of energy it sprints as its Walk says, and energy waits recharge_delay.
+    moves_tick(&f,{0,0,-1},1,SPRINT)
+    testing.expect(t,f.loco.sprint_active)
+    f.loco.sprint_spent=tactical.energy-1
+    moves_tick(&f,{0,0,-1},60,SPRINT)
+    testing.expect(t,!f.loco.sprint_active,"without energy it ends")
+    testing.expectf(t,abs(flat_speed(&f)-f.walk.sprint_speed)<0.1,"and sprints plainly: %v",flat_speed(&f))
+    moves_tick(&f,{},int((tactical.recharge_delay-f.loco.sprint_rest)*60)-2)
+    testing.expectf(t,f.loco.sprint_spent==tactical.energy,"no recharge before its delay: %v",f.loco.sprint_spent)
+    moves_tick(&f,{},62)
+    testing.expectf(t,abs(tactical_energy(f.loco,tactical)-tactical.recharge)<1.5,"a second after its delay it recharged recharge: %v",tactical_energy(f.loco,tactical))
+}
+
+// A jump in a tactical sprint at the end of its ramp rises jump_multiplier times faster and costs
+// cost_jump; in the air it spends nothing, and going down there past fall_grace it ends.
+@(test)
+a_jump_in_a_tactical_sprint_goes_higher_costs_energy_and_a_long_fall_ends_it :: proc(t:^testing.T) {
+    f:Moves_Test
+    testing.expect(t,moves_init(&f,{0,0,40}))
+    defer sim.world_destroy(&f.w)
+    f.walk.sprint_speed=5.5
+    tactical:=TACTICAL_SPRINT_DEFAULT
+    f.tactical=tactical
+    moves_tick(&f,{},20)
+    moves_tick(&f,{0,0,-1},60,SPRINT)
+    spent:=f.loco.sprint_spent
+    moves_tick(&f,{0,0,-1},1,SPRINT|JUMP)
+    testing.expectf(t,abs(f.loco.sprint_spent-spent-tactical.cost_jump)<0.5,"the jump costs cost_jump: %v",f.loco.sprint_spent-spent)
+    spent=f.loco.sprint_spent
+    rise:=f32(0)
+    // It rises for 0.59 s and comes down for as long: past fall_grace of that, still in the air, it ends.
+    for i in 0..<69 {
+        moves_tick(&f,{0,0,-1},1,SPRINT)
+        rise=max(rise,sim.character_position(&f.w,f.ch).y)
+        if i==50 {testing.expect(t,f.loco.sprint_active,"going up and then down within fall_grace it goes on")}
+    }
+    testing.expect(t,f.loco.mode==MODE_FALLING,"still in the air")
+    want:=f.walk.jump_height*tactical.jump_multiplier*tactical.jump_multiplier
+    testing.expectf(t,abs(rise-want)<0.05,"it rises %v, jump_multiplier times faster than to %v",rise,f.walk.jump_height)
+    testing.expect(t,!f.loco.sprint_active,"past fall_grace in the air it ends")
+    testing.expectf(t,f.loco.sprint_spent==spent,"nothing spent in the air: %v",f.loco.sprint_spent-spent)
+}
+
+// Standing at min_speed for min_time with the ground falling away more than min_drop within reach
+// ahead, it is ready, and a jump adds added_speed along where it goes (at most max_speed) and up_speed
+// up; it lasts until it lands. Slower, or over a lower drop, it is never ready and a jump is a jump.
+@(test)
+a_ledge_jump_launches_off_an_edge_at_speed_and_ends_when_it_lands :: proc(t:^testing.T) {
+    Case :: struct {sprint:bool,drop:f32,ready:bool}
+    cases:=[]Case{{sprint=true,drop=3,ready=true},{sprint=false,drop=3},{sprint=true,drop=1}}
+    for c in cases {
+        f:Moves_Test
+        testing.expect(t,moves_init(&f,{0,0,10},false))
+        defer sim.world_destroy(&f.w)
+        moves_box(&f,{5,0.5,15},{0,-0.5,0})              // its top at 0, its edge at z -15
+        moves_box(&f,{20,0.5,40},{0,-c.drop-0.5,-30})   // the ground under it
+        f.walk.sprint_speed=7
+        ledge:=LEDGE_JUMP_DEFAULT
+        f.ledge=ledge
+        buttons:=SPRINT if c.sprint else 0
+        moves_tick(&f,{},20)
+        ready_at:=f32(0)
+        for _ in 0..<300 {
+            moves_tick(&f,{0,0,-1},1,buttons)
+            z:=sim.character_position(&f.w,f.ch).z
+            if z>-10 {testing.expectf(t,!f.loco.ledge_ready,"%v: not ready far from the edge, at z %v",c,z)}
+            if f.loco.ledge_ready || z<-14.8 {
+                ready_at=z
+                break
+            }
+        }
+        testing.expectf(t,f.loco.ledge_ready==c.ready,"%v: ready %v at z %v",c,f.loco.ledge_ready,ready_at)
+        if c.ready {testing.expectf(t,ready_at< -15+ledge.reach+0.05 && ready_at> -15+ledge.reach-0.25,"%v: ready reach before the edge, at z %v",c,ready_at)}
+        before:=flat_speed(&f)
+        moves_tick(&f,{0,0,-1},1,buttons|JUMP)
+        moves_tick(&f,{0,0,-1},1,buttons)
+        v:=sim.character_velocity(&f.w,f.ch)
+        testing.expect_value(t,f.loco.ledge_jumping,c.ready)
+        rise:=f32(4.852)+(ledge.up_speed if c.ready else 0) // sqrt(2 g jump_height) of WALK_DEFAULT
+        testing.expectf(t,abs(v.y-rise)<0.4,"%v: it goes up at %v",c,v.y)
+        if c.ready {
+            testing.expectf(t,abs(flat_speed(&f)-min(before+ledge.added_speed,ledge.max_speed))<0.1,"%v: launched at %v from %v",c,flat_speed(&f),before)
+            moves_tick(&f,{0,0,-1},20,buttons)
+            testing.expectf(t,flat_speed(&f)>ledge.max_speed-0.1,"%v: air control steers it without slowing it: %v",c,flat_speed(&f))
+        } else {
+            testing.expectf(t,abs(flat_speed(&f)-before)<0.2,"%v: a plain jump keeps its speed %v: %v",c,before,flat_speed(&f))
+        }
+        landed:=false
+        for _ in 0..<240 {
+            moves_tick(&f,{},1)
+            if character_state_of(sim.character_state(&f.w,f.ch)).standing {landed=true;break}
+        }
+        testing.expectf(t,landed,"%v: it lands",c)
+        moves_tick(&f,{},1)
+        testing.expectf(t,!f.loco.ledge_jumping,"%v: the landing ends it",c)
+    }
+}
+
+// A jump let go at once rises jump_height; held, it keeps the speed it started with for jump_rise and
+// rises that speed by jump_rise more; held longer, no more than that.
+@(test)
+a_jump_held_rises_at_its_speed_for_jump_rise :: proc(t:^testing.T) {
+    peak :: proc(t:^testing.T,held_ticks:int,rise:f32) -> f32 {
+        f:Moves_Test
+        testing.expect(t,moves_init(&f,{0,0,0}))
+        defer sim.world_destroy(&f.w)
+        f.walk.jump_rise=rise
+        moves_tick(&f,{},20)
+        start:=sim.character_position(&f.w,f.ch).y
+        top:=start
+        for i in 0..<90 {
+            moves_tick(&f,{},1,JUMP if i<held_ticks else input.Action_Mask(0))
+            top=max(top,sim.character_position(&f.w,f.ch).y)
+        }
+        return top-start
+    }
+    g:=f32(9.81)
+    speed:=cmath.sqrt(2*g*WALK_DEFAULT.jump_height)
+    tapped:=peak(t,1,0.25)
+    testing.expectf(t,abs(tapped-WALK_DEFAULT.jump_height)<0.05,"let go at once it rises %v, not jump_height %v",tapped,WALK_DEFAULT.jump_height)
+    held:=peak(t,60,0.25)
+    want:=WALK_DEFAULT.jump_height+speed*0.25
+    testing.expectf(t,abs(held-want)<0.08,"held it rises %v, want %v",held,want)
+    without:=peak(t,60,0)
+    testing.expectf(t,abs(without-WALK_DEFAULT.jump_height)<0.05,"without jump_rise holding does nothing: %v",without)
 }

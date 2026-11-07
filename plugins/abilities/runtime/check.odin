@@ -10,6 +10,9 @@ ability_check :: proc(a:^Ability,out:[]u8) -> string {
     if a==nil {return ""}
     if a.input.on>max(Ability_Trigger) {return fmt.bprintf(out,"input.on is %d, not a trigger: use none, pressed, released, held or down",u8(a.input.on))}
     if !seconds_ok(a.input.hold) {return fmt.bprintf(out,"input.hold is %v: give the seconds the action is held, 0 or more",a.input.hold)}
+    if !seconds_ok(a.input.after) {return fmt.bprintf(out,"input.after is %v: give the seconds into a running ability from which the input counts, 0 or more",a.input.after)}
+    if a.input.wait>max(Ability_Wait) {return fmt.bprintf(out,"input.wait is %d: use buffer or running",u8(a.input.wait))}
+    if a.input.on==.None && (a.input.after!=0 || a.input.wait!=.Buffer) {return "input.after or input.wait is set but input.on is none, so no input fires: give the trigger, or clear them"}
     if !finite(a.duration) || a.duration<=0 {return fmt.bprintf(out,"duration is %v: give the seconds the ability lasts, above 0",a.duration)}
     if !seconds_ok(a.cooldown) {return fmt.bprintf(out,"cooldown is %v: give the seconds before it starts again, 0 or more",a.cooldown)}
     if len(ability_name_text(&a.action))>0 && len(ability_name_text(&a.clip))>0 {return fmt.bprintf(out,"plays both the action %q and the clip %q: keep the action for a layer over locomotion or the clip for the whole body",ability_name_text(&a.action),ability_name_text(&a.clip))}
@@ -29,7 +32,8 @@ ability_check :: proc(a:^Ability,out:[]u8) -> string {
             continue
         }
         if !finite(w.from) || !finite(w.to) || w.from<0 || w.from>=w.to {return fmt.bprintf(out,"windows[%d] runs from %v to %v: from must be 0 or more and below to",i,w.from,w.to)}
-        if w.to>a.duration {return fmt.bprintf(out,"windows[%d] closes at %v, after the duration %v: close it by then or lengthen the ability",i,w.to,a.duration)}
+        if w.clock>max(Ability_Clock) {return fmt.bprintf(out,"windows[%d].clock is %d: use world or own",i,u8(w.clock))}
+        if w.clock==.World && w.to>a.duration {return fmt.bprintf(out,"windows[%d] closes at %v, after the duration %v: close it by then or lengthen the ability",i,w.to,a.duration)}
         if text:=modifier_check(w.modify,out);text!="" {return fmt.bprintf(out,"windows[%d].modify %s",i,text)}
         if w.hitbox.shape>max(Hitbox_Shape) {return fmt.bprintf(out,"windows[%d].hitbox.shape is %d: use none, box, sphere or capsule",i,u8(w.hitbox.shape))}
         if w.hitbox.shape!=.None {

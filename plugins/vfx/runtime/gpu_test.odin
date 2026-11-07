@@ -317,6 +317,48 @@ ribbon_lays_a_band_along_the_path_of_its_emitter :: proc(t: ^testing.T) {
 }
 
 @(test)
+mesh_particles_of_a_blending_material_cover_by_their_alpha :: proc(t: ^testing.T) {
+	f := new(Gpu_Fixture)
+	defer free(f)
+	settings := test_settings()
+	settings.taa = false
+	if !gpu_fixture_init(t, f, 128, 64, settings) {return}
+	defer gpu_fixture_destroy(f)
+	r := &f.renderer
+	red := gpu.DEFAULT_MATERIAL
+	red.base_color, red.alpha_mode = {1, 0.05, 0.05}, .Blend
+	gpu.materials_set(r, {red})
+	gpu.scene_set(r, {{object_id = 1, mesh = f.cube, transform = trs({0, 0, -2}, {12, 12, 0.2}), tint = {0.1, 0.1, 0.1}}}, nil, {}, {sky = {0.02, 0.02, 0.02}})
+	camera := gpu.Camera{position = {0, 0, 5}, forward = {0, 0, -5}, up = {0, 1, 0}, fov_y = 60, near = 0.05, far = 100, exposure = gpu.UNIT_EXPOSURE}
+	// Two cubes of the material: one with full alpha, one whose curve takes its alpha to zero.
+	shown := test_emitter(1, {-1.2, 0, 0})
+	shown.render, shown.mesh, shown.material, shown.blended, shown.blend = .Mesh, f.cube_range, 1, true, .Alpha
+	shown.lifetime, shown.size, shown.soft, shown.relative, shown.intensity = {10, 10}, {1, 1}, 0, true, 1
+	faded := shown
+	faded.id, faded.transform, faded.previous = 2, trs({1.2, 0, 0}, {1, 1, 1}), trs({1.2, 0, 0}, {1, 1, 1})
+	faded.color = {{1, 1, 1, 0}, {1, 1, 1, 0}}
+	DT :: f32(1.0 / 60)
+	for i in 0 ..< 8 {
+		shown.spawns = test_burst(1) if i == 0 else {}
+		faded.spawns = shown.spawns
+		testing.expect(t, frame_emitters(f, &f.sync, {shown, faded}, DT))
+		testing.expect(t, gpu.renderer_frame(r, {camera = camera, time = f32(i) * DT}), r.error)
+	}
+	rhi.device_wait_idle(f.device)
+	testing.expect_value(t, f.sync.pool.meshes, false)
+	pixels, w, _, ok := gpu.renderer_capture(r)
+	testing.expect(t, ok, r.error)
+	if !ok {return}
+	defer delete(pixels)
+	cover := pixel(pixels, w, project(r, camera, {-1.2, 0, 0.5}))
+	clear := pixel(pixels, w, project(r, camera, {1.2, 0, 0.5}))
+	wall := pixel(pixels, w, project(r, camera, {0, 1.5, 0}))
+	testing.expectf(t, cover[0] > wall[0] + 80 && cover[0] > cover[1] + 60, "the cube of full alpha %v must show its red over the wall %v", cover, wall)
+	testing.expectf(t, abs(clear[0] - wall[0]) < 12 && abs(clear[1] - wall[1]) < 12, "the cube of no alpha %v must leave the wall %v as it is", clear, wall)
+	expect_clean(t, f.device)
+}
+
+@(test)
 particle_lists_given_between_frames_add_up :: proc(t: ^testing.T) {
 	f := new(Gpu_Fixture)
 	defer free(f)

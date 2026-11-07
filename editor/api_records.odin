@@ -52,6 +52,7 @@ Records_Api_Context :: struct {
     tables:[]Records_Api_Rows,
     edit:^Records_Edit,      // the table that changes: its rows stand for those of its file in tables
     registry:^asset.Registry, // nil: assets go by id only
+    default:[]u8,            // a new row of the type; nil: zeros
 }
 
 Records_Api_Leaf_Kind :: enum u8 {
@@ -162,7 +163,7 @@ Api_Records_Export :: struct {
 
 @(private) RECORDS_API_P_RECORDS :: `"records":{"type":"string","description":"A table of game data: its path under the assets folder, with or without .records, or its id; records.types lists them"}`
 @(private) RECORDS_API_P_ROW :: `"row":{"type":"string","description":"The name of a row, as records.inspect lists them"}`
-@(private) RECORDS_API_P_VALUES :: `"values":{"type":"object","description":"Fields of the row over those it has, as records.inspect shows them; a partial object keeps the rest. A core.Record field also takes the name of a row (\"sword\") or its table and name (\"data/weapons/sword\"); a core.Text field also takes its source text"}`
+@(private) RECORDS_API_P_VALUES :: `"values":{"type":"object","description":"Fields of the row, as records.inspect shows them, or paths of a part of one (\"stats.speed\", \"windows[2].to\"); each is set whole: an object or a list leaves what it does not give at the default of the type, and what no key names keeps its value. A core.Record field also takes the name of a row (\"sword\") or its table and name (\"data/weapons/sword\"); a core.Text field also takes its source text"}`
 @(private) RECORDS_API_P_TEXTS :: `"texts":{"type":"object","description":"Texts of core.Text fields by field path, each by language code, as {\"title\":{\"\":\"Sword\",\"es\":\"Espada\"}}; \"\" is the language the game is written in and an empty translation removes it"}`
 
 @(private) RECORDS_API_CREATE_SCHEMA :: `{"type":"object","properties":{"path":{"type":"string","description":"Where the new table goes, under the assets folder; .records is added when missing"},"type":{"type":"string","description":"The type of its rows as library.Name, as records.types lists them"}},"required":["path","type"],"additionalProperties":false}`
@@ -877,20 +878,73 @@ records_api_copy :: proc(r:^serial.Text_Reader,out:^serial.Writer) -> (message:s
     return ""
 }
 
-// Puts the values of the params over a row: core.Record fields may be named
+// Puts the values of the params over a row. Each key is a field of the row or
+// the path of a part of one (stats.speed, windows[2].to), and its value is
+// that part whole: an object or a list leaves what it does not give at the
+// default of the row type (zeros where the type has none), while the fields
+// and parts no key names keep what they have. core.Record fields may be named
 // by their rows and core.Text fields by their source text, which go to texts.
 records_api_values_put :: proc(c:^Records_Api_Context,row:[]u8,values:string,texts:^[dynamic]Records_Api_Text) -> (message:string) {
     if values=="" {return ""}
     r:serial.Text_Reader
     serial.text_reader_init(&r,values,context.temp_allocator)
-    if serial.text_peek(&r)!='{' {return "values must be an object of fields of the row"}
-    out:serial.Writer
-    serial.writer_init(&out,len(values)+64,context.temp_allocator)
-    if message=records_api_rewrite(c,&r,c.type,"",&out,texts);message!="" {return}
+    if !serial.text_accept(&r,'{') {return "values must be an object of fields of the row"}
+    if !serial.text_accept(&r,'}') {
+        for {
+            key,read:=serial.text_string(&r)
+            if !read || !serial.text_expect(&r,':') {return records_api_json_error(&r,"values")}
+            key=strings.clone(key,context.temp_allocator)
+            if message=records_api_value_put(c,&r,row,key,texts);message!="" {return}
+            if serial.text_accept(&r,',') {continue}
+            if !serial.text_expect(&r,'}') {return records_api_json_error(&r,"values")}
+            break
+        }
+    }
     if !serial.text_end(&r) {return records_api_json_error(&r,"values")}
+    return ""
+}
+
+// The value of one key of values, read from r into the part of row that key
+// names.
+@(private)
+records_api_value_put :: proc(c:^Records_Api_Context,r:^serial.Text_Reader,row:[]u8,key:string,texts:^[dynamic]Records_Api_Text) -> (message:string) {
+    s:=c.schema
+    target,error,at:=serial.path_resolve(s,c.type,key)
+    if error==.None && target.bit>=0 {error=.Not_A_Struct}
+    if error!=.None {
+        parent:=strings.trim_right(key[:at],".")
+        fields:=make([dynamic]string,context.temp_allocator)
+        if within,_,_:=serial.path_resolve(s,c.type,parent);serial.type_valid(s,within.type) && records_api_kind(s.types[within.type])==.Struct {
+            for field in serial.schema_fields(s,within.type) {append(&fields,field.name)}
+        }
+        if len(fields)==0 {return fmt.tprintf("values.%s is not a field of %s nor the path of a part of one (stats.speed, windows[2].to)",key,c.name)}
+        return fmt.tprintf("values.%s names no part of %s: the fields there are %s",key,c.name,strings.join(fields[:],", ",context.temp_allocator))
+    }
+    // An object or a list is the whole part: what it leaves out goes back to the default.
+    serial.text_space(r)
+    peek:=serial.text_peek(r)
+    whole:=(peek=='{' || peek=='[') && !(c.text!=serial.TYPE_NONE && target.type==c.text)
+    out:serial.Writer
+    serial.writer_init(&out,64,context.temp_allocator)
+    if message=records_api_rewrite(c,r,target.type,key,&out,texts);message!="" {return}
+    part:=row[target.offset:][:s.types[target.type].size]
+    before:=slice.clone(part,context.temp_allocator)
+    if whole {
+        if len(c.default)>=len(row) {copy(part,c.default[target.offset:][:len(part)])} else {mem.zero_slice(part)}
+    }
     rewritten:serial.Text_Reader
     serial.text_reader_init(&rewritten,string(serial.writer_bytes(&out)),context.temp_allocator)
-    if !serial.text_read(&rewritten,c.schema,c.type,row) {return serial.text_error_message(&rewritten,"values",context.temp_allocator)}
+    if !serial.text_read(&rewritten,s,target.type,part,target.text) || !serial.text_end(&rewritten) {
+        return serial.text_error_message(&rewritten,fmt.tprintf("values.%s",key),context.temp_allocator)
+    }
+    // The texts of a part given whole stay its texts: they change through texts or a source text.
+    if whole && c.text!=serial.TYPE_NONE {
+        for leaf in records_api_leaves(c) {
+            if leaf.kind!=.Text || leaf.offset<target.offset || leaf.offset+size_of(core.Text)>target.offset+len(part) {continue}
+            text:=cast(^core.Text)&row[leaf.offset]
+            if text.id==0 {text^=(cast(^core.Text)&before[leaf.offset-target.offset])^}
+        }
+    }
     return ""
 }
 
@@ -990,6 +1044,7 @@ records_api_context :: proc(s:^Session,e:^Records_Edit) -> (c:Records_Api_Contex
         if t,found:=ws.schema.lookup[r.ref];found {append(&refs,Records_Api_Ref_Type{t,i,records_type_name(info,i)})}
     }
     c.refs=refs[:]
+    c.default=records_api_default(s,e)
     leaves=records_api_leaves(&c)
     tables:=make([dynamic]Records_Api_Rows,context.temp_allocator)
     for &leaf in leaves {
@@ -1011,6 +1066,18 @@ records_api_context :: proc(s:^Session,e:^Records_Edit) -> (c:Records_Api_Contex
     }
     c.tables=tables[:]
     return
+}
+
+// The bytes of a new row of the table's type: its default, or zeros.
+@(private)
+records_api_default :: proc(s:^Session,e:^Records_Edit) -> []u8 {
+    default:=make([]u8,e.info.size,context.temp_allocator)
+    if r:=&s.app.info.records[e.record];r.default!=nil {
+        aligned,_:=mem.alloc_bytes(max(e.info.size,1),max(e.info.align,16),context.temp_allocator)
+        r.default(raw_data(aligned))
+        copy(default,aligned)
+    }
+    return default
 }
 
 // The table as records.inspect gives it, with the rows at the places given;
@@ -1376,14 +1443,7 @@ api_records_import :: proc(s:^Session,call:^api.Call) {
         api.call_failf(call,api.INVALID_PARAMS,"%s, line %d: %s",file,lines[0],message)
         return
     }
-    r:=&s.app.info.records[e.record]
-    default:=make([]u8,e.info.size,context.temp_allocator)
-    if r.default!=nil {
-        aligned,_:=mem.alloc_bytes(max(e.info.size,1),max(e.info.align,16),context.temp_allocator)
-        r.default(raw_data(aligned))
-        copy(default,aligned)
-    }
-    updated,added,rejected:=records_api_import_rows(s,&c,leaves,columns,records[1:],lines[1:],default)
+    updated,added,rejected:=records_api_import_rows(s,&c,leaves,columns,records[1:],lines[1:],c.default)
     if updated+added>0 && !records_api_publish(s,call,&e,"Import records") {return}
     out:=call.out
     asset_named_write(s,out,"records",e.id)

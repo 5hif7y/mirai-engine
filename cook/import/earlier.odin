@@ -14,7 +14,8 @@ import "mirai:std/base"
 // finds what an earlier import of its source wrote, wherever it was moved
 // under the folder it searches (the assets folder of the project at
 // options.root, else options.root, else the folder it writes to), and writes
-// each part again to that file with that id. A part that is new gets a random
+// each part again to that file with that id (options.outside says what
+// becomes of one outside the folder it writes to). A part that is new gets a random
 // id and a file of its own. Of files with one id, the one a copy was made of
 // is the asset (asset.file_newer).
 
@@ -146,7 +147,9 @@ earlier_scan :: proc(w:^Writer,folder:string) {
 // The earlier import that this one updates, as an index of w.earlier, -1 for
 // a new import:
 //   - options.into, the root an earlier import wrote, which has to be of kind;
-//   - else the root of kind that names this source;
+//   - else the root of kind that names this source, the one under the folder
+//     written to first (a copy of an import, Earlier_Outside.Copy, is updated
+//     by importing into its folder);
 //   - else the one that names a source that is gone and had the same bytes
 //     and extension: the source was moved or renamed (two such imports are a
 //     warning and neither is taken: into chooses). A texture of a model names
@@ -165,9 +168,13 @@ earlier_root :: proc(w:^Writer,kind:asset.Fourcc,source:string,size,hash:u64) ->
         }
         return -1,writer_fail(w,.Not_Found,"no asset under %s has the id %s: into names the %s an earlier import wrote",w.search,base.asset_id_format(into,buffer[:]),kind_name(kind))
     }
+    named:=-1
     for &e,i in w.earlier {
-        if e.kind==kind && e.imported && e.owner=={} && strings.equal_fold(base.text_get(e.info.source[:]),source) {return i,true}
+        if e.kind!=kind || !e.imported || e.owner!={} || !strings.equal_fold(base.text_get(e.info.source[:]),source) {continue}
+        if named<0 {named=i}
+        if earlier_inside(w,&e) {named=i;break}
     }
+    if named>=0 {return named,earlier_writable(w,&w.earlier[named])}
     moved,copy:=-1,-1
     for &e,i in w.earlier {
         named:=base.text_get(e.info.source[:])
@@ -186,7 +193,26 @@ earlier_root :: proc(w:^Writer,kind:asset.Fourcc,source:string,size,hash:u64) ->
         e:=&w.earlier[copy]
         writer_warn(w,"%s has the bytes of %s, which %s was imported from: this import writes its own outputs; import that source again, or pass into, to update those",source,base.text_get(e.info.source[:]),e.path)
     }
+    if moved>=0 && !earlier_writable(w,&w.earlier[moved]) {return -1,false}
     return moved,true
+}
+
+// Whether the import may write an earlier output of its source again where
+// it is: always, unless options.outside is Refuse and the file lies outside
+// the folder the import writes to; then the import fails before writing
+// anything, naming the file and the ways on. into names the import to update,
+// wherever its root is.
+@(private)
+earlier_writable :: proc(w:^Writer,e:^Earlier) -> bool {
+    if w.options.outside!=.Refuse || w.options.into!={} || earlier_inside(w,e) {return true}
+    return writer_fail(w,.Outside,"%s was written by an earlier import of %s and lies outside %s: import with --in-place to write it again where it is, or with --copy for a separate import with new ids in %s",e.path,w.named if w.named!="" else base.text_get(e.info.source[:]),w.folder,w.folder)
+}
+
+// Whether an earlier output lies under the folder the import writes to.
+@(private)
+earlier_inside :: proc(w:^Writer,e:^Earlier) -> bool {
+    folder:=strings.trim_right(path_key(w.folder),"/")
+    return len(e.key)>len(folder) && e.key[len(folder)]=='/' && strings.equal_fold(e.key[:len(folder)],folder)
 }
 
 // Gives each part the output it writes again, then an id and a file. A part
@@ -200,25 +226,34 @@ parts_plan :: proc(w:^Writer,parts:[]Part) {
     defaults:=make([]string,len(parts),context.temp_allocator)
     seen:=make(map[string]bool,context.temp_allocator)
     for &p,i in parts {defaults[i]=default_path(w,&seen,p.name,p.extension)}
-    from_source :: proc(w:^Writer,e:^Earlier,p:^Part) -> bool {
-        return !e.taken && e.imported && e.kind==p.kind && strings.equal_fold(base.text_get(e.info.source[:]),w.named)
+    // A part of another prefab that is there is of another import of the
+    // source (a copy); one whose prefab is gone is this source's to take.
+    from_source :: proc(w:^Writer,roots:map[base.Asset_Id]bool,e:^Earlier,p:^Part) -> bool {
+        return !e.taken && e.imported && e.kind==p.kind && (w.owner=={} || e.owner=={} || e.owner==w.owner || !roots[e.owner]) && strings.equal_fold(base.text_get(e.info.source[:]),w.named)
     }
+    roots:=earlier_roots(w)
+    ours:=earlier_tree(w)
     for &p in parts {
         name:[64]u8
         asset.text_set(name[:],p.name)
-        best:=-1
+        best,score:=-1,-1
         for &e,at in w.earlier {
-            if !from_source(w,&e,&p) || base.text_get(e.info.name[:])!=base.text_get(name[:]) {continue}
-            if best<0 || int(e.info.index)==p.index {best=at}
-            if int(e.info.index)==p.index {break}
+            if !from_source(w,roots,&e,&p) || base.text_get(e.info.name[:])!=base.text_get(name[:]) {continue}
+            // Of this import's prefab first, then the same index.
+            rank:=(2 if ours[e.id] else 0)+(1 if int(e.info.index)==p.index else 0)
+            if rank>score {best,score=at,rank}
         }
         if best>=0 {p.earlier=best;w.earlier[best].taken=true}
     }
     for &p in parts {
         if p.earlier>=0 {continue}
+        best:=-1
         for &e,at in w.earlier {
-            if from_source(w,&e,&p) && int(e.info.index)==p.index {p.earlier=at;e.taken=true;break}
+            if !from_source(w,roots,&e,&p) || int(e.info.index)!=p.index {continue}
+            if best<0 || ours[e.id] {best=at}
+            if ours[e.id] {break}
         }
+        if best>=0 {p.earlier=best;w.earlier[best].taken=true}
     }
     for &p in parts {
         if p.earlier>=0 || p.kind!=asset.KIND_TEXTURE {continue}
@@ -238,11 +273,52 @@ parts_plan :: proc(w:^Writer,parts:[]Part) {
     }
 }
 
-// Warns of the outputs of the source that no part took: they stay as they are.
+// The ids of the roots found: what an owner names when it is there.
+@(private="file")
+earlier_roots :: proc(w:^Writer) -> map[base.Asset_Id]bool {
+    roots:=make(map[base.Asset_Id]bool,context.temp_allocator)
+    for &e in w.earlier {
+        if e.owner=={} {roots[e.id]=true}
+    }
+    return roots
+}
+
+// The ids of what the prefab of the import (w.owner) holds: its parts and
+// what it or they name, as far as names reach. Among outputs of one source
+// written by two imports (a copy, Earlier_Outside.Copy), those of this
+// import's prefab are the ones it writes again.
+@(private="file")
+earlier_tree :: proc(w:^Writer) -> map[base.Asset_Id]bool {
+    ours:=make(map[base.Asset_Id]bool,context.temp_allocator)
+    if w.owner=={} {return ours}
+    ours[w.owner]=true
+    for grew:=true;grew; {
+        grew=false
+        for &e in w.earlier {
+            if !ours[e.id] && e.owner==w.owner {ours[e.id]=true;grew=true}
+            if !ours[e.id] {continue}
+            for id in e.dependencies {
+                if !ours[id] {ours[id]=true;grew=true}
+            }
+        }
+    }
+    return ours
+}
+
+// Warns of the outputs of the source that no part took: they stay as they
+// are. When another import of the source has a prefab too (a copy), only
+// those this import's prefab held count.
 @(private)
 earlier_left :: proc(w:^Writer) {
+    ours:=earlier_tree(w)
+    roots:=earlier_roots(w)
+    copied:=false // another prefab that is there holds parts of the source
+    for &e in w.earlier {
+        if e.owner!={} && e.owner!=w.owner && roots[e.owner] && e.imported && strings.equal_fold(base.text_get(e.info.source[:]),w.named) {copied=true}
+    }
     for &e in w.earlier {
         if e.taken || !e.imported || e.owner!={} && e.owner!=w.owner || !strings.equal_fold(base.text_get(e.info.source[:]),w.named) {continue}
+        if copied && w.owner!={} && !ours[e.id] {continue} // of the other import
         writer_warn(w,"%s is no longer in the source: it was left as it is",e.path)
     }
 }

@@ -173,6 +173,19 @@ action_state :: proc(runtime:^Action_Runtime,entity:core.Entity) -> ^Action_Stat
     if row<0 || row>=len(runtime.states) || runtime.states[row].entity!=entity {return nil}
     return &runtime.states[row]
 }
+// Whether the action named name plays on the entity, from the tick it is fired until it completes or is
+// interrupted (not while it fades out): its time in its clip, in seconds, and the base.name_hash of its
+// section (0 without sections), as Action_Event gives them.
+action_playing :: proc(runtime:core.Ref(Action_Runtime),entity:core.Entity,name:string) -> (time:f32,section:u64,ok:bool) {
+    state:=action_state(runtime.ptr,entity);if state==nil || state.plan<0 || int(state.plan)>=len(runtime.plans) {return}
+    profile:=runtime.plans[state.plan].profile
+    for slot in state.layers {
+        if !slot.active || slot.finishing || slot.action<0 || int(slot.action)>=len(profile.actions) || base.text_get(profile.actions[slot.action].name[:])!=name {continue}
+        if slot.section>=0 && int(slot.section)<len(profile.sections) {section=base.name_hash(base.text_get(profile.sections[slot.section].name[:]))}
+        return slot.time,section,true
+    }
+    return
+}
 @(private)
 action_emit :: proc(runtime:^Action_Runtime,state:^Action_State,slot:^Action_Playing,kind:Action_Event_Kind,time:f32,problems:^core.Problems,window:u64=0) {
     if runtime==nil || state==nil || slot==nil || state.plan<0 || int(state.plan)>=len(runtime.plans) {return}
@@ -304,7 +317,7 @@ actions_prepare :: proc(runtime:^Action_Runtime,requests:^Action_Requests,assets
                 core.report(problems,request.entity,"animation.action_policy","action '%s' cannot play here: its layer is %d (1 to %d) or it has root motion and the Animation of this entity follows a source; fix the action, or play it on an entity without Animation.source",name,definition.layer,ANIMATION_LAYERS)
                 continue
             case .ReservedLayer:
-                core.report(problems,request.entity,"animation.action_layer","action '%s' cannot play: its layer %d plays a clip of animation_play; stop that layer, or give the action another one",name,definition.layer)
+                core.report(problems,request.entity,"animation.action_layer","action '%s' cannot play: its layer %d holds a clip of animation_play, which a weight of 0 keeps; free it with animation_stop, or give the action another layer",name,definition.layer)
                 continue
             }
             if slot.active && !slot.finishing {

@@ -32,6 +32,32 @@ FONT_EXTENSIONS :: [?]string{".ttf",".otf",".ttc"}
 
 Source_Kind :: enum u8 {None,Model,Image,Sound,Font,Strings,Prompts}
 
+// What an image imported on its own holds by what its name says, for a source
+// with no use in its settings: a normal map, linear data (roughness, metal,
+// occlusion, masks, heights) or else a color.
+image_use :: proc(path:string) -> importer.Image_Use {
+    name:=strings.to_lower(filepath.stem(path),context.temp_allocator)
+    for part in ([?]string{"normal","nrm","_n"}) {
+        if strings.contains(name,part) {return .Normal}
+    }
+    for part in ([?]string{"rough","metal","orm","occlusion","_ao","height","displace","mask","specular","data"}) {
+        if strings.contains(name,part) {return .Data}
+    }
+    return .Color
+}
+
+// The use of an image by its name in asset.import and the settings: color,
+// data, normal or normal_green_down, in any case.
+image_use_from_name :: proc(name:string) -> (use:importer.Image_Use,ok:bool) {
+    switch strings.to_lower(name,context.temp_allocator) {
+    case "color","srgb": return .Color,true
+    case "data","linear": return .Data,true
+    case "normal": return .Normal,true
+    case "normal_green_down": return .Normal_Green_Down,true
+    }
+    return .Color,false
+}
+
 // The folder of models/ the import of a model goes to: what its format (of
 // formats; nil: FORMATS) says (Format.folder), else its file name.
 model_folder :: proc(path:string,formats:[]importer.Format=nil) -> string {

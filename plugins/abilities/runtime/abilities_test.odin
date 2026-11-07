@@ -29,6 +29,9 @@ import phys "plugins:physics/runtime"
 @(private="file") DASH_ATTACK :: Ability_Tag(4)
 @(private="file") REACTION :: Ability_Tag(5)
 @(private="file") SLASH :: Ability_Cue(1)
+@(private="file") STRENGTH :: Ability_Attribute(4)
+@(private="file") IMMUNE :: Ability_Status(3)
+@(private="file") POISON :: Ability_Tag(6)
 
 @(private="file") SLASH_1 :: 0
 @(private="file") SLASH_2 :: 1
@@ -122,6 +125,7 @@ fixture_make :: proc(f:^Fixture) {
     player.attributes[0]={attribute=HEALTH,base=100,max=100}
     player.attributes[1]={attribute=CHARGES,base=3,max=3,regen=0.1}
     player.attributes[2]={attribute=DURABILITY,base=200,max=200}
+    player.attributes[3]={attribute=STRENGTH,base=2}
     dummy:=Ability_User{}
     dummy.attributes[0]={attribute=HEALTH,base=100,max=100}
     core.add(&f.users,f.player,player)
@@ -374,6 +378,9 @@ invalid_sheets_and_requests_are_problems_and_never_run :: proc(t:^testing.T) {
         {proc(a:^Ability,nan:f32) {a.costs[1]={ATTRIBUTE_NONE,4}},"costs[1]"},
         {proc(a:^Ability,nan:f32) {a.conditions[0]={HEALTH,10,5}},"conditions[0]"},
         {proc(a:^Ability,nan:f32) {base.text_set(a.clip[:],"also")},"both"},
+        {proc(a:^Ability,nan:f32) {a.windows[0].hitbox.effect.period=nan},"period"},
+        {proc(a:^Ability,nan:f32) {a.windows[0].hitbox.effect.max_stacks=3},"stacks but has no tags"},
+        {proc(a:^Ability,nan:f32) {a.windows[0].hitbox.effect.cue=SLASH},"lasts 0 seconds"},
     }
     for c in cases {
         f:=new(Fixture)
@@ -452,4 +459,47 @@ a_stable_tick_allocates_nothing :: proc(t:^testing.T) {
 contains :: proc(s,sub:string) -> bool {
     for i in 0..=len(s)-len(sub) {if s[i:i+len(sub)]==sub {return true}}
     return false
+}
+
+// A lasting effect takes its amount every period and counts once per stack while applied again
+// with the same tags; a cleanse by tag ends it, a target in a status that blocks an effect takes
+// nothing from it, and an amount scaled by an attribute of the source takes its value.
+@(test)
+lasting_effects_stack_by_tags_end_by_cleanse_and_skip_blocked_targets :: proc(t:^testing.T) {
+    f:=new(Fixture);defer free(f)
+    fixture_make(f);defer fixture_destroy(f)
+    health :: proc(f:^Fixture) -> f32 {return user(f,f.dummy).attributes[0].base}
+    poison:=Ability_Effect{attribute=HEALTH,amount=-1,period=0.5,seconds=2,tags=tag_bit(POISON),max_stacks=3,cue=SLASH}
+    testing.expect(t,ability_effect(&f.requests,f.dummy,poison,f.player))
+    step(f)
+    testing.expect_value(t,logged(f,.Effect_Begin,f.dummy,-1),1)
+    step(f,29)
+    testing.expect_value(t,health(f),100)
+    step(f)
+    testing.expect_value(t,health(f),99)
+    ability_effect(&f.requests,f.dummy,poison,f.player)
+    step(f,30)
+    testing.expect_value(t,health(f),97)
+    testing.expect_value(t,logged(f,.Effect_Begin,f.dummy,-1),1)
+    ability_effect(&f.requests,f.dummy,{remove=tag_bit(POISON)})
+    step(f,61)
+    testing.expect_value(t,health(f),97)
+    testing.expect_value(t,logged(f,.Effect_End,f.dummy,-1),1)
+    ability_effect(&f.requests,f.dummy,{statuses=status_bit(IMMUNE),seconds=1})
+    step(f,2)
+    strike:=Ability_Effect{attribute=HEALTH,amount=-10,blocked_by=status_bit(IMMUNE)}
+    ability_effect(&f.requests,f.dummy,strike)
+    step(f)
+    testing.expect_value(t,health(f),97)
+    step(f,seconds(1))
+    ability_effect(&f.requests,f.dummy,strike)
+    step(f)
+    testing.expect_value(t,health(f),87)
+    ability_effect(&f.requests,f.dummy,{attribute=HEALTH,amount=-5,scale_by=STRENGTH},f.player)
+    step(f)
+    testing.expect_value(t,health(f),77)
+    testing.expect_value(t,f.problems.count,0)
+    ability_effect(&f.requests,f.dummy,{attribute=HEALTH,amount=-5,scale_by=STRENGTH})
+    step(f)
+    testing.expect(t,core.problem_find(&f.problems,f.dummy,"abilities.effect")!=nil)
 }

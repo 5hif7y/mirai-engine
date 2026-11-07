@@ -58,10 +58,18 @@ reports for each ability of the kit.
   regeneration per second. Bases stay in 0..max. `values` (transient) are
   `(base + add) * (1 + more)` over the modifiers of the timers and of the open windows;
   `statuses` (transient) join the statuses of the timers and of the open windows.
-- An `Ability_Effect` adds `amount` to the base of an attribute of its target, grants statuses
-  and a modifier for `seconds` (a timer), gives a `knockback` velocity along the axes of its source
-  as an override layered move of the target's `Character`, and may ask the target to `use` an
-  ability (a hit reaction, which reaches a running ability through the kit's `interrupts`).
+- An `Ability_Effect` adds `amount` (times the current value of the source's `scale_by`
+  attribute, if named) to the base of an attribute of its target, at once or every `period` while
+  it lasts; grants statuses and a modifier for `seconds`; gives a `knockback` velocity along the
+  axes of its source as an override layered move of the target's `Character`; and may ask the
+  target to `use` an ability (a hit reaction, which reaches a running ability through the kit's
+  `interrupts`).
+- What lasts is a timer of the target. Its `tags` say what it is: an effect with the same tags
+  applied again stacks up to `max_stacks` (its modifier and periodic amount count once per stack)
+  and lasts `seconds` from then, keeping the phase of its period. `remove` ends the timers with
+  any of its tags (a cleanse). A target in any status of `blocked_by` takes nothing from the
+  effect: immunity is a status, granted by a window (a dodge) or by another effect. A timer that
+  starts or ends emits `Effect_Begin` / `Effect_End` with its cue.
 - A hitbox's effect and `ability_effect` go through `Ability_Requests` and apply at the start of
   the next tick. A base that falls to 0 emits `Depleted`.
 
@@ -69,7 +77,8 @@ reports for each ability of the kit.
 
 - `Ability_Events` (cleared and filled each tick): `Started`, `Completed`, `Interrupted`,
   `Canceled`, `Window_Begin` and `Window_End` with the window and its cue, `Hit` with the target,
-  `Depleted` with the attribute. VFX, sound and camera shake are the game's answer to cues.
+  `Depleted` with the attribute, `Effect_Begin` and `Effect_End` with the cue of a timer (at the
+  end that decides the user). VFX, sound and camera shake are the game's answer to cues.
 - Animation: `anim.action_fire` / `action_cancel` for `action`, `anim.match_play` / `match_stop`
   for `clip`, in the mode the `Character` is in. The animation action should allow cancellation:
   the ability decides the timing and the animation follows.
@@ -105,6 +114,7 @@ reports for each ability of the kit.
 - `a_charged_dash_spends_charges_and_is_blocked_without_them`
 - `a_copy_of_the_state_halfway_runs_the_same_future_and_a_cancel_leaves_nothing`
 - `invalid_sheets_and_requests_are_problems_and_never_run`
+- `lasting_effects_stack_by_tags_end_by_cleanse_and_skip_blocked_targets`
 - `a_stable_tick_allocates_nothing`
 
 The methods need a build with the plugin (the demo enables it) and a session on a copy; hitboxes

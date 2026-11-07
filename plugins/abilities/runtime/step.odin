@@ -104,20 +104,51 @@ effect_apply :: proc(t:^Tick,target,source:core.Entity,effect:Ability_Effect) {
         core.report(t.w.problems,target,"abilities.effect","an effect asked for it %s",text)
         return
     }
-    if u:=core.get(t.users,target);u!=nil {
-        if effect.attribute!=ATTRIBUTE_NONE && effect.amount!=0 {
-            for &entry in u.attributes {
-                if entry.attribute==effect.attribute {base_add(t,target,&entry,effect.amount)}
+    u:=core.get(t.users,target)
+    if u!=nil && u.statuses&effect.blocked_by!=0 {return}
+    amount:=effect.amount
+    if effect.scale_by!=ATTRIBUTE_NONE && amount!=0 {
+        from,found:=core.get(core.read(t.users),source)
+        scale,has:=ability_value(from,effect.scale_by)
+        if !found || !has {core.report(t.w.problems,target,"abilities.effect","an effect scaled by an attribute its source does not have hit it: give the source that attribute, or clear scale_by")}
+        amount*=scale
+    }
+    if u!=nil {
+        if effect.remove!=0 {
+            for &timer in u.timers {
+                if timer.until!=0 && timer.tags&effect.remove!=0 {timer_end(t,target,&timer)}
             }
         }
-        if effect.seconds>0 && (effect.statuses!=0 || effect.modify.attribute!=ATTRIBUTE_NONE) {
-            timer:=Ability_Timer{statuses=effect.statuses,modify=effect.modify,until=t.tick+max(ticks_of(effect.seconds,t.dt),1)}
-            slot:=0
-            for other,i in u.timers {
-                if other.until==0 {slot=i;break}
-                if other.until<u.timers[slot].until {slot=i}
+        if effect.period==0 && effect.attribute!=ATTRIBUTE_NONE && amount!=0 {
+            for &entry in u.attributes {
+                if entry.attribute==effect.attribute {base_add(t,target,&entry,amount)}
             }
-            u.timers[slot]=timer
+        }
+        lasting:=effect.statuses!=0 || effect.modify.attribute!=ATTRIBUTE_NONE || effect.period>0 || effect.cue!=CUE_NONE || effect.tags!=0
+        if effect.seconds>0 && lasting {
+            timer:=Ability_Timer{tags=effect.tags,statuses=effect.statuses,modify=effect.modify,cue=effect.cue,stacks=1,start=t.tick,until=t.tick+max(ticks_of(effect.seconds,t.dt),1)}
+            if effect.period>0 {timer.attribute,timer.amount,timer.period=effect.attribute,amount,u32(max(ticks_of(effect.period,t.dt),1))}
+            slot:=-1
+            if effect.tags!=0 {
+                for other,i in u.timers {
+                    if other.until!=0 && other.tags==effect.tags {slot=i;break}
+                }
+            }
+            if slot>=0 {
+                old:=&u.timers[slot]
+                timer.stacks=min(old.stacks+1,max(effect.max_stacks,1))
+                timer.start=old.start
+                old^=timer
+            } else {
+                slot=0
+                for other,i in u.timers {
+                    if other.until==0 {slot=i;break}
+                    if other.until<u.timers[slot].until {slot=i}
+                }
+                if u.timers[slot].until!=0 {timer_end(t,target,&u.timers[slot])}
+                u.timers[slot]=timer
+                event_push(t,{kind=.Effect_Begin,entity=target,window=-1,cue=timer.cue,attribute=timer.attribute})
+            }
         }
         if effect.use!={} {buffer_add(u,effect.use,t.tick)}
     }
@@ -126,6 +157,12 @@ effect_apply :: proc(t:^Tick,target,source:core.Entity,effect:Ability_Effect) {
         if pose,found:=core.get(t.w.worlds,source);found && source!=core.NONE {velocity=mm.quat_rotate(pose.rotation,velocity)}
         phys.add_move(t.w.moves,target,{velocity=velocity,ticks=u32(max(ticks_of(effect.knockback_seconds,t.dt),1)),mix=.Override,id=KNOCKBACK_ID})
     }
+}
+
+@(private)
+timer_end :: proc(t:^Tick,e:core.Entity,timer:^Ability_Timer) {
+    event_push(t,{kind=.Effect_End,entity=e,window=-1,cue=timer.cue,attribute=timer.attribute})
+    timer^={}
 }
 
 @(private)
@@ -194,7 +231,15 @@ user_tick :: proc(t:^Tick,e:core.Entity,u:^Ability_User) {
             kit=nil
         }
     }
-    for &timer in u.timers {if timer.until!=0 && timer.until<=t.tick {timer={}}}
+    for &timer in u.timers {
+        if timer.until==0 {continue}
+        if timer.period>0 && t.tick>timer.start && t.tick<=timer.until && (t.tick-timer.start)%u64(timer.period)==0 {
+            for &entry in u.attributes {
+                if entry.attribute==timer.attribute {base_add(t,e,&entry,timer.amount*f32(max(timer.stacks,1)))}
+            }
+        }
+        if timer.until<=t.tick {timer_end(t,e,&timer)}
+    }
     for &c in u.cooldowns {if c.until!=0 && c.until<=t.tick {c={}}}
     buffer:=ticks_of(kit.buffer,t.dt) if kit!=nil else 0
     for &b in u.buffer {if b.ability!={} && b.tick+buffer<t.tick {b={}}}
@@ -466,7 +511,10 @@ derive :: proc(t:^Tick,u:^Ability_User,active:^Ability,local:i64) {
     for timer in u.timers {
         if timer.until==0 {continue}
         statuses|=timer.statuses
-        modify(u,timer.modify,&add,&more)
+        m:=timer.modify
+        stacks:=f32(max(timer.stacks,1))
+        m.add*=stacks;m.more*=stacks
+        modify(u,m,&add,&more)
     }
     if active!=nil {
         for &w in active.windows {

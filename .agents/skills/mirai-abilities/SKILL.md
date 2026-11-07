@@ -20,7 +20,8 @@ and the tick it started, and derives everything else from the tick against the s
   [sheets](references/abilities.md#sheets).
 - Which ability starts (candidates, input buffer, cancel windows, interrupts, priority, `next`):
   [selection](references/abilities.md#selection).
-- Statuses, attributes, modifiers, timers and effects (damage, knockback, a reaction):
+- Statuses, attributes, modifiers and effects (damage, knockback, a reaction, damage over time,
+  stacks, cleanse, immunity, scaling by the source):
   [attributes and effects](references/abilities.md#attributes-and-effects).
 - Events, animation, layered moves and hitboxes against physics:
   [what it asks of others](references/abilities.md#what-it-asks-of-others).
@@ -62,6 +63,7 @@ and the tick it started, and derives everything else from the tick against the s
   and hitboxes ask through `Ability_Requests`, which apply on the next tick.
 - **Attributes are bases plus modifiers.** Costs and effects change bases (kept in 0..max);
   current values are recomputed every tick from timers and open windows, never accumulated.
+  What lasts is a timer named by tags; immunity is a status, not a separate mechanism.
 - **The end that decides an entity runs its abilities** (`core.owned`): a client predicts its
   own character and the server decides what hits others; a replica only derives statuses and
   window events.
@@ -79,6 +81,7 @@ and the tick it started, and derives everything else from the tick against the s
   `-collection:plugins=plugins`).
 - Tests: `mirai test plugins/abilities/runtime` (`abilities_test.odin`: the blade kit combo,
   the charged dash with charges, a copy halfway that runs the same future, a cancel that leaves
-  nothing, replicas, invalid sheets and requests, and a stable tick without allocations).
+  nothing, replicas, lasting effects with stacks, cleanse and immunity, invalid sheets and
+  requests, and a stable tick without allocations).
 - Methods: `mirai generate demo`, `mirai build editor demo --dev` and, in a session on a copy,
   `abilities.check`, `abilities.inspect` and `abilities.use` against rows written with `records.*`.

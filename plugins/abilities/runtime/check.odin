@@ -58,6 +58,10 @@ effect_check :: proc(e:Ability_Effect,out:[]u8) -> string {
     if e.attribute==ATTRIBUTE_NONE && e.amount!=0 {return "changes no attribute by its amount: name the attribute"}
     if !seconds_ok(e.seconds) {return "has seconds that are not 0 or more: give how long its statuses and modifier last"}
     if (e.statuses!=0 || e.modify.attribute!=ATTRIBUTE_NONE) && e.seconds==0 {return "grants statuses or a modifier for 0 seconds: give seconds above 0"}
+    if !seconds_ok(e.period) {return "has a period that is not 0 or more seconds"}
+    if e.period>0 && (e.seconds==0 || e.attribute==ATTRIBUTE_NONE) {return "repeats every period but lasts 0 seconds or names no attribute: give seconds above 0 and the attribute"}
+    if (e.tags!=0 || e.cue!=CUE_NONE) && e.seconds==0 {return "has tags or a cue, which name its timer, but lasts 0 seconds: give seconds above 0"}
+    if e.max_stacks>1 && e.tags==0 {return "stacks but has no tags: give it the tags that say what stacks"}
     if text:=modifier_check(e.modify,out);text!="" {return text}
     for v in e.knockback {if !finite(v) {return "has a knockback that is not a velocity: give finite metres per second"}}
     if !seconds_ok(e.knockback_seconds) {return "has knockback_seconds that are not 0 or more"}

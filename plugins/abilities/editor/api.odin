@@ -172,7 +172,10 @@ inspect :: proc(s:^editor.Session,call:^api.Call) {
         if timer.until<=time.tick {continue}
         if listed>0 {serial.text_write_raw(w,",")}
         serial.text_write_raw(w,"{")
-        bits_write(s,w,"statuses",ab.Ability_Status,u64(timer.statuses),true)
+        bits_write(s,w,"tags",ab.Ability_Tag,u64(timer.tags),true)
+        bits_write(s,w,"statuses",ab.Ability_Status,u64(timer.statuses))
+        api.write_int(w,"stacks",i64(timer.stacks))
+        if timer.period>0 {api.write_text(w,"every",value_name(s,ab.Ability_Attribute,i64(timer.attribute)));api.write_key(w,"amount");api.write_number(w,timer.amount)}
         if timer.modify.attribute!=ab.ATTRIBUTE_NONE {api.write_text(w,"modifies",value_name(s,ab.Ability_Attribute,i64(timer.modify.attribute)))}
         api.write_key(w,"seconds_left");api.write_number(w,f32(timer.until-time.tick)*dt)
         serial.text_write_raw(w,"}")

@@ -100,13 +100,23 @@ Ability_Modifier :: struct {
     more:f32, // 0.5: half as much more; -0.5: half
 }
 
-// What an ability does to what it hits, or what a game asks for through Ability_Requests.
+// What an ability does to what it hits, or what a game asks for through Ability_Requests. With
+// seconds it lasts as a timer of the target: its statuses and modifier, and its amount every
+// period. Applied again while its timer with the same tags lasts, it stacks up to max_stacks and
+// lasts seconds from then.
 Ability_Effect :: struct {
     attribute:Ability_Attribute,
-    amount:f32, // added to the base of the attribute of the target: -35 health
+    amount:f32, // added to the base of the attribute of the target: -35 health; with period, every period
+    scale_by:Ability_Attribute, // amount times the current value of this attribute of the source: its strength
+    period:f32 `mirai:"min=0,unit=s"`, // 0: amount once, at once
     statuses:Ability_Statuses,  // the target is in them for seconds
     modify:Ability_Modifier,    // of the target for seconds
     seconds:f32 `mirai:"min=0,unit=s"`,
+    tags:Ability_Tags,          // what its timer is (poison, burn): what stacks it and what removes it
+    max_stacks:u8,              // 0 and 1: applying again only lasts seconds from then
+    remove:Ability_Tags,        // the timers of the target with one of these tags end: a cleanse
+    blocked_by:Ability_Statuses, // a target in any of them takes nothing: immune, unstoppable
+    cue:Ability_Cue,            // carried by the events of the start and end of its timer
     knockback:[3]f32 `mirai:"unit=m/s"`, // in the axes of the source: a velocity its Character takes
     knockback_seconds:f32 `mirai:"min=0,unit=s"`,
     use:core.Record(Ability), // the target starts it: a hit reaction
@@ -176,10 +186,17 @@ Ability_Attribute_Entry :: struct {
 Ability_Hit :: struct {target:core.Entity,window:u8}
 Ability_Buffered :: struct {ability:core.Record(Ability),tick:u64}
 Ability_Cooldown :: struct {ability:core.Record(Ability),until:u64}
+// An effect that lasts; its modifier and its amount count once per stack.
 Ability_Timer :: struct {
+    tags:Ability_Tags,
     statuses:Ability_Statuses,
     modify:Ability_Modifier,
-    until:u64, // tick it ends at
+    attribute:Ability_Attribute,
+    amount:f32,  // added every period ticks from start
+    period:u32,
+    stacks:u8,
+    cue:Ability_Cue,
+    start,until:u64, // ticks; it ends at until
 }
 
 @(component,replicated,description="Uses abilities: those of its kit by the input of the seat that drives it, and those asked through Ability_Requests. Holds its attributes, which costs and effects change.")
@@ -221,6 +238,8 @@ Ability_Event_Kind :: enum u8 {
     Window_End,
     Hit,      // its window's hitbox touched target
     Depleted, // the base of attribute fell to 0
+    Effect_Begin, // a timer started on entity, with the cue of its effect
+    Effect_End,   // it ran out or was removed
 }
 
 Ability_Event :: struct {

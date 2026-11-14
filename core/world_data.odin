@@ -302,3 +302,94 @@ world_detach :: proc(info:^World_Info,world,shared:rawptr) {
         }
     }
 }
+
+// The bytes the tables and storages of a World hold behind their pointers:
+// the capacity of the arrays, maps and slices of each table and storage of
+// the place World, and of its entities. It reads capacities, not the
+// allocator, so what game code allocates outside its storages is not in it.
+// elements: the values it had to step into because they hold memory of
+// their own (rows of a table whose component is not flat, items of an array
+// of such values), which is what makes it cost more than one read per
+// container.
+world_memory :: proc(info:^World_Info,data:rawptr) -> (bytes,elements:int) {
+    if info==nil || data==nil {return}
+    add :: proc(bytes,elements:^int,b,e:int) {bytes^+=b;elements^+=e}
+    b,e:=value_bytes(entities_of(info,data),type_info_of(Entities))
+    add(&bytes,&elements,b,e)
+    for &t in info.tables {
+        if t.place!=.World {continue}
+        b,e=table_bytes(table_of(data,&t),t.info,t.flat)
+        add(&bytes,&elements,b,e)
+    }
+    for &s in info.storages {
+        if s.place!=.World || s.by_world || s.flat {continue}
+        b,e=value_bytes(storage_of(data,&s),s.info)
+        add(&bytes,&elements,b,e)
+    }
+    return
+}
+
+@(private="file")
+table_bytes :: proc(t:^Raw_Table,info:^runtime.Type_Info,flat:bool) -> (bytes,elements:int) {
+    size:=info.size
+    bytes=(t.values.cap+t.added.cap+t.edited.cap)*size
+    bytes+=cap(t.entities)*size_of(Entity)+cap(t.stamps)*size_of(u64)+cap(t.page_stamps)*size_of(u64)
+    bytes+=cap(t.off)*size_of(bool)+cap(t.turns)*size_of(u64)+cap(t.pending)*size_of(Pending)
+    bytes+=cap(t.edits)*size_of(Edit)+cap(t.gone.items)*size_of(Entity)+cap(t.owners)*size_of(Row_Owner)
+    bytes+=len(t.locks)*size_of(Lock)+cap(t.rows)*size_of([]i32)
+    for page in t.rows {bytes+=len(page)*size_of(i32)}
+    when CHECK_WRITES {bytes+=cap(t.settled.values)}
+    if flat {return}
+    for i in 0..<t.values.len {
+        b,e:=value_bytes(rawptr(uintptr(t.values.data)+uintptr(i*size)),info)
+        bytes+=b;elements+=e+1
+    }
+    return
+}
+
+// What a value holds behind its pointers, as value_free would free it, and
+// maps by their capacity. Its type is walked once: an array asks whether its
+// element holds anything once, not for each element.
+@(private="file")
+value_bytes :: proc(data:rawptr,info:^runtime.Type_Info) -> (bytes,elements:int) {
+    base:=runtime.type_info_base(info)
+    #partial switch v in base.variant {
+    case runtime.Type_Info_Struct:
+        for i in 0..<int(v.field_count) {
+            b,e:=value_bytes(rawptr(uintptr(data)+v.offsets[i]),v.types[i])
+            bytes+=b;elements+=e
+        }
+    case runtime.Type_Info_Array:
+        if value_flat(v.elem) {return}
+        for i in 0..<v.count {
+            b,e:=value_bytes(rawptr(uintptr(data)+uintptr(i*v.elem_size)),v.elem)
+            bytes+=b;elements+=e
+        }
+    case runtime.Type_Info_Enumerated_Array:
+        if value_flat(v.elem) {return}
+        for i in 0..<v.count {
+            b,e:=value_bytes(rawptr(uintptr(data)+uintptr(i*v.elem_size)),v.elem)
+            bytes+=b;elements+=e
+        }
+    case runtime.Type_Info_Dynamic_Array:
+        a:=cast(^runtime.Raw_Dynamic_Array)data
+        bytes=a.cap*v.elem_size
+        if a.len==0 || value_flat(v.elem) {return}
+        for i in 0..<a.len {
+            b,e:=value_bytes(rawptr(uintptr(a.data)+uintptr(i*v.elem_size)),v.elem)
+            bytes+=b;elements+=e+1
+        }
+    case runtime.Type_Info_Slice:
+        a:=cast(^runtime.Raw_Slice)data
+        bytes=a.len*v.elem_size
+        if a.len==0 || value_flat(v.elem) {return}
+        for i in 0..<a.len {
+            b,e:=value_bytes(rawptr(uintptr(a.data)+uintptr(i*v.elem_size)),v.elem)
+            bytes+=b;elements+=e+1
+        }
+    case runtime.Type_Info_Map:
+        m:=cast(^runtime.Raw_Map)data
+        if m.data!=0 && v.map_info!=nil {bytes=int(runtime.map_total_allocation_size(uintptr(runtime.map_cap(m^)),v.map_info))}
+    }
+    return
+}

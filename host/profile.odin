@@ -2,6 +2,8 @@ package host
 
 import "base:runtime"
 import "core:time"
+import "mirai:core"
+import "mirai:platform"
 import render "mirai:render"
 import "mirai:rhi"
 import "mirai:std/base"
@@ -46,6 +48,16 @@ Profile_Frame :: struct {
     interval_total_ms,interval_square:f64,
     latency_ms:f32,        // from the start of the last frame shown to its image going to the display
     pass_first,pass_count:int,
+    memory:Profile_Memory, // of a recording with memory
+}
+
+// The memory at the end of a frame, in bytes. world: what the tables and
+// storages of the World that ran last in the frame hold (the game loop's,
+// else the editor's), as core.world_memory measures it.
+Profile_Memory :: struct {
+    world:i64,
+    process:platform.Process_Memory,
+    gpu:u64, // of the device, as its driver says
 }
 
 Profile_Pass :: struct {
@@ -63,6 +75,8 @@ Profiler :: struct {
     rings_ready:bool, // the base.Profile rings, which profile_request needs without the recording buffers
     reserved:bool,    // the recording buffers below
     recording:bool,
+    memory:bool,      // the recording samples the memory at the end of each frame, in the zone memory
+    memory_world:rawptr, // the World of the frame that ran last
     late:int,         // >0: the frames asked for were recorded and the recording waits for the GPU times of the last ones, this many frames at most
     requested:u8,     // frames profile_request keeps the zones and the GPU passes on
     wanted:int,                // frames the recording ends after
@@ -94,13 +108,15 @@ Profile_Recording :: struct {
     complete:bool, // it reached the frames asked for
 }
 
-// Starts recording the next frames, at most PROFILE_FRAMES_MAX. False while
-// another recording runs, or when the memory cannot be reserved.
-profile_start :: proc(app:^App,frames:int) -> bool {
+// Starts recording the next frames, at most PROFILE_FRAMES_MAX, and with
+// memory what they hold at their end. False while another recording runs,
+// or when the memory cannot be reserved.
+profile_start :: proc(app:^App,frames:int,memory:=false) -> bool {
     p:=&app.profiler
     if p.recording || frames<=0 {return false}
     if !p.reserved && !profile_reserve(app) {return false}
     p.wanted=min(frames,PROFILE_FRAMES_MAX)
+    p.memory=memory
     p.frame_count,p.zone_count,p.pass_count,p.lost,p.gpu_next,p.late=0,0,0,0,0,0
     p.frame_zone={}
     if app.device!=nil {p.presented=rhi.present_stats(app.device)}
@@ -192,6 +208,7 @@ profile_frame_open :: proc(app:^App) {
     p:=&app.profiler
     active:=profile_active(app)
     if p.rings_ready {base.profile_set_enabled(&p.profile,active)}
+    p.memory_world=nil
     if !active {return}
     if app.device!=nil {p.device_first=rhi.frame_number(app.device)}
     base.profile_frame(&p.profile)
@@ -217,6 +234,12 @@ profile_frame_end :: proc(app:^App,drawn:bool) {
     load_profile_frame(app,drawn)
     p:=&app.profiler
     opened:=p.frame_zone.profile!=nil
+    sample:Profile_Memory
+    if opened && p.recording && p.late==0 && p.memory {
+        zone:=profile_part(app,"memory")
+        sample=profile_memory_sample(app)
+        base.profile_end(zone)
+    }
     if opened {profile_frame_close(app)}
     if p.requested>0 {p.requested-=1}
     if !p.recording {
@@ -225,7 +248,7 @@ profile_frame_end :: proc(app:^App,drawn:bool) {
     }
     if opened && p.late==0 && p.frame_count<len(p.frames) {
         frame:=&p.frames[p.frame_count]
-        frame^={number=p.profile.frame,drawn=drawn,pass_first=p.pass_count}
+        frame^={number=p.profile.frame,drawn=drawn,pass_first=p.pass_count,memory=sample}
         if app.device!=nil {
             frame.device_first,frame.device_end=p.device_first,rhi.frame_number(app.device)
             shown:=rhi.present_stats(app.device)
@@ -269,6 +292,17 @@ profile_frame_end :: proc(app:^App,drawn:bool) {
     waiting:=app.renderer!=nil && last.device_end>last.device_first && !profile_gpu_measured(last) && p.gpu_next<p.frame_count
     if !waiting || p.late>=PROFILE_GPU_LATE {profile_stop(app);return}
     p.late+=1
+}
+
+@(private)
+profile_memory_sample :: proc(app:^App) -> (m:Profile_Memory) {
+    if world:=app.profiler.memory_world;world!=nil && app.info!=nil {
+        bytes,_:=core.world_memory(app.info,world)
+        m.world=i64(bytes)
+    }
+    m.process=platform.process_memory()
+    if app.device!=nil {m.gpu,_=rhi.device_memory(app.device)}
+    return
 }
 
 // Gives the GPU timings of the rhi frame to the recorded frame that

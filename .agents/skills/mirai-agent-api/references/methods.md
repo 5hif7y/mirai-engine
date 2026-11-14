@@ -324,6 +324,9 @@ Reading a capture:
   time they ran (`start_ms` since the frame began on the CPU). A frame whose submissions did not all
   come back says `gpu_measured:false`, and the GPU numbers of the summary and of `profile.compare`
   leave it out (`gpu_frames`).
+- **Memory.** `profile.capture` with `memory:true` samples it at the end of each frame, as the part
+  `memory` of the frame, and the summary gives `memory`: the World's tables and storages (its peak
+  over the capture and its rise), the process and the GPU. Leave it off to measure cost.
 - **Own time.** `self_ms` excludes the zones inside: a function that waits for its tasks has them
   as children (`job`, `range`); what the workers run appears with `thread:"workers"`.
 - **Conditions.** `notes` warns about what invalidates a reading: engine at `-o:minimal`,

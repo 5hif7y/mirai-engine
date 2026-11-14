@@ -22,7 +22,7 @@ import "mirai:std/jobs"
 PROFILE_CAPTURES :: 8
 PROFILE_DEPTH_MAX :: 64
 // The zones of the frame itself, children of "frame" on the main thread.
-PROFILE_PARTS :: [?]string{"platform","watch","game","editor","audio","render","pacing"}
+PROFILE_PARTS :: [?]string{"platform","watch","game","editor","audio","render","pacing","memory"}
 
 // A GPU that idled runs its first frames at a lower clock, in steps of a few
 // hundred ms, and lowers it again after a second or two without frames: a
@@ -73,6 +73,7 @@ Profile_Frame_Record :: struct {
     pass_first,pass_count:int,
     worker_ns:i64,      // time of the other threads in jobs
     jobs:int,
+    memory:host.Profile_Memory, // at its end, of a capture with memory
 }
 
 Profile_Zone_Record :: struct {
@@ -91,6 +92,7 @@ Profile_Capture :: struct {
     label:string,
     state:Profile_State,
     requested:int,
+    memory:bool, // it sampled the memory at the end of each frame
     conditions:Profile_Conditions,
     frames:[]Profile_Frame_Record,
     zones:[]Profile_Zone_Record, // the main thread frame by frame, then the other threads
@@ -137,7 +139,7 @@ profile_find :: proc(s:^Session,id:int) -> ^Profile_Capture {
 
 // Starts recording frames into a new capture, which replaces the oldest when
 // all are taken. Fails while another records.
-profile_begin :: proc(s:^Session,frames:int,label:string) -> (c:^Profile_Capture,error:string) {
+profile_begin :: proc(s:^Session,frames:int,label:string,memory:=false) -> (c:^Profile_Capture,error:string) {
     profile_collect(s)
     ps:=&s.profiles
     if ps.recording!=0 {return nil,fmt.tprintf("Capture %d is still recording; profile.stop ends it",ps.recording)}
@@ -149,11 +151,11 @@ profile_begin :: proc(s:^Session,frames:int,label:string) -> (c:^Profile_Capture
     if vmem.arena_init_growing(&c.arena)!=nil {return nil,"No memory for a capture"}
     ps.next_id+=1
     c.id=ps.next_id
-    c.requested=frames
+    c.requested,c.memory=frames,memory
     context.allocator=vmem.arena_allocator(&c.arena)
     c.label=strings.clone(label)
     c.conditions=profile_conditions(s)
-    if !host.profile_start(s.app,frames) {
+    if !host.profile_start(s.app,frames,memory) {
         profile_capture_free(c)
         return nil,"The recorder could not reserve its memory"
     }
@@ -297,6 +299,7 @@ profile_build :: proc(c:^Profile_Capture,recording:host.Profile_Recording,app:^h
         record.generated,record.presented,record.intervals=frame.generated,int(frame.presented),int(frame.intervals)
         record.interval_total_ms,record.interval_square,record.latency_ms=frame.interval_total_ms,frame.interval_square,frame.latency_ms
         record.pass_first,record.pass_count=frame.pass_first,frame.pass_count
+        record.memory=frame.memory
     }
     // A manual editor waits for the next request between frames: that is not part of a frame.
     if !c.conditions.manual {

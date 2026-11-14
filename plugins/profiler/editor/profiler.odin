@@ -2,6 +2,7 @@ package profiler_editor
 
 import "core:fmt"
 import "core:hash"
+import "mirai:editor/kit"
 import "mirai:core"
 import "mirai:editor"
 import "mirai:host"
@@ -10,8 +11,10 @@ import "mirai:ui"
 
 // A panel of the editor, under View > Profiler, that records frames into the
 // captures of the profile.* methods and shows the last one: the time of each
-// frame, the zones of the threads and the GPU passes of the frame chosen, and
-// the zones that took most. An agent and the panel see the same captures.
+// frame, then a tab per track: the zones of the threads of the frame chosen
+// and the zones that took most; its GPU passes where they ran and the passes
+// that took most; the memory over the frames. An agent and the panel see the
+// same captures.
 
 @(storage)
 Profiler_Api :: struct {provider:editor.Api_Provider}
@@ -43,6 +46,15 @@ FRAMES_DEFAULT :: 120
 ROW :: f32(16)     // of a row of the timeline, in points
 GRAPH :: f32(72)   // height of the graph of the frames
 
+TABS :: [?]string{"CPU","GPU","Memory"}
+Tab :: enum int {Cpu,Gpu,Memory}
+TAB_GAP :: f32(8)
+
+Top_Pass :: struct {
+	name: int, // into the pass names of the capture
+	ms:   f64, // per measured frame
+}
+
 Top_Zone :: struct {
 	name:   int, // into the names of the capture
 	worker: bool,
@@ -63,6 +75,10 @@ Profiler_Panel :: struct {
 	graph_ms: f64, // the top of the graph: above it a frame is cut and marked
 	top:     [TOP_ZONES]Top_Zone,
 	top_count: int,
+	passes:  [TOP_ZONES]Top_Pass,
+	pass_count: int,
+	tab:     int,
+	memory_mb: f64, // the top of the memory graph
 	error:   [128]u8,
 	error_length: int,
 	capture: ^editor.Profile_Capture, // the one shown, for the drawings of this frame
@@ -97,11 +113,39 @@ profiler_panel :: proc(s:^editor.Session,p:^Profiler_Panel,app:^host.App) {
 				p.frame=clamp(int((ctx.pointer.x-r.x)/r.w*f32(len(c.frames))),0,len(c.frames)-1)
 			}
 		}
-		ui.label(ctx,profiler_frame_text(p,c),ui.metric(ctx,"font_small"),ui.tone(ctx,"text"))
-		rows:=f32(p.depth+p.thread_count+1)
-		editor.drawing(g,ui.id(ctx,"timeline"),ui.GROW,ui.fixed(rows*(ROW+2)+ROW),timeline_draw,p)
-		editor.drawing(g,ui.id(ctx,"zones"),ui.GROW,ui.fixed(f32(p.top_count)*ROW+ROW),zones_draw,p)
+		titles:=TABS
+		kit.tabs(ctx,ui.id(ctx,"tracks"),titles[:],&p.tab,ui.fixed(240),28)
+		small:=ui.metric(ctx,"font_small")
+		// Every tab is as tall as the tallest: the panel, held by its bottom, keeps its tabs under the pointer.
+		if ui.box(ctx,{width=ui.GROW,height=ui.fixed(tabs_height(p,small)),direction=.Column,gap=TAB_GAP}) {
+			switch Tab(p.tab) {
+			case .Cpu:
+				ui.label(ctx,profiler_frame_text(p,c),small,ui.tone(ctx,"text"))
+				rows:=f32(p.depth+p.thread_count)
+				editor.drawing(g,ui.id(ctx,"timeline"),ui.GROW,ui.fixed(rows*(ROW+2)+ROW),timeline_draw,p)
+				editor.drawing(g,ui.id(ctx,"zones"),ui.GROW,ui.fixed(f32(p.top_count)*ROW+ROW),zones_draw,p)
+			case .Gpu:
+				ui.label(ctx,gpu_frame_text(p,c),small,ui.tone(ctx,"text"))
+				editor.drawing(g,ui.id(ctx,"gpu_timeline"),ui.GROW,ui.fixed(ROW+2+ROW),timeline_draw,p)
+				editor.drawing(g,ui.id(ctx,"passes"),ui.GROW,ui.fixed(f32(p.pass_count)*ROW+ROW),passes_draw,p)
+			case .Memory:
+				if !c.memory {ui.label(ctx,"This capture did not sample the memory",small,ui.tone(ctx,"text_muted"));break}
+				ui.label(ctx,memory_frame_text(p,c),small,ui.tone(ctx,"text"))
+				editor.drawing(g,ui.id(ctx,"memory"),ui.GROW,ui.fixed(GRAPH),memory_draw,p)
+			}
+		}
 	}
+}
+
+// The height of the tallest tab of the capture shown: a label of size font
+// over each one's drawings.
+@(private="file")
+tabs_height :: proc(p:^Profiler_Panel,font:f32) -> f32 {
+	label:=font+6
+	cpu:=label+TAB_GAP+f32(p.depth+p.thread_count)*(ROW+2)+ROW+TAB_GAP+f32(p.top_count)*ROW+ROW
+	gpu:=label+TAB_GAP+ROW+2+ROW+TAB_GAP+f32(p.pass_count)*ROW+ROW
+	memory:=label+TAB_GAP+GRAPH
+	return max(cpu,gpu,memory)
 }
 
 @(private="file")
@@ -119,7 +163,7 @@ profiler_header :: proc(s:^editor.Session,p:^Profiler_Panel,app:^host.App) {
 		ui.number_field(ctx,ui.id(ctx,"frames_asked"),&p.frames,{width=ui.fixed(72),decimals=0,speed=1,has_min=true,min=2,has_max=true,max=f64(host.PROFILE_FRAMES_MAX),disabled=recording})
 		if ui.button(ctx,ui.id(ctx,"record"),{label="Record",variant="accent",size=ui.metric(ctx,"font_small"),disabled=recording}).clicked {
 			p.error_length=0
-			if _,error:=editor.profile_begin(s,int(p.frames),"profiler panel");error!="" {p.error_length=copy(p.error[:],error)}
+			if _,error:=editor.profile_begin(s,int(p.frames),"profiler panel",memory=true);error!="" {p.error_length=copy(p.error[:],error)}
 		}
 	}
 }
@@ -129,7 +173,23 @@ profiler_header :: proc(s:^editor.Session,p:^Profiler_Panel,app:^host.App) {
 // zones that took most, and the frame nearest the median as the one chosen.
 @(private="file")
 profiler_show :: proc(p:^Profiler_Panel,c:^editor.Profile_Capture) {
-	p.shown,p.frame,p.workers,p.depth,p.thread_count,p.top_count=c.id,0,0,1,0,0
+	p.shown,p.frame,p.workers,p.depth,p.thread_count,p.top_count,p.pass_count,p.memory_mb=c.id,0,0,1,0,0,0,0
+	for f in c.frames {p.memory_mb=max(p.memory_mb,mb(f.memory.world),mb(i64(f.memory.process.private)),mb(i64(f.memory.gpu)))}
+	p.memory_mb=max(p.memory_mb*1.1,1)
+	for values,name in editor.profile_passes_by_name(c) {
+		total:f64
+		for ms in values {total+=ms}
+		entry:=Top_Pass{name,total/f64(max(len(values),1))}
+		at:=p.pass_count
+		for at>0 && p.passes[at-1].ms<entry.ms {
+			if at<TOP_ZONES {p.passes[at]=p.passes[at-1]}
+			at-=1
+		}
+		if at<TOP_ZONES {
+			p.passes[at]=entry
+			p.pass_count=min(p.pass_count+1,TOP_ZONES)
+		}
+	}
 	frame:=make([]f64,len(c.frames),context.temp_allocator)
 	for f,i in c.frames {
 		p.workers+=f.zone_count
@@ -184,10 +244,28 @@ profiler_frame_text :: proc(p:^Profiler_Panel,c:^editor.Profile_Capture) -> stri
 	if p.frame>=len(c.frames) {return ""}
 	f:=c.frames[p.frame]
 	bounds:=[editor.Profile_Bound]string{.Cpu="CPU",.Gpu="GPU",.Paced="pacing"}
-	gpu:=fmt.tprintf("%.2f ms",f.gpu_ms) if f.gpu_measured else "not measured"
-	return fmt.tprintf("Frame %d  ·  %.2f ms  ·  CPU %.2f ms  ·  GPU %s  ·  waits for %s",
-		p.frame+1,editor.profile_frame_ms(f),editor.profile_frame_cpu_ms(f),gpu,bounds[editor.profile_frame_bound(f)])
+	return fmt.tprintf("Frame %d  ·  %.2f ms  ·  CPU %.2f ms  ·  waits for %s",
+		p.frame+1,editor.profile_frame_ms(f),editor.profile_frame_cpu_ms(f),bounds[editor.profile_frame_bound(f)])
 }
+
+@(private="file")
+gpu_frame_text :: proc(p:^Profiler_Panel,c:^editor.Profile_Capture) -> string {
+	if p.frame>=len(c.frames) {return ""}
+	f:=c.frames[p.frame]
+	if !f.gpu_measured {return fmt.tprintf("Frame %d  ·  GPU not measured: a submission of the frame did not come back",p.frame+1)}
+	return fmt.tprintf("Frame %d  ·  GPU %.2f ms  ·  %d passes",p.frame+1,f.gpu_ms,f.pass_count)
+}
+
+@(private="file")
+memory_frame_text :: proc(p:^Profiler_Panel,c:^editor.Profile_Capture) -> string {
+	if p.frame>=len(c.frames) {return ""}
+	m:=c.frames[p.frame].memory
+	return fmt.tprintf("Frame %d  ·  World %.1f MB  ·  process private %.1f MB, resident %.1f MB  ·  GPU %.1f MB",
+		p.frame+1,mb(m.world),mb(i64(m.process.private)),mb(i64(m.process.resident)),mb(i64(m.gpu)))
+}
+
+@(private="file")
+mb :: proc(bytes:i64) -> f64 {return f64(bytes)/(1<<20)}
 
 // A color of its own for each name, among muted hues.
 @(private="file")
@@ -229,8 +307,9 @@ frames_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
 	ui.draw_text(ctx,text,rect.x+rect.w-ui.text_width(&ctx.font,text,ui.metric(ctx,"font_small"))-6,rect.y+6,ui.metric(ctx,"font_small"),ui.tone(ctx,"text_muted"))
 }
 
-// The frame chosen: the zones of the main thread by depth, those of the
-// other threads, and the GPU passes where they ran, on one time axis.
+// The frame chosen on one time axis, that of its CPU frame and what ran
+// after it: in the CPU tab the zones of the main thread by depth and those
+// of the other threads; in the GPU tab its passes where they ran.
 @(private="file")
 timeline_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
 	p:=(^Profiler_Panel)(user)
@@ -252,6 +331,15 @@ timeline_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
 		if ui.text_width(&ctx.font,text,ui.metric(ctx,"font_small"))+6<w {ui.draw_text(ctx,text,x+3,y+2,ui.metric(ctx,"font_small"),ui.Color{20,22,26,255})}
 	}
 	row_y:=rect.y+2
+	if Tab(p.tab)==.Gpu {
+		ui.draw_text(ctx,"GPU",rect.x,row_y+2,ui.metric(ctx,"font_small"),ui.tone(ctx,"text_muted"))
+		for pass in passes {
+			bar(ctx,x0+f32(max(pass.start_ns-f.start_ns,0))*scale,row_y,f32(pass.ns)*scale,c.pass_names[pass.name],f64(pass.ns)/1e6)
+		}
+		if !f.gpu_measured {ui.draw_text(ctx,"not measured",x0+4,row_y+2,ui.metric(ctx,"font_small"),ui.tone(ctx,"text_muted"))}
+		ruler(ctx,rect,x0,w,row_y+ROW+4,span)
+		return
+	}
 	ui.draw_text(ctx,"main",rect.x,row_y+2,ui.metric(ctx,"font_small"),ui.tone(ctx,"text_muted"))
 	for zone in c.zones[f.zone_first:][:f.zone_count] {
 		y:=row_y+f32(zone.depth-1)*(ROW+2)
@@ -266,17 +354,65 @@ timeline_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
 		}
 		row_y+=ROW+2
 	}
-	ui.draw_text(ctx,"GPU",rect.x,row_y+2,ui.metric(ctx,"font_small"),ui.tone(ctx,"text_muted"))
-	for pass in passes {
-		bar(ctx,x0+f32(max(pass.start_ns-f.start_ns,0))*scale,row_y,f32(pass.ns)*scale,c.pass_names[pass.name],f64(pass.ns)/1e6)
-	}
-	if !f.gpu_measured {ui.draw_text(ctx,"not measured",x0+4,row_y+2,ui.metric(ctx,"font_small"),ui.tone(ctx,"text_muted"))}
-	ruler:=row_y+ROW+4
+	ruler(ctx,rect,x0,w,row_y+2,span)
+}
+
+@(private="file")
+ruler :: proc(ctx:^ui.Context,rect:ui.Rect,x0,w,y:f32,span:i64) {
 	for i in 0..=4 {
 		x:=x0+w*f32(i)/4
-		ui.draw_rect(ctx,{x,rect.y,1,ruler-rect.y},ui.color_alpha(ui.tone(ctx,"text_faint"),60))
-		ui.draw_text(ctx,fmt.tprintf("%.1f ms",f64(span)*f64(i)/4/1e6),min(x+3,rect.x+rect.w-48),ruler,ui.metric(ctx,"font_small"),ui.tone(ctx,"text_muted"))
+		ui.draw_rect(ctx,{x,rect.y,1,y-rect.y},ui.color_alpha(ui.tone(ctx,"text_faint"),60))
+		ui.draw_text(ctx,fmt.tprintf("%.1f ms",f64(span)*f64(i)/4/1e6),min(x+3,rect.x+rect.w-48),y,ui.metric(ctx,"font_small"),ui.tone(ctx,"text_muted"))
 	}
+}
+
+// The passes that took most per measured frame over the capture.
+@(private="file")
+passes_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
+	p:=(^Profiler_Panel)(user)
+	c:=p.capture
+	if c==nil || p.pass_count==0 {return}
+	small:=ui.metric(ctx,"font_small")
+	ui.draw_text(ctx,"Pass",rect.x,rect.y,small,ui.tone(ctx,"text_muted"))
+	ui.draw_text(ctx,"ms / frame",rect.x+rect.w*0.55,rect.y,small,ui.tone(ctx,"text_muted"))
+	most:=max(p.passes[0].ms,0.001)
+	for top,i in p.passes[:p.pass_count] {
+		y:=rect.y+ROW*f32(i+1)
+		name:=c.pass_names[top.name]
+		ui.draw_rect(ctx,{rect.x,y+3,rect.w*0.5*f32(top.ms/most),ROW-6},ui.color_alpha(zone_color(name),110))
+		ui.draw_text(ctx,name,rect.x+4,y+1,small,ui.tone(ctx,"text"))
+		ui.draw_text(ctx,fmt.tprintf("%.3f",top.ms),rect.x+rect.w*0.55,y+1,small,ui.tone(ctx,"text"))
+	}
+}
+
+// The memory at the end of each frame: of the World, private of the
+// process and of the GPU, a line each; the frame chosen is marked.
+@(private="file")
+memory_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
+	p:=(^Profiler_Panel)(user)
+	c:=p.capture
+	ui.draw_rounded(ctx,rect,ui.metric(ctx,"radius_control"),ui.tone(ctx,"field"))
+	if c==nil || len(c.frames)==0 {return}
+	step:=rect.w/f32(len(c.frames))
+	tones:=[3]string{"accent","text","text_muted"}
+	for f,i in c.frames {
+		values:=[3]f64{mb(f.memory.world),mb(i64(f.memory.process.private)),mb(i64(f.memory.gpu))}
+		x:=rect.x+f32(i)*step
+		for value,k in values {
+			y:=rect.y+rect.h-2-f32(min(value/p.memory_mb,1))*(rect.h-4)
+			ui.draw_rect(ctx,{x,y,max(step,1),1.5},ui.tone(ctx,tones[k]))
+		}
+	}
+	ui.draw_rect(ctx,{rect.x+f32(p.frame)*step,rect.y,1,rect.h},ui.color_alpha(ui.tone(ctx,"text_faint"),120))
+	small:=ui.metric(ctx,"font_small")
+	names:=[3]string{"World","private","GPU"}
+	x:=rect.x+6
+	for name,k in names {
+		ui.draw_text(ctx,name,x,rect.y+4,small,ui.tone(ctx,tones[k]))
+		x+=ui.text_width(&ctx.font,name,small)+12
+	}
+	text:=fmt.tprintf("%.0f MB",p.memory_mb)
+	ui.draw_text(ctx,text,rect.x+rect.w-ui.text_width(&ctx.font,text,small)-6,rect.y+4,small,ui.tone(ctx,"text_muted"))
 }
 
 // The zones that took most per frame over the capture, the parts of the frame left out.

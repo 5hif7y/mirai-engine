@@ -297,8 +297,7 @@ profile_frame_end :: proc(app:^App,drawn:bool) {
 @(private)
 profile_memory_sample :: proc(app:^App) -> (m:Profile_Memory) {
     if world:=app.profiler.memory_world;world!=nil && app.info!=nil {
-        bytes,_:=core.world_memory(app.info,world)
-        m.world=i64(bytes)
+        m.world=i64(core.world_memory(app.info,world))
     }
     m.process=platform.process_memory()
     if app.device!=nil {m.gpu,_=rhi.device_memory(app.device)}

@@ -16,6 +16,8 @@ World_Schema :: struct {
     storages:[]Value_Schema, // by storage: the persist ones; the others have TYPE_NONE
     records:[]Value_Schema,  // by record type of the World_Info
     table_hashes:[]Table_Hash, // sorted by hash: world_table_index_of_hash
+    memory:[]Memory_Op,        // world_memory reads these instead of the types (memory_compile)
+    entities:[2]i32,           // the ops of the Entities of a World
     allocator:runtime.Allocator,
 }
 
@@ -29,6 +31,7 @@ Value_Schema :: struct {
     hash:u64,               // of its layout: a value stored with another migrates by field names
     layout:serial.Layout,   // the bytes of a value that are saved: no transient field
     entities:[]u32,         // offsets of its Entity fields
+    held:[2]i32,            // the ops of World_Schema.memory of what it holds behind pointers
 }
 
 // Completes the World_Info that the generated world returns: its tables and
@@ -119,7 +122,95 @@ world_schema_make :: proc(info:^World_Info,allocator:=context.allocator) -> ^Wor
             return nil
         }
     }
+    ops:=make([dynamic]Memory_Op,allocator)
+    entities,ok:=memory_compile(&ops,type_info_of(Entities))
+    ws.entities=entities
+    for t,i in info.tables {ws.tables[i].held,ok=memory_compile(&ops,t.info);if !ok {break}}
+    for s,i in info.storages {if ok {ws.storages[i].held,ok=memory_compile(&ops,s.info)}}
+    ws.memory=ops[:]
+    if !ok {
+        world_schema_destroy(ws)
+        return nil
+    }
     return ws
+}
+
+// A container a value holds: where it is in the value and how to read what
+// it holds. A fixed array of values that hold containers is an op whose
+// children are those of one element; a dynamic array or a slice of them
+// has children too, read for each element it has.
+Memory_Op :: struct {
+    offset:uintptr,
+    kind:Memory_Kind,
+    count:int,     // Array: elements
+    elem_size:int,
+    map_info:^runtime.Map_Info,
+    children:[2]i32, // the ops of one element, from its start
+}
+Memory_Kind :: enum u8 {Dynamic,Slice,Map,Array}
+
+// Appends the ops of what a type holds behind pointers: first its own, then
+// those of each of their elements. held: the range of its own.
+@(private="file")
+memory_compile :: proc(ops:^[dynamic]Memory_Op,info:^runtime.Type_Info) -> (held:[2]i32,ok:bool) {
+    own:=make([dynamic]Memory_Op,context.temp_allocator)
+    elems:=make([dynamic]^runtime.Type_Info,context.temp_allocator)
+    memory_collect(&own,&elems,info,0)
+    held={i32(len(ops)),i32(len(ops)+len(own))}
+    if _,error:=append(ops,..own[:]);error!=nil {return held,false}
+    for elem,i in elems {
+        if elem==nil {continue}
+        children,compiled:=memory_compile(ops,elem)
+        if !compiled {return held,false}
+        ops[int(held[0])+i].children=children
+    }
+    return held,true
+}
+
+// The containers of a value at offset in it, not of their elements: elems
+// gets, by op, the type of an element that holds containers.
+@(private="file")
+memory_collect :: proc(own:^[dynamic]Memory_Op,elems:^[dynamic]^runtime.Type_Info,info:^runtime.Type_Info,offset:uintptr) {
+    if value_flat(info) {return}
+    add :: proc(own:^[dynamic]Memory_Op,elems:^[dynamic]^runtime.Type_Info,op:Memory_Op,elem:^runtime.Type_Info) {
+        append(own,op)
+        append(elems,elem if elem!=nil && !value_flat(elem) else nil)
+    }
+    #partial switch v in runtime.type_info_base(info).variant {
+    case runtime.Type_Info_Struct:
+        for i in 0..<int(v.field_count) {memory_collect(own,elems,v.types[i],offset+v.offsets[i])}
+    case runtime.Type_Info_Array:            add(own,elems,{offset=offset,kind=.Array,count=v.count,elem_size=v.elem_size},v.elem)
+    case runtime.Type_Info_Enumerated_Array: add(own,elems,{offset=offset,kind=.Array,count=v.count,elem_size=v.elem_size},v.elem)
+    case runtime.Type_Info_Dynamic_Array:    add(own,elems,{offset=offset,kind=.Dynamic,elem_size=v.elem_size},v.elem)
+    case runtime.Type_Info_Slice:            add(own,elems,{offset=offset,kind=.Slice,elem_size=v.elem_size},v.elem)
+    case runtime.Type_Info_Map:              add(own,elems,{offset=offset,kind=.Map,map_info=v.map_info},nil)
+    }
+}
+
+// The bytes of what the ops in held read at data.
+memory_read :: proc(ops:[]Memory_Op,held:[2]i32,data:rawptr) -> (bytes:int) {
+    for op in ops[held[0]:held[1]] {
+        at:=rawptr(uintptr(data)+op.offset)
+        count,first:=0,rawptr(nil)
+        switch op.kind {
+        case .Dynamic:
+            a:=cast(^runtime.Raw_Dynamic_Array)at
+            bytes+=a.cap*op.elem_size
+            count,first=a.len,a.data
+        case .Slice:
+            a:=cast(^runtime.Raw_Slice)at
+            bytes+=a.len*op.elem_size
+            count,first=a.len,a.data
+        case .Map:
+            m:=cast(^runtime.Raw_Map)at
+            if m.data!=0 && op.map_info!=nil {bytes+=int(runtime.map_total_allocation_size(uintptr(runtime.map_cap(m^)),op.map_info))}
+        case .Array:
+            count,first=op.count,at
+        }
+        if op.children[0]==op.children[1] {continue}
+        for i in 0..<count {bytes+=memory_read(ops,op.children,rawptr(uintptr(first)+uintptr(i*op.elem_size)))}
+    }
+    return
 }
 
 // The schema of a world and the type in it of one of its values: of a table,
@@ -194,7 +285,7 @@ world_schema_destroy :: proc(ws:^World_Schema) {
     for &v in ws.storages {value_schema_destroy(&v,allocator)}
     for &v in ws.records {value_schema_destroy(&v,allocator)}
     delete(ws.tables,allocator);delete(ws.storages,allocator);delete(ws.records,allocator)
-    delete(ws.table_hashes,allocator)
+    delete(ws.table_hashes,allocator);delete(ws.memory)
     delete(ws.choices,allocator);delete(ws.schema.named)
     serial.schema_destroy(&ws.schema)
     _=runtime.mem_free(ws,allocator)

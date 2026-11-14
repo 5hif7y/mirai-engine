@@ -78,7 +78,7 @@ Profiler_Panel :: struct {
 	passes:  [TOP_ZONES]Top_Pass,
 	pass_count: int,
 	tab:     int,
-	memory_mb: f64, // the top of the memory graph
+	memory_range: [3][2]f64, // of the World, the private memory and the GPU, in MB: the lowest and highest of the capture
 	error:   [128]u8,
 	error_length: int,
 	capture: ^editor.Profile_Capture, // the one shown, for the drawings of this frame
@@ -173,9 +173,11 @@ profiler_header :: proc(s:^editor.Session,p:^Profiler_Panel,app:^host.App) {
 // zones that took most, and the frame nearest the median as the one chosen.
 @(private="file")
 profiler_show :: proc(p:^Profiler_Panel,c:^editor.Profile_Capture) {
-	p.shown,p.frame,p.workers,p.depth,p.thread_count,p.top_count,p.pass_count,p.memory_mb=c.id,0,0,1,0,0,0,0
-	for f in c.frames {p.memory_mb=max(p.memory_mb,mb(f.memory.world),mb(i64(f.memory.process.private)),mb(i64(f.memory.gpu)))}
-	p.memory_mb=max(p.memory_mb*1.1,1)
+	p.shown,p.frame,p.workers,p.depth,p.thread_count,p.top_count,p.pass_count=c.id,0,0,1,0,0,0
+	p.memory_range={{max(f64),0},{max(f64),0},{max(f64),0}}
+	for f in c.frames {
+		for value,k in memory_values(f) {p.memory_range[k]={min(p.memory_range[k][0],value),max(p.memory_range[k][1],value)}}
+	}
 	for values,name in editor.profile_passes_by_name(c) {
 		total:f64
 		for ms in values {total+=ms}
@@ -385,34 +387,38 @@ passes_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
 	}
 }
 
-// The memory at the end of each frame: of the World, private of the
-// process and of the GPU, a line each; the frame chosen is marked.
+// The memory at the end of each frame, a band each for the World, the
+// private memory of the process and the GPU, each from its lowest to its
+// highest in the capture; the frame chosen is marked.
 @(private="file")
 memory_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
 	p:=(^Profiler_Panel)(user)
 	c:=p.capture
 	ui.draw_rounded(ctx,rect,ui.metric(ctx,"radius_control"),ui.tone(ctx,"field"))
 	if c==nil || len(c.frames)==0 {return}
-	step:=rect.w/f32(len(c.frames))
-	tones:=[3]string{"accent","text","text_muted"}
-	for f,i in c.frames {
-		values:=[3]f64{mb(f.memory.world),mb(i64(f.memory.process.private)),mb(i64(f.memory.gpu))}
-		x:=rect.x+f32(i)*step
-		for value,k in values {
-			y:=rect.y+rect.h-2-f32(min(value/p.memory_mb,1))*(rect.h-4)
-			ui.draw_rect(ctx,{x,y,max(step,1),1.5},ui.tone(ctx,tones[k]))
+	small:=ui.metric(ctx,"font_small")
+	label:=f32(150)
+	x0,w:=rect.x+label,rect.w-label
+	band:=rect.h/3
+	step:=w/f32(len(c.frames))
+	names:=[3]string{"World","Private","GPU"}
+	for name,k in names {
+		top:=rect.y+band*f32(k)
+		low,high:=p.memory_range[k][0],p.memory_range[k][1]
+		ui.draw_text(ctx,fmt.tprintf("%s %.1f-%.1f MB",name,low,high),rect.x+6,top+band/2-small/2,small,ui.tone(ctx,"text_muted"))
+		if k>0 {ui.draw_rect(ctx,{rect.x,top,rect.w,1},ui.color_alpha(ui.tone(ctx,"text_faint"),60))}
+		for f,i in c.frames {
+			at:=0.5 if high<=low else (memory_values(f)[k]-low)/(high-low)
+			y:=top+band-4-f32(at)*(band-8)
+			ui.draw_rect(ctx,{x0+f32(i)*step,y,max(step,1),1.5},ui.tone(ctx,"accent"))
 		}
 	}
-	ui.draw_rect(ctx,{rect.x+f32(p.frame)*step,rect.y,1,rect.h},ui.color_alpha(ui.tone(ctx,"text_faint"),120))
-	small:=ui.metric(ctx,"font_small")
-	names:=[3]string{"World","private","GPU"}
-	x:=rect.x+6
-	for name,k in names {
-		ui.draw_text(ctx,name,x,rect.y+4,small,ui.tone(ctx,tones[k]))
-		x+=ui.text_width(&ctx.font,name,small)+12
-	}
-	text:=fmt.tprintf("%.0f MB",p.memory_mb)
-	ui.draw_text(ctx,text,rect.x+rect.w-ui.text_width(&ctx.font,text,small)-6,rect.y+4,small,ui.tone(ctx,"text_muted"))
+	ui.draw_rect(ctx,{x0+f32(p.frame)*step,rect.y,1,rect.h},ui.color_alpha(ui.tone(ctx,"text_faint"),120))
+}
+
+@(private="file")
+memory_values :: proc(f:editor.Profile_Frame_Record) -> [3]f64 {
+	return {mb(f.memory.world),mb(i64(f.memory.process.private)),mb(i64(f.memory.gpu))}
 }
 
 // The zones that took most per frame over the capture, the parts of the frame left out.

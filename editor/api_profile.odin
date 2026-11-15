@@ -29,6 +29,7 @@ Api_Profile_Capture_Params :: struct {
     label:[32]u8 `mirai:"optional,text,label=Name to tell the capture by"`,
     top:int `mirai:"optional,min=1,max=64,clamp,label=Zones and GPU passes in the summary"`,
     wait:int `mirai:"optional,min=0,max=900,unit=s,label=With advance: how long to queue for a compilation or another measurement that runs; past it the call fails"`,
+    memory:bool `mirai:"optional,label=Also sample the memory at the end of each frame, in a zone memory of the frame: what the tables and storages of the World hold (the one Play runs, else the scene's), the process and the GPU"`,
     allow_limited:bool `mirai:"optional,label=Measure with VSync or a frame limit or graphics validation on; the call refuses otherwise and says how to turn them off. The summary says comparable:false"`,
 }
 Api_Profile_Id_Params :: struct {
@@ -103,6 +104,18 @@ Api_Profile_Presentation :: struct {
     latency_mean_ms:f32 `mirai:"label=From the start of a frame to its own image going to the display with its GPU work done; without frame generation the GPU is taken to start each frame once it is submitted and the one before is done"`,
     latency_p95_ms:f32,
 }
+// In MB. world: what the tables and storages of the World that ran hold
+// (core.world_memory); what game code allocates outside its storages is not in it.
+Api_Profile_Memory :: struct {
+    world_mb:f32 `mirai:"label=At the end of the last frame"`,
+    world_peak_mb:f32 `mirai:"label=The most at the end of a frame of the capture"`,
+    world_rise_mb:f32 `mirai:"label=From the end of the first frame to that of the last"`,
+    private_mb:f32 `mirai:"label=Of the process: what only it uses, at the end of the last frame"`,
+    private_rise_mb:f32 `mirai:"label=From the end of the first frame to that of the last"`,
+    resident_mb:f32 `mirai:"label=Of the process in physical memory, shared pages included"`,
+    gpu_mb:f32 `mirai:"label=Of the device memory the process holds"`,
+}
+Api_Profile_Frame_Memory :: struct {world_mb,private_mb,gpu_mb:f32}
 Api_Profile_Summary :: struct {
     id:int `mirai:"label=What the id of the other profile methods takes"`,
     label:string,
@@ -117,6 +130,7 @@ Api_Profile_Summary :: struct {
     zones:[]Api_Profile_Zone `mirai:"optional,label=The other zones that cost the most by their own time"`,
     gpu:[]Api_Profile_Stat `mirai:"optional,label=The GPU passes that cost the most"`,
     workers:Api_Profile_Workers `mirai:"optional"`,
+    memory:Api_Profile_Memory `mirai:"optional,label=Of a capture with memory"`,
     lost_zones:u64 `mirai:"optional,label=Zones the recorder had no room for"`,
     notes:[]string `mirai:"optional,label=What to know before reading the numbers"`,
 }
@@ -148,6 +162,7 @@ Api_Profile_Frame :: struct {
     zones:[]Api_Profile_Tree `mirai:"label=Of the main thread by start"`,
     hidden_zones:int `mirai:"label=Deeper or shorter than asked or past the most listed"`,
     gpu:[]Api_Profile_Pass `mirai:"label=The passes that took the longest"`,
+    memory:Api_Profile_Frame_Memory `mirai:"optional,label=At its end, in MB, of a capture with memory"`,
 }
 Api_Profile_Frames :: struct {
     id:int,
@@ -298,7 +313,7 @@ api_profile_capture :: proc(s:^Session,call:^api.Call) {
     profile_collect(s)
     warmup,settled:=0,true
     if p.advance && s.profiles.recording==0 {warmup,settled=profile_settle(s,p.dt)}
-    c,error:=profile_begin(s,p.frames,base.text_get(p.label[:]))
+    c,error:=profile_begin(s,p.frames,base.text_get(p.label[:]),p.memory)
     if c==nil {api.call_fail(call,api.SERVER_ERROR,error);return}
     c.warmup,c.unsettled=warmup,!settled
     if !p.advance {
@@ -387,6 +402,7 @@ profile_summary :: proc(c:^Profile_Capture,top:int) -> (out:Api_Profile_Summary)
     for t in totals {if t>2*spread.p50 {out.frame.spikes+=1}}
     out.frame.worst=profile_worst(c,min(3,n))
     out.presentation=profile_presentation(c,spread.mean*f64(n))
+    if c.memory {out.memory=profile_memory(c)}
 
     aggregates:=profile_aggregate(c)
     parts:=make([dynamic]Api_Profile_Stat)
@@ -566,12 +582,26 @@ api_profile_frames :: proc(s:^Session,call:^api.Call) {
     api.call_result(call,Api_Profile_Frames)^=out
 }
 
+profile_mb :: proc(bytes:i64) -> f32 {return f32(math.round(f64(bytes)/(1<<20)*100)/100)}
+
+profile_memory :: proc(c:^Profile_Capture) -> (out:Api_Profile_Memory) {
+    if len(c.frames)==0 {return}
+    first,last:=c.frames[0].memory,c.frames[len(c.frames)-1].memory
+    peak:i64
+    for f in c.frames {peak=max(peak,f.memory.world)}
+    out.world_mb,out.world_peak_mb,out.world_rise_mb=profile_mb(last.world),profile_mb(peak),profile_mb(last.world-first.world)
+    out.private_mb,out.private_rise_mb=profile_mb(i64(last.process.private)),profile_mb(i64(last.process.private)-i64(first.process.private))
+    out.resident_mb,out.gpu_mb=profile_mb(i64(last.process.resident)),profile_mb(i64(last.gpu))
+    return
+}
+
 profile_frame_out :: proc(c:^Profile_Capture,index,depth:int,min_ms:f64) -> (out:Api_Profile_Frame) {
     f:=c.frames[index]
     out.index=index
     out.ms,out.cpu_ms,out.wait_ms=profile_ms(profile_frame_ms(f)),profile_ms(profile_frame_cpu_ms(f)),profile_ms(f64(f.wait_ms))
     out.pacing_ms,out.between_ms,out.gpu_ms=profile_ms(f64(f.pacing_ns)/1e6),profile_ms(f64(f.between_ns)/1e6),profile_ms(f64(f.gpu_ms))
     out.gpu_measured=f.gpu_measured
+    if c.memory {out.memory={profile_mb(f.memory.world),profile_mb(i64(f.memory.process.private)),profile_mb(i64(f.memory.gpu))}}
     out.bound=profile_frame_bound(f)
     out.workers_busy_ms,out.jobs=profile_ms(f64(f.worker_ns)/1e6),f.jobs
     zones:=make([dynamic]Api_Profile_Tree)
@@ -855,6 +885,11 @@ profile_trace :: proc(c:^Profile_Capture) -> (text:string,events:int) {
         event(&b,&first)
         fmt.sbprintf(&b,`{{"name":"ms","ph":"C","pid":1,"ts":%.3f,"args":{{"frame":%.3f,"gpu":%.3f,"wait":%.3f}}}}`,f64(f.start_ns)/1e3,profile_frame_ms(f),f64(f.gpu_ms),f64(f.wait_ms))
         events+=2
+        if c.memory {
+            event(&b,&first)
+            fmt.sbprintf(&b,`{{"name":"MB","ph":"C","pid":1,"ts":%.3f,"args":{{"world":%.2f,"private":%.2f,"gpu":%.2f}}}}`,f64(f.start_ns)/1e3,profile_mb(f.memory.world),profile_mb(i64(f.memory.process.private)),profile_mb(i64(f.memory.gpu)))
+            events+=1
+        }
     }
     for zone in c.zones {
         event(&b,&first)

@@ -123,10 +123,11 @@ world_schema_make :: proc(info:^World_Info,allocator:=context.allocator) -> ^Wor
         }
     }
     ops:=make([dynamic]Memory_Op,allocator)
-    entities,ok:=memory_compile(&ops,type_info_of(Entities))
+    compiled:=make(map[typeid][2]i32,context.temp_allocator)
+    entities,ok:=memory_compile(&ops,&compiled,type_info_of(Entities))
     ws.entities=entities
-    for t,i in info.tables {ws.tables[i].held,ok=memory_compile(&ops,t.info);if !ok {break}}
-    for s,i in info.storages {if ok {ws.storages[i].held,ok=memory_compile(&ops,s.info)}}
+    for t,i in info.tables {ws.tables[i].held,ok=memory_compile(&ops,&compiled,t.info);if !ok {break}}
+    for s,i in info.storages {if ok {ws.storages[i].held,ok=memory_compile(&ops,&compiled,s.info)}}
     ws.memory=ops[:]
     if !ok {
         world_schema_destroy(ws)
@@ -136,9 +137,10 @@ world_schema_make :: proc(info:^World_Info,allocator:=context.allocator) -> ^Wor
 }
 
 // A container a value holds: where it is in the value and how to read what
-// it holds. A fixed array of values that hold containers is an op whose
-// children are those of one element; a dynamic array or a slice of them
-// has children too, read for each element it has.
+// it holds. Its children are the ops of one element, read for each element
+// it has: of a fixed array, a dynamic array or a slice, or a value of a map.
+// A key holds no container: a type that does is not comparable.
+@(private)
 Memory_Op :: struct {
     offset:uintptr,
     kind:Memory_Kind,
@@ -147,21 +149,25 @@ Memory_Op :: struct {
     map_info:^runtime.Map_Info,
     children:[2]i32, // the ops of one element, from its start
 }
+@(private)
 Memory_Kind :: enum u8 {Dynamic,Slice,Map,Array}
 
 // Appends the ops of what a type holds behind pointers: first its own, then
-// those of each of their elements. held: the range of its own.
+// those of each of their elements. held: the range of its own. A type is
+// compiled once: its later uses, as an element of itself too, read that range.
 @(private="file")
-memory_compile :: proc(ops:^[dynamic]Memory_Op,info:^runtime.Type_Info) -> (held:[2]i32,ok:bool) {
+memory_compile :: proc(ops:^[dynamic]Memory_Op,compiled:^map[typeid][2]i32,info:^runtime.Type_Info) -> (held:[2]i32,ok:bool) {
+    if known,found:=compiled[info.id];found {return known,true}
     own:=make([dynamic]Memory_Op,context.temp_allocator)
     elems:=make([dynamic]^runtime.Type_Info,context.temp_allocator)
     memory_collect(&own,&elems,info,0)
     held={i32(len(ops)),i32(len(ops)+len(own))}
     if _,error:=append(ops,..own[:]);error!=nil {return held,false}
+    if _,error:=map_insert(compiled,info.id,held);error!=nil {return held,false}
     for elem,i in elems {
         if elem==nil {continue}
-        children,compiled:=memory_compile(ops,elem)
-        if !compiled {return held,false}
+        children,done:=memory_compile(ops,compiled,elem)
+        if !done {return held,false}
         ops[int(held[0])+i].children=children
     }
     return held,true
@@ -183,11 +189,12 @@ memory_collect :: proc(own:^[dynamic]Memory_Op,elems:^[dynamic]^runtime.Type_Inf
     case runtime.Type_Info_Enumerated_Array: add(own,elems,{offset=offset,kind=.Array,count=v.count,elem_size=v.elem_size},v.elem)
     case runtime.Type_Info_Dynamic_Array:    add(own,elems,{offset=offset,kind=.Dynamic,elem_size=v.elem_size},v.elem)
     case runtime.Type_Info_Slice:            add(own,elems,{offset=offset,kind=.Slice,elem_size=v.elem_size},v.elem)
-    case runtime.Type_Info_Map:              add(own,elems,{offset=offset,kind=.Map,map_info=v.map_info},nil)
+    case runtime.Type_Info_Map:              add(own,elems,{offset=offset,kind=.Map,map_info=v.map_info},v.value)
     }
 }
 
 // The bytes of what the ops in held read at data.
+@(private)
 memory_read :: proc(ops:[]Memory_Op,held:[2]i32,data:rawptr) -> (bytes:int) {
     for op in ops[held[0]:held[1]] {
         at:=rawptr(uintptr(data)+op.offset)
@@ -202,13 +209,26 @@ memory_read :: proc(ops:[]Memory_Op,held:[2]i32,data:rawptr) -> (bytes:int) {
             bytes+=a.len*op.elem_size
             count,first=a.len,a.data
         case .Map:
-            m:=cast(^runtime.Raw_Map)at
-            if m.data!=0 && op.map_info!=nil {bytes+=int(runtime.map_total_allocation_size(uintptr(runtime.map_cap(m^)),op.map_info))}
+            bytes+=memory_read_map(ops,op,(cast(^runtime.Raw_Map)at)^)
         case .Array:
             count,first=op.count,at
         }
         if op.children[0]==op.children[1] {continue}
         for i in 0..<count {bytes+=memory_read(ops,op.children,rawptr(uintptr(first)+uintptr(i*op.elem_size)))}
+    }
+    return
+}
+
+// The bytes of a map and of what its values hold.
+@(private="file")
+memory_read_map :: proc(ops:[]Memory_Op,op:Memory_Op,m:runtime.Raw_Map) -> (bytes:int) {
+    if m.data==0 || op.map_info==nil {return}
+    capacity:=uintptr(runtime.map_cap(m))
+    bytes=int(runtime.map_total_allocation_size(capacity,op.map_info))
+    if op.children[0]==op.children[1] {return}
+    _,values,hashes,_,_:=runtime.map_kvh_data_dynamic(m,op.map_info)
+    for i in 0..<capacity {
+        if runtime.map_hash_is_valid(hashes[i]) {bytes+=memory_read(ops,op.children,rawptr(runtime.map_cell_index_dynamic(values,op.map_info.vs,i)))}
     }
     return
 }
@@ -285,7 +305,7 @@ world_schema_destroy :: proc(ws:^World_Schema) {
     for &v in ws.storages {value_schema_destroy(&v,allocator)}
     for &v in ws.records {value_schema_destroy(&v,allocator)}
     delete(ws.tables,allocator);delete(ws.storages,allocator);delete(ws.records,allocator)
-    delete(ws.table_hashes,allocator);delete(ws.memory)
+    delete(ws.table_hashes,allocator);delete(ws.memory,allocator)
     delete(ws.choices,allocator);delete(ws.schema.named)
     serial.schema_destroy(&ws.schema)
     _=runtime.mem_free(ws,allocator)

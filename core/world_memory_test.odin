@@ -4,10 +4,13 @@ import "base:runtime"
 import "core:testing"
 
 @(private) Mem_Slot :: struct {points:[dynamic][3]f32,tag:u32,bytes:[]u8}
+@(private) Mem_Node :: struct {kids:[dynamic]Mem_Node,weight:u32}
 @(private) Mem_Pools :: struct {
     slots:[dynamic]Mem_Slot,
     fixed:[4]Mem_Slot,
     names:map[u32]u32,
+    lists:map[u32][dynamic]u32,
+    tree:[dynamic]Mem_Node,
     flat:[8]u32,
 }
 
@@ -44,7 +47,8 @@ the_memory_of_a_world_follows_what_its_tables_and_storages_hold :: proc(t:^testi
 }
 
 // The ops world_info_index compiles read what reading the types at every
-// step reads, in arrays of values that hold arrays, fixed or not.
+// step reads, in arrays of values that hold arrays, fixed or not, in the
+// values of a map and in a type that holds itself.
 @(test)
 the_compiled_memory_ops_read_what_the_types_say :: proc(t:^testing.T) {
     info,described:=test_info(t,Mem_World)
@@ -53,7 +57,11 @@ the_compiled_memory_ops_read_what_the_types_say :: proc(t:^testing.T) {
     w:Mem_World
     if !testing.expect(t,world_init(&info,.World,&w,context.allocator)) {return}
     defer world_destroy(&info,.World,&w)
-    defer delete(w.pools.names) // world_destroy frees arrays and slices, not maps
+    defer { // world_destroy frees arrays and slices, not maps
+        delete(w.pools.names)
+        for _,list in w.pools.lists {delete(list)}
+        delete(w.pools.lists)
+    }
     for i in 0..<5 {
         append(&w.pools.slots,Mem_Slot{tag=u32(i)})
         for _ in 0..<i*7 {append(&w.pools.slots[i].points,[3]f32{})}
@@ -61,6 +69,12 @@ the_compiled_memory_ops_read_what_the_types_say :: proc(t:^testing.T) {
     }
     for &slot,i in w.pools.fixed {slot.bytes=make([]u8,i+1)}
     for i in 0..<20 {w.pools.names[u32(i)]=u32(i)}
+    for i in 0..<6 {w.pools.lists[u32(i)]=make([dynamic]u32,i,i*5+1)}
+    append(&w.pools.tree,Mem_Node{})
+    for i in 0..<3 {
+        append(&w.pools.tree[0].kids,Mem_Node{weight=u32(i)})
+        for _ in 0..=i {append(&w.pools.tree[0].kids[i].kids,Mem_Node{})}
+    }
     for _ in 0..<3 {create(&w.entities)}
     ws:=info.schema
     if !testing.expect(t,ws!=nil) {return}
@@ -117,8 +131,17 @@ reflected_bytes :: proc(data:rawptr,info:^runtime.Type_Info) -> (bytes,elements:
             bytes+=b;elements+=e+1
         }
     case runtime.Type_Info_Map:
-        m:=cast(^runtime.Raw_Map)data
-        if m.data!=0 && v.map_info!=nil {bytes=int(runtime.map_total_allocation_size(uintptr(runtime.map_cap(m^)),v.map_info))}
+        m:=(cast(^runtime.Raw_Map)data)^
+        if m.data==0 {return}
+        capacity:=uintptr(runtime.map_cap(m))
+        bytes=int(runtime.map_total_allocation_size(capacity,v.map_info))
+        keys,values,hashes,_,_:=runtime.map_kvh_data_dynamic(m,v.map_info)
+        for i in 0..<capacity {
+            if !runtime.map_hash_is_valid(hashes[i]) {continue}
+            kb,ke:=reflected_bytes(rawptr(runtime.map_cell_index_dynamic(keys,v.map_info.ks,i)),v.key)
+            vb,ve:=reflected_bytes(rawptr(runtime.map_cell_index_dynamic(values,v.map_info.vs,i)),v.value)
+            bytes+=kb+vb;elements+=ke+ve+1
+        }
     }
     return
 }

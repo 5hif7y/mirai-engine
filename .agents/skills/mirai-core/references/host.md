@@ -203,10 +203,11 @@ request, the device writes no per-pass timestamps. A recording that asks for mem
 the frame as its part `memory`: what the tables and storages of the World that ran last hold
 (`core.world_memory`, the game loop's World, else the editor's), the private and resident memory of
 the process (`platform.process_memory`) and the device memory. `core.world_memory` adds up the
-capacity of the arrays, maps and slices of the tables and storages, reading the containers that
-`world_info_index` found once in their types (`World_Schema.memory`), so a sample costs one read per
-container header, those of every slot of a pool included; what game code allocates outside its
-storages is not in it. The editor exposes it with
+capacity of the arrays, maps and slices of the tables and storages and of what their elements and
+map values hold, reading the containers that `world_info_index` found once in their types, so a
+sample costs one read per container header, those of every slot of a pool included; the bytes of
+strings are not in it (a string may be a literal or a view), nor what game code allocates outside
+its storages. The editor exposes it with
 [`profile.*`](../../mirai-agent-api/references/methods.md#profiling).
 
 **Loads (`load_profile.odin`).** `app.load_profile` keeps the last load of each kind (scene, Play,

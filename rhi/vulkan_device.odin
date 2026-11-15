@@ -270,6 +270,7 @@ Device :: struct {
 	memory_budget:     bool, // VK_EXT_memory_budget: the driver says what memory the process holds and may hold
 	waited_out:        bool, // a wait passed GPU_WAIT_LIMIT_NS: the GPU may still run that work
 	lose_asked:        bool, // device_lose
+	lose_unreported:   bool, // device_lose without reported
 	lose_provoked:     bool,
 	refuse:            Pipeline_Refusal,
 	presenter:         Presenter,
@@ -1317,9 +1318,16 @@ frame_end :: proc(d: ^Device, cmd: ^Command_List, generated := false) -> bool {
 	}
 	submit.signalSemaphoreInfoCount = u32(signal_count)
 	submit.pSignalSemaphoreInfos = raw_data(signals[:])
+	// A reset no call reports: the semaphores pass, the list and its timestamps do not run.
+	unreported := d.lose_asked && d.lose_unreported
+	if unreported {
+		d.lose_asked, d.lose_unreported, d.lose_provoked = false, false, true
+		if f.queries != 0 {d.dvk.ResetQueryPool(d.handle, f.queries, 0, MAX_TIMESTAMPS)}
+		submit.commandBufferInfoCount = 0
+	}
 	sync.mutex_lock(&d.queue_lock)
 	submitted := d.dvk.QueueSubmit2(d.queue, 1, &submit, 0)
-	f.marks.sent = submitted == .SUCCESS
+	f.marks.sent = submitted == .SUCCESS && !unreported
 	ok := vk_check(d, submitted, "vkQueueSubmit2")
 	f.signal_value = d.timeline_value
 	f.number, f.submitted = d.frame_number, submitted == .SUCCESS

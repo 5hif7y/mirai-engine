@@ -190,12 +190,15 @@ entities or persistent data.
   always covered, like the editor bars, is not drawn.
 
 **Profiling (`profile.odin`).** `profile_start(app, frames)` records the following frames: zones of
-the main thread, one per loop function, the tasks of each worker and what the renderer
-measures. The first `profile_start` reserves the memory: recording does
-not allocate, without recording a zone costs one branch and what does not fit is counted in `lost`.
-Whoever reads the zones as they happen (a profiling plugin) calls `profile_request` in every frame
-and reads them with its own cursor; without a recording or a request, the device writes no
-per-pass timestamps. The editor exposes it with
+the main thread, one per loop function, the tasks of each worker, what the renderer measures and the
+GPU passes of every submission of the frame (a capture or a thumbnail besides the window). Those
+come back `rhi.MAX_FRAMES_IN_FLIGHT` submissions later, by `rhi` frame number, and go to the frame
+that submitted them; a frame is measured once all of its submissions came back, and a recording runs
+a few frames past its last one, keeping no zones, until they do. The first `profile_start` reserves
+the memory: recording does not allocate, without recording a zone costs one branch and what does not
+fit is counted in `lost`. Whoever reads the zones as they happen (a profiling plugin) calls
+`profile_request` in every frame and reads them with its own cursor; without a recording or a
+request, the device writes no per-pass timestamps. The editor exposes it with
 [`profile.*`](../../mirai-agent-api/references/methods.md#profiling).
 
 **Loads (`load_profile.odin`).** `app.load_profile` keeps the last load of each kind (scene, Play,

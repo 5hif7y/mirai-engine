@@ -116,36 +116,40 @@ profiler_panel :: proc(s:^editor.Session,p:^Profiler_Panel,app:^host.App) {
 		titles:=TABS
 		kit.tabs(ctx,ui.id(ctx,"tracks"),titles[:],&p.tab,ui.fixed(240),28)
 		small:=ui.metric(ctx,"font_small")
-		// Every tab is as tall as the tallest: the panel, held by its bottom, keeps its tabs under the pointer.
-		if ui.box(ctx,{width=ui.GROW,height=ui.fixed(tabs_height(p,small)),direction=.Column,gap=TAB_GAP}) {
-			switch Tab(p.tab) {
-			case .Cpu:
-				ui.label(ctx,profiler_frame_text(p,c),small,ui.tone(ctx,"text"))
-				rows:=f32(p.depth+p.thread_count)
-				editor.drawing(g,ui.id(ctx,"timeline"),ui.GROW,ui.fixed(rows*(ROW+2)+ROW),timeline_draw,p)
-				editor.drawing(g,ui.id(ctx,"zones"),ui.GROW,ui.fixed(f32(p.top_count)*ROW+ROW),zones_draw,p)
-			case .Gpu:
-				ui.label(ctx,gpu_frame_text(p,c),small,ui.tone(ctx,"text"))
-				editor.drawing(g,ui.id(ctx,"gpu_timeline"),ui.GROW,ui.fixed(ROW+2+ROW),timeline_draw,p)
-				editor.drawing(g,ui.id(ctx,"passes"),ui.GROW,ui.fixed(f32(p.pass_count)*ROW+ROW),passes_draw,p)
-			case .Memory:
-				if !c.memory {ui.label(ctx,"This capture did not sample the memory",small,ui.tone(ctx,"text_muted"));break}
-				ui.label(ctx,memory_frame_text(p,c),small,ui.tone(ctx,"text"))
-				editor.drawing(g,ui.id(ctx,"memory"),ui.GROW,ui.fixed(GRAPH),memory_draw,p)
+		switch Tab(p.tab) {
+		case .Cpu: ui.label(ctx,profiler_frame_text(p,c),small,ui.tone(ctx,"text"))
+		case .Gpu: ui.label(ctx,gpu_frame_text(p,c),small,ui.tone(ctx,"text"))
+		case .Memory:
+			if c.memory {ui.label(ctx,memory_frame_text(p,c),small,ui.tone(ctx,"text"))} else {ui.label(ctx,"This capture did not sample the memory",small,ui.tone(ctx,"text_muted"))}
+		}
+		// Every tab is as tall as the tallest, the others keeping their place empty: the panel,
+		// held by its bottom, keeps its tabs under the pointer.
+		if ui.box(ctx,{width=ui.GROW,direction=.Stack}) {
+			for tab in Tab {
+				drawn:=tab==Tab(p.tab) && (tab!=.Memory || c.memory)
+				if ui.box(ctx,{width=ui.GROW,direction=.Column,gap=TAB_GAP}) {
+					for part in tab_parts(p,tab) {
+						if part.height==0 {continue}
+						if drawn {editor.drawing(g,ui.id(ctx,part.id),ui.GROW,ui.fixed(part.height),part.draw,p)} else if ui.box(ctx,{width=ui.GROW,height=ui.fixed(part.height)}) {}
+					}
+				}
 			}
 		}
 	}
 }
 
-// The height of the tallest tab of the capture shown: a label of size font
-// over each one's drawings.
 @(private="file")
-tabs_height :: proc(p:^Profiler_Panel,font:f32) -> f32 {
-	label:=font+6
-	cpu:=label+TAB_GAP+f32(p.depth+p.thread_count)*(ROW+2)+ROW+TAB_GAP+f32(p.top_count)*ROW+ROW
-	gpu:=label+TAB_GAP+ROW+2+ROW+TAB_GAP+f32(p.pass_count)*ROW+ROW
-	memory:=label+TAB_GAP+GRAPH
-	return max(cpu,gpu,memory)
+Tab_Part :: struct {id:string,height:f32,draw:editor.Drawing_Proc}
+
+// The drawings of a tab, one over the other.
+@(private="file")
+tab_parts :: proc(p:^Profiler_Panel,tab:Tab) -> [2]Tab_Part {
+	switch tab {
+	case .Cpu: return {{"timeline",f32(p.depth+p.thread_count)*(ROW+2)+ROW,timeline_draw},{"zones",f32(p.top_count)*ROW+ROW,zones_draw}}
+	case .Gpu: return {{"gpu_timeline",ROW+2+ROW,timeline_draw},{"passes",f32(p.pass_count)*ROW+ROW,passes_draw}}
+	case .Memory: return {{"memory",GRAPH,memory_draw},{}}
+	}
+	return {}
 }
 
 @(private="file")
@@ -163,7 +167,7 @@ profiler_header :: proc(s:^editor.Session,p:^Profiler_Panel,app:^host.App) {
 		ui.number_field(ctx,ui.id(ctx,"frames_asked"),&p.frames,{width=ui.fixed(72),decimals=0,speed=1,has_min=true,min=2,has_max=true,max=f64(host.PROFILE_FRAMES_MAX),disabled=recording})
 		if ui.button(ctx,ui.id(ctx,"record"),{label="Record",variant="accent",size=ui.metric(ctx,"font_small"),disabled=recording}).clicked {
 			p.error_length=0
-			if _,error:=editor.profile_begin(s,int(p.frames),"profiler panel",memory=true);error!="" {p.error_length=copy(p.error[:],error)}
+			if _,error:=editor.profile_begin(s,int(p.frames),"profiler panel",memory=Tab(p.tab)==.Memory);error!="" {p.error_length=copy(p.error[:],error)}
 		}
 	}
 }
@@ -397,15 +401,20 @@ memory_draw :: proc(ctx:^ui.Context,rect:ui.Rect,user:rawptr) {
 	ui.draw_rounded(ctx,rect,ui.metric(ctx,"radius_control"),ui.tone(ctx,"field"))
 	if c==nil || len(c.frames)==0 {return}
 	small:=ui.metric(ctx,"font_small")
-	label:=f32(150)
+	names:=[3]string{"World","Private","GPU"}
+	texts:[3]string
+	label:f32
+	for name,k in names {
+		texts[k]=fmt.tprintf("%s %.1f-%.1f MB",name,p.memory_range[k][0],p.memory_range[k][1])
+		label=max(label,ui.text_width(&ctx.font,texts[k],small)+12)
+	}
 	x0,w:=rect.x+label,rect.w-label
 	band:=rect.h/3
 	step:=w/f32(len(c.frames))
-	names:=[3]string{"World","Private","GPU"}
-	for name,k in names {
+	for text,k in texts {
 		top:=rect.y+band*f32(k)
 		low,high:=p.memory_range[k][0],p.memory_range[k][1]
-		ui.draw_text(ctx,fmt.tprintf("%s %.1f-%.1f MB",name,low,high),rect.x+6,top+band/2-small/2,small,ui.tone(ctx,"text_muted"))
+		ui.draw_text(ctx,text,rect.x+6,top+band/2-small/2,small,ui.tone(ctx,"text_muted"))
 		if k>0 {ui.draw_rect(ctx,{rect.x,top,rect.w,1},ui.color_alpha(ui.tone(ctx,"text_faint"),60))}
 		for f,i in c.frames {
 			at:=0.5 if high<=low else (memory_values(f)[k]-low)/(high-low)

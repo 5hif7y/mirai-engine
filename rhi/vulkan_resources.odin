@@ -681,7 +681,7 @@ pipeline_create_compute :: proc(d: ^Device, desc: Compute_Pipeline_Desc) -> Pipe
 	}
 	key := pipeline_key_compute(desc)
 	cache := vk_pipeline_cache_open(d, key)
-	created := vk_check(d, d.dvk.CreateComputePipelines(d.handle, cache, 1, &info, nil, &p.handle), desc.name)
+	created := vk_check(d, d.dvk.CreateComputePipelines(d.handle, cache, 1, &info, nil, &p.handle), desc.name, described = false)
 	vk_pipeline_cache_close(d, key, cache, feedback, created)
 	if !created {vk_release_pipeline(d, &p); return 0}
 	vk_set_name(d, .PIPELINE, u64(p.handle), desc.name)
@@ -783,7 +783,7 @@ pipeline_create_graphics :: proc(d: ^Device, desc: Graphics_Pipeline_Desc) -> Pi
 	}
 	key := pipeline_key_graphics(desc)
 	cache := vk_pipeline_cache_open(d, key)
-	created := vk_check(d, d.dvk.CreateGraphicsPipelines(d.handle, cache, 1, &info, nil, &p.handle), desc.name)
+	created := vk_check(d, d.dvk.CreateGraphicsPipelines(d.handle, cache, 1, &info, nil, &p.handle), desc.name, described = false)
 	vk_pipeline_cache_close(d, key, cache, feedback, created)
 	if !created {vk_release_pipeline(d, &p); return 0}
 	vk_set_name(d, .PIPELINE, u64(p.handle), desc.name)

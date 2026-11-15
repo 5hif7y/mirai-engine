@@ -287,20 +287,22 @@ set_error :: proc(d: ^Device, format: string, args: ..any) {
 }
 
 @(private)
-vk_check :: proc(d: ^Device, result: vk.Result, what: string) -> bool {
+vk_check :: proc(d: ^Device, result: vk.Result, what: string, described := true) -> bool {
 	if result == .SUCCESS {return true}
-	if vk_lost(d, result, what) {return false}
+	if vk_lost(d, result, what, described) {return false}
 	set_error(d, "%s failed: %v", what, result)
 	return false
 }
 
 // Whether a result reports the device lost, which marks it with what the
-// driver says of the fault; other results are the caller's.
+// driver says of the fault; other results are the caller's. described false:
+// a loss the validation layer does not record (pipeline creation), for which
+// it refuses vkGetDeviceFaultInfoEXT as asked of a device that is not lost.
 @(private)
-vk_lost :: proc(d: ^Device, result: vk.Result, what: string) -> bool {
+vk_lost :: proc(d: ^Device, result: vk.Result, what: string, described := true) -> bool {
 	if result != .ERROR_DEVICE_LOST {return false}
 	description: string
-	if d.fault_info && !d.lose_provoked {
+	if d.fault_info && !d.lose_provoked && described {
 		// No arrays asked for: the description alone, with INCOMPLETE.
 		counts := vk.DeviceFaultCountsEXT{sType = .DEVICE_FAULT_COUNTS_EXT}
 		info := vk.DeviceFaultInfoEXT{sType = .DEVICE_FAULT_INFO_EXT}

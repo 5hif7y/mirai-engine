@@ -265,8 +265,12 @@ profile_frame_end :: proc(app:^App,drawn:bool) {
     if p.frame_count<p.wanted {return}
     // The last frames get their GPU passes once the GPU reused their slots: a
     // later batch, or none within PROFILE_GPU_LATE frames, ends the wait.
-    last:=p.frames[p.frame_count-1]
-    waiting:=app.renderer!=nil && last.device_end>last.device_first && !profile_gpu_measured(last) && p.gpu_next<p.frame_count
+    waiting:=false
+    if app.renderer!=nil {
+        for f in p.frames[p.gpu_next:p.frame_count] {
+            if f.device_end>f.device_first && !profile_gpu_measured(f) {waiting=true;break}
+        }
+    }
     if !waiting || p.late>=PROFILE_GPU_LATE {profile_stop(app);return}
     p.late+=1
 }

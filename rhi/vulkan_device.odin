@@ -1172,13 +1172,13 @@ vk_collect_timestamps :: proc(d: ^Device, f: ^Vk_Frame) {
 	count := f.query_count
 	f.query_count = 0
 	d.timing_count = 0
-	d.timing_frame, d.timing_measured = f.number, f.submitted
+	d.timing_frame, d.timing_measured = f.number, f.submitted && f.queries != 0
 	f.submitted = false
 	if f.queries == 0 || count < 2 {return}
 	values: [MAX_TIMESTAMPS]u64
 	// The slot's submission already completed, so WAIT returns immediately.
 	result := d.dvk.GetQueryPoolResults(d.handle, f.queries, 0, count, size_of(values), &values, size_of(u64), {._64, .WAIT})
-	if result != .SUCCESS {vk_lost(d, result, "vkGetQueryPoolResults"); return}
+	if result != .SUCCESS {d.timing_measured = false; vk_lost(d, result, "vkGetQueryPoolResults"); return}
 	gpu, now := values[count - 1], time.duration_nanoseconds(time.tick_diff({}, time.tick_now()))
 	if d.calibrate != nil {
 		infos := [2]vk.CalibratedTimestampInfoKHR{{sType = .CALIBRATED_TIMESTAMP_INFO_KHR, timeDomain = .DEVICE}, {sType = .CALIBRATED_TIMESTAMP_INFO_KHR, timeDomain = VK_HOST_TIME_DOMAIN}}
@@ -1205,7 +1205,8 @@ vk_collect_timestamps :: proc(d: ^Device, f: ^Vk_Frame) {
 
 // The timings the last frame_begin collected and the frame_number of the
 // frame they measured, MAX_FRAMES_IN_FLIGHT before it; measured is false when
-// that slot had submitted nothing since its timings were last collected.
+// that slot had submitted nothing since its timings were last collected, or
+// the device could not read its times.
 frame_timings :: proc(d: ^Device) -> (timings: []Gpu_Timing, frame: u64, measured: bool) {
 	return d.timings[:d.timing_count], d.timing_frame, d.timing_measured
 }

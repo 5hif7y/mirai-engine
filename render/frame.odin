@@ -457,6 +457,7 @@ renderer_frame :: proc(r:^Renderer,frame:Frame_Desc) -> bool {
     }
     prepared:=time.tick_now()
     cmd,began:=rhi.frame_begin(d,!frame.offscreen)
+    gpu_submission_keep(r)
     if !began {
         set_error(r,"the device gave no frame to draw: %s",rhi.device_error(d)!=""?rhi.device_error(d):"the window is being resized or its image is not ready")
         return false
@@ -464,7 +465,6 @@ renderer_frame :: proc(r:^Renderer,frame:Frame_Desc) -> bool {
     begun:=time.tick_now()
     slot:=int(rhi.frame_number(d)%rhi.MAX_FRAMES_IN_FLIGHT)
     read_stats(r,slot)
-    gpu_submission_keep(r)
     points_read(r,slot)
     pages_update(r,slot)
     if !frame.ui_only {shadow_movers_update(r)}
@@ -1782,6 +1782,7 @@ Gpu_Submissions :: struct {
 	timings:      [RENDER_GPU_TIMINGS]rhi.Gpu_Timing,
 	names:        [RENDER_GPU_TIMINGS][rhi.MAX_TIMESTAMP_NAME_BYTES]u8,
 	timing_count: int,
+	kept_end:     u64, // one past the rhi frame of the last submission seen
 }
 
 // The submissions whose GPU timings came back since renderer_gpu_clear, in
@@ -1796,7 +1797,10 @@ renderer_gpu_clear :: proc(r: ^Renderer) {r.submissions.count, r.submissions.tim
 gpu_submission_keep :: proc(r: ^Renderer) {
 	timings, frame, measured := rhi.frame_timings(r.device)
 	g := &r.submissions
-	if !measured || g.count >= len(g.list) || g.timing_count + len(timings) > len(g.timings) {return}
+	// A frame_begin that fails before the device collects leaves the timings of the one before.
+	if !measured || frame < g.kept_end {return}
+	g.kept_end = frame + 1
+	if g.count >= len(g.list) || g.timing_count + len(timings) > len(g.timings) {return}
 	first := g.timing_count
 	for timing, i in timings {
 		k := first + i

@@ -22,6 +22,7 @@ a_change_inside_a_procedure_links_what_links_against_it_again :: proc(t:^testing
     base_source:="engine/plugins/base_thing/runtime/base.odin"
     files:=[][2]string{
         {"engine/core/data.odin","package core\n"},
+        {"engine/std/compressor/compressor.odin","package compressor\n"}, // the build names its collection
         {"engine/plugins/base_thing/plugin.mirai",`{"name": "base_thing", "version": "1.0.0", "parts": ["Runtime"]}`},
         {base_source,"package base_thing\n\nanswer :: proc() -> i32 {return 21}\n"},
         {"engine/plugins/middle/plugin.mirai",`{"name": "middle", "version": "1.0.0", "dependencies": ["base_thing"], "parts": ["Runtime"]}`},

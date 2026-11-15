@@ -130,6 +130,7 @@ a_plugin_library_is_linked_against_an_import_library_made_ahead :: proc(t:^testi
 split_plugin_write :: proc(t:^testing.T,folder:string) -> (engine,game:string) {
     files:=[][2]string{
         {"engine/core/data.odin","package core\n"},
+        {"engine/std/compressor/compressor.odin","package compressor\n"}, // the build names its collection
         {"engine/plugins/thing/plugin.mirai",`{"name": "thing", "version": "1.0.0", "parts": ["Runtime"]}`},
         {"engine/plugins/thing/runtime/thing.odin","package thing\n\nimport \"plugins:thing/runtime/sim\"\n\ndoubled :: proc(value:i32) -> i32 {return sim.answer()*value}\n"},
         {"engine/plugins/thing/runtime/sim/sim.odin","package sim\n\n@(component)\nSim_Probe :: struct {value:f32}\n\nanswer :: proc() -> i32 {return 21}\n"},
@@ -335,6 +336,7 @@ a_plugin_step_receives_a_params_struct_through_its_library :: proc(t:^testing.T)
     if folder=="" {return}
     files:=[][2]string{
         {"engine/core/data.odin","package core\n\nTable :: struct($T:typeid) {values:[2]T}\nRead :: struct($T:typeid) {table:^Table(T)}\n\n@(component)\nProbe :: struct {value:i32}\n\n@(storage,queue)\nAsks :: struct {count:i32}\n\n@(params)\nProber :: struct {probes:^Table(Probe),asks:^Asks}\n"},
+        {"engine/std/compressor/compressor.odin","package compressor\n"}, // the build names its collection
         {"engine/plugins/thing/plugin.mirai",`{"name": "thing", "version": "1.0.0", "parts": ["Runtime"]}`},
         {"engine/plugins/thing/runtime/thing.odin","package thing\n\nimport \"mirai:core\"\n\n@(step=\"fixed\")\nthing_probe :: proc(prober:core.Prober) {\n    prober.probes.values[1].value=40\n    prober.asks.count+=2\n}\n"},
         {"game/project.mirai",`{"name": "Params", "plugins": ["thing"]}`},
@@ -452,6 +454,7 @@ a_plugin_library_compiles_once_those_it_links_against_are_published :: proc(t:^t
     if folder=="" {return}
     files:=[][2]string{
         {"engine/core/data.odin","package core\n"},
+        {"engine/std/compressor/compressor.odin","package compressor\n"}, // the build names its collection
         {"engine/plugins/base_thing/plugin.mirai",`{"name": "base_thing", "version": "1.0.0", "parts": ["Runtime"]}`},
         {"engine/plugins/base_thing/runtime/base.odin","package base_thing\n\nanswer :: proc() -> i32 {return 21}\n"},
         {"engine/plugins/middle/plugin.mirai",`{"name": "middle", "version": "1.0.0", "dependencies": ["base_thing"], "parts": ["Runtime"]}`},

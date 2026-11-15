@@ -804,7 +804,8 @@ mtl_flush_ranges :: proc(d: ^Device, f: ^Mtl_Frame) {
 
 // The timings the last frame_begin collected and the frame_number of the
 // frame they measured, MAX_FRAMES_IN_FLIGHT before it; measured is false when
-// that slot had committed nothing since its timings were last collected.
+// that slot had committed nothing since its timings were last collected, or
+// the device could not read its times.
 frame_timings :: proc(d: ^Device) -> (timings: []Gpu_Timing, frame: u64, measured: bool) {
 	return d.timings[:d.timing_count], d.timing_frame, d.timing_measured
 }
@@ -889,8 +890,10 @@ frame_begin :: proc(d: ^Device, present := true) -> (cmd: ^Command_List, ok: boo
 	d.timing_count = 0
 	d.timing_frame, d.timing_measured = f.number, false
 	if f.cmd != nil {
-		if mtl_wait(d, f.cmd, "frame") {mtl_collect_timestamps(d, f)}
-		d.timing_measured = f.submitted
+		if mtl_wait(d, f.cmd, "frame") {
+			mtl_collect_timestamps(d, f)
+			d.timing_measured = f.submitted
+		}
 		f.submitted = false
 		mtl_release(f.cmd)
 		f.cmd = nil

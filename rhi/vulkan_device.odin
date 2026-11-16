@@ -267,6 +267,7 @@ Device :: struct {
 	failure_text:      string,
 	failure_buffer:    [FAILURE_TEXT_BYTES]u8,
 	fault_info:        bool, // VK_EXT_device_fault: the driver describes a loss
+	validation_layer:  bool, // VK_LAYER_KHRONOS_validation is enabled
 	memory_budget:     bool, // VK_EXT_memory_budget: the driver says what memory the process holds and may hold
 	waited_out:        bool, // a wait passed GPU_WAIT_LIMIT_NS: the GPU may still run that work
 	lose_asked:        bool, // device_lose
@@ -287,22 +288,23 @@ set_error :: proc(d: ^Device, format: string, args: ..any) {
 }
 
 @(private)
-vk_check :: proc(d: ^Device, result: vk.Result, what: string, described := true) -> bool {
+vk_check :: proc(d: ^Device, result: vk.Result, what: string, queued := true) -> bool {
 	if result == .SUCCESS {return true}
-	if vk_lost(d, result, what, described) {return false}
+	if vk_lost(d, result, what, queued) {return false}
 	set_error(d, "%s failed: %v", what, result)
 	return false
 }
 
 // Whether a result reports the device lost, which marks it with what the
-// driver says of the fault; other results are the caller's. described false:
-// a loss the validation layer does not record (pipeline creation), for which
-// it refuses vkGetDeviceFaultInfoEXT as asked of a device that is not lost.
+// driver says of the fault; other results are the caller's. queued false: a
+// call other than a submission or a wait reported it (pipeline creation).
 @(private)
-vk_lost :: proc(d: ^Device, result: vk.Result, what: string, described := true) -> bool {
+vk_lost :: proc(d: ^Device, result: vk.Result, what: string, queued := true) -> bool {
 	if result != .ERROR_DEVICE_LOST {return false}
 	description: string
-	if d.fault_info && !d.lose_provoked && described {
+	// fault_query_unqueued: the validation layer takes a loss only from a submission or a wait,
+	// and reports vkGetDeviceFaultInfoEXT after any other as made on a device that is not lost.
+	if d.fault_info && !d.lose_provoked && (queued || !d.validation_layer) {
 		// No arrays asked for: the description alone, with INCOMPLETE.
 		counts := vk.DeviceFaultCountsEXT{sType = .DEVICE_FAULT_COUNTS_EXT}
 		info := vk.DeviceFaultInfoEXT{sType = .DEVICE_FAULT_INFO_EXT}
@@ -501,6 +503,7 @@ vk_create_instance_and_device :: proc(d: ^Device, desc: Device_Desc) -> bool {
 	if d.debug_utils {append(&extensions, "VK_EXT_debug_utils")}
 	enabled_layers := make([dynamic]cstring, 0, 2, context.temp_allocator)
 	if validation {append(&enabled_layers, "VK_LAYER_KHRONOS_validation")}
+	d.validation_layer = validation
 
 	app := vk.ApplicationInfo{
 		sType = .APPLICATION_INFO,

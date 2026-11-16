@@ -308,6 +308,10 @@ Reading a load:
   `Prepare` and `Nav_Tiles` are summed over the job workers and can exceed the wall time.
 - **A section** counts what its own load did until it joined, and also adds it to the scene or Play
   that was loading then.
+- **Pipelines.** `pipelines.compiled` with `store` `Read` means pipelines the kept ones did not
+  have: a material program seen for the first time, or keys a change of shaders, fixed state or
+  constants made new. A second start of the same build that still compiles them points at the
+  keys; `late_frames` counts the frames that drew materials as their rows meanwhile.
 
 Reading a capture:
 
@@ -344,6 +348,12 @@ Reading a capture:
   report of the task with the median and the spread of each build and the difference per pair with
   its range, warns if another engine program was open or the GPU had another load, and leaves the
   JSON in `--out`.
+- **Compiling pipelines.** `mirai bench pipelines [project]` plays a cold start and then a warm
+  one with a window and prints their table: the start of the renderer, the pipelines the driver
+  compiled and the frames that lost them. Cold empties both caches: the kept pipelines go aside
+  and come back after, and the driver's own is pointed at an empty folder by its variables. The
+  table says when the cold start may not have been cold (the kept pipelines were read, or the
+  driver kept its own cache); no editor of the project may be open.
 
 ## History
 

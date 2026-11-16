@@ -7,6 +7,7 @@ import "core:strings"
 import "core:time"
 import "mirai:core"
 import render "mirai:render"
+import "mirai:rhi"
 import "mirai:std/base"
 
 // What the last loads of the application took, for whoever asks where their
@@ -122,6 +123,14 @@ Load_Wait :: struct {
     frames:int,
 }
 
+// The pipelines the device created and what the frames lost to them: counts
+// since the device was made, and of a load the difference over it.
+Load_Pipelines :: struct {
+    made,kept:int, // kept: read from the pipelines kept across runs, not compiled
+    ns:i64,        // what the driver took for them, summed over the threads
+    late:u64,      // frames that began while a pipeline a frame asked for was not in place
+}
+
 Load_Function :: struct {
     name:[LOAD_FUNCTION_BYTES]u8,
     length:int,
@@ -147,6 +156,8 @@ Load_Record :: struct {
     entities:int,    // of the world once ready
     busy:Load_Busy_Set, // as the last frame left it
     waits:[Load_Busy]Load_Wait,
+    pipelines_from:Load_Pipelines, // as the load opened; zero for the first, which counts the start of the renderer
+    pipelines:Load_Pipelines,      // during the load, once it ended
     functions:[LOAD_FUNCTIONS]Load_Function, // once it ended: the costliest first
     function_count:int,
 }
@@ -180,6 +191,8 @@ load_open :: proc(app:^App,kind:Load_Kind,name:string) -> u64 {
     if kind==.Scene && p.startup_ns>0 {
         r.phases[.Startup]={p.startup_ns,1}
         p.startup_ns=0
+    } else {
+        r.pipelines_from=load_pipelines_now(app)
     }
     p.current,p.loading=kind,true
     p.children,p.loaded=0,false
@@ -426,6 +439,7 @@ load_close :: proc(app:^App,r:^Load_Record,state:Load_State) {
     p:=&app.load_profile
     r.state=state
     r.ended_ns=time.duration_nanoseconds(time.tick_since(r.started))
+    r.pipelines=load_pipelines_since(app,r.pipelines_from)
     if p.loading && &p.records[p.current]==r {
         p.loading=false
         load_steps_add(app)
@@ -512,6 +526,39 @@ Load_Assets_Summary :: struct {kind:Load_Asset,using totals:Load_Assets,ms:f64}
 Load_Function_Summary :: struct {name:string,ms:f64}
 Load_Wait_Summary :: struct {busy:Load_Busy,until_ms:f64,frames:int}
 
+@(private)
+load_pipelines_now :: proc(app:^App) -> Load_Pipelines {
+    if app.device==nil {return {}}
+    s:=rhi.device_stats(app.device)
+    late,_:=render.renderer_pipelines_report(app.renderer)
+    return {s.pipelines_made,s.pipelines_kept,s.pipeline_ns,late}
+}
+
+@(private)
+load_pipelines_since :: proc(app:^App,from:Load_Pipelines) -> Load_Pipelines {
+    now:=load_pipelines_now(app)
+    return {now.made-from.made,now.kept-from.kept,now.ns-from.ns,now.late-from.late}
+}
+
+// What a load says of its pipelines; "" when it compiled none and no frame was
+// late. One whose start read the kept pipelines and still compiled some had
+// their shaders, fixed state or constants change, or never kept them: the next
+// start of the same build compiles none. In the temporary allocator.
+load_pipelines_note :: proc(s:Load_Summary) -> string {
+    compiled:=s.pipelines.made-s.pipelines.kept
+    late:=fmt.tprintf("%d frames drew materials without their pipelines while they compiled",s.pipelines.late) if s.pipelines.late>0 else ""
+    if compiled<=0 {return late}
+    why:string
+    switch s.store {
+    case .Read:         why="although the kept pipelines were read: their shaders, fixed state or constants changed since, or they were never kept, and the next start compiles none"
+    case .Other_Device: why="because the kept pipelines were of another GPU or driver (the driver was updated): every one compiles once again"
+    case .Missing:      why="because no pipeline was kept yet: the first start compiles every one"
+    case .Unreadable:   why="because the file of the kept pipelines could not be read: it is written again"
+    case .None:         why="as this device keeps none across runs"
+    }
+    return fmt.tprintf("%d pipelines compiled in %.0f ms of the driver, %s%s%s",compiled,load_ms(s.pipelines.ns),why,"; " if late!="" else "",late)
+}
+
 // A record as whoever answers about it reads it: phases, kinds of asset and
 // waits that took time, the costliest first, and the loop functions that
 // ran meanwhile (live while it loads).
@@ -529,6 +576,8 @@ Load_Summary :: struct {
     slowest:[]Load_Asset_Time,
     functions:[]Load_Function_Summary,
     waits:[]Load_Wait_Summary,
+    pipelines:Load_Pipelines,       // during the load (live while it loads)
+    store:rhi.Pipeline_Store_State, // what the device found of the kept pipelines when it was made
 }
 
 load_ms :: proc "contextless" (ns:i64) -> f64 {return f64(ns)/1e6}
@@ -579,6 +628,8 @@ load_summary :: proc(app:^App,kind:Load_Kind,top:int,allocator:=context.allocato
     }
     slice.sort_by(waits[:],proc(a,b:Load_Wait_Summary) -> bool {return a.until_ms>b.until_ms})
     out.waits=waits[:]
+    out.pipelines=r.pipelines if r.state!=.Loading else load_pipelines_since(app,r.pipelines_from)
+    if app.device!=nil {out.store=rhi.device_stats(app.device).pipeline_store}
     return out,true
 }
 
@@ -627,6 +678,7 @@ load_profile_text :: proc(app:^App,top:int,allocator:=context.allocator) -> stri
             for w in s.waits {fmt.sbprintf(&b," %v until %.0f ms",w.busy,w.until_ms)}
             strings.write_byte(&b,'\n')
         }
+        if note:=load_pipelines_note(s);note!="" {fmt.sbprintf(&b,"  pipelines: %s\n",note)}
     }
     return strings.to_string(b)
 }

@@ -185,7 +185,16 @@ description: Modify, diagnose and measure Mirai rendering - the `render` rendere
 - No engine stage evaluates a Surface program except its own (`//! per surface program`): raster
   uses the program's pipeline (`program_graphics`) and rays ask for it through the material points
   (`points.slang`); the traversal evaluates only the alpha of programs with coverage. A frame does
-  not wait for a pipeline to be created: it draws the program as its row until it has it.
+  not wait for a pipeline to be created: it draws the program as its row until it has it, unless
+  `Graphics_Settings.shaders` is `Before_Playing`, where it waits for those that are not
+  speculative. A speculative pipeline (a variant of settings not in use) is made last, the
+  cheapest first, never on the first pipeline thread, and no frame waits for one, even after a
+  setting selects it: what a frame needs never waits behind one, and a short session still ends
+  some.
+- With a window, the pipelines the renderer starts with compile on a thread while the window title
+  counts them. A window closed meanwhile, or a player or editor that quits while a pipeline is
+  inside the driver (`app_quit_compiling`), ends the process at once once the kept pipelines are
+  written: the user decided it, the one exception to the engine never ending the process.
 - The passes read the G-buffer only with `include/gbuffer.slang`. A material's layers are prepared
   only with `shading_layers`, and direct and indirect light compose them the same.
 - A scene's image reaches the display only through the display LUT (`display_encode`); previews,

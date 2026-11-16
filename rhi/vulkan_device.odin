@@ -896,7 +896,7 @@ vk_create_logical_device :: proc(d: ^Device, desc: Device_Desc) -> bool {
 	if d.store_path_len > 0 {
 		p := d.properties
 		pipeline_store_init(&d.pipelines_kept, {vendor = p.vendorID, device = p.deviceID, driver = p.driverVersion, uuid = p.pipelineCacheUUID}, allocator = d.allocator)
-		pipeline_store_load(&d.pipelines_kept, desc.pipeline_cache_path)
+		d.stats.pipeline_store = pipeline_store_load(&d.pipelines_kept, desc.pipeline_cache_path)
 	}
 	return true
 }
@@ -941,6 +941,15 @@ vk_create_frames :: proc(d: ^Device, desc: Device_Desc) -> bool {
 		if !vk_check(d, d.dvk.CreateFence(d.handle, &fence_info, nil, &fence), "immediate fence") {return false}
 	}
 	return true
+}
+
+// Writes the pipelines kept across runs now, after a write another thread is
+// making: what was compiled survives a process that ends without destroying
+// the device. Without a path, nothing.
+device_pipelines_keep :: proc(d: ^Device) {
+	if d == nil || d.store_path_len == 0 {return}
+	path := string(d.store_path[:d.store_path_len])
+	for !pipeline_store_save(&d.pipelines_kept, path) && sync.atomic_load(&d.pipelines_kept.saving) {time.sleep(10 * time.Millisecond)}
 }
 
 device_destroy :: proc(d: ^Device) {

@@ -399,6 +399,7 @@ renderer_frame :: proc(r:^Renderer,frame:Frame_Desc) -> bool {
     pipelines_install(r)
     if r.variants_wanted {pipeline_variants_ask(r)}
     if r.scene.programs_arrived {programs_ask(r)}
+    pipelines_before_frame(r)
     // What the extensions asked of this frame lasts for it alone.
     defer {
         r.pass_count=0;r.main_pipeline=0;r.gbuffer_asked={}

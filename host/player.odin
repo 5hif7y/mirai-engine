@@ -14,6 +14,7 @@ import "mirai:asset"
 import "mirai:core"
 import "mirai:platform"
 import "mirai:project"
+import render "mirai:render"
 import "mirai:rhi"
 import "mirai:std/base"
 import "mirai:std/jobs"
@@ -280,7 +281,14 @@ player_run_summary :: proc(app:^App,frames:int,seconds:f64) -> string {
     file:=project.settings_file(.Player,app.root,app.engine_root,context.temp_allocator,player=app.options)
     applied:=file!="" && os.exists(file)?fmt.tprintf(", player options %s",file):", no player options"
     mean:=frames>0?1000*seconds/f64(frames):0
-    return fmt.tprintf("mirai: %d frames, mean frame time %.2f ms, drawn at %vx%v%s",frames,mean,int(size.x),int(size.y),applied)
+    pipelines:=""
+    if app.renderer!=nil {
+        s:=rhi.device_stats(app.renderer.device)
+        late,waited:=render.renderer_pipelines_report(app.renderer)
+        pipelines=fmt.tprintf("\n  pipelines: %d made (%d kept), %.0f ms in the driver, longest %.1f ms, store %v; %d frames late, %.0f ms waited",
+            s.pipelines_made,s.pipelines_kept,f64(s.pipeline_ns)/1e6,f64(s.pipeline_longest_ns)/1e6,s.pipeline_store,late,time.duration_milliseconds(waited))
+    }
+    return fmt.tprintf("mirai: %d frames, mean frame time %.2f ms, drawn at %vx%v%s%s",frames,mean,int(size.x),int(size.y),applied,pipelines)
 }
 
 // The icon of the window: a PNG, read as 8 bits per channel with alpha.
@@ -484,5 +492,6 @@ player_run :: proc(info:^core.World_Info,project_root,engine_root:string,args:[]
             if code==PLAYER_OK {code=PLAYER_VALIDATION}
         }
     }
+    app_quit_compiling(app,code)
     return code
 }

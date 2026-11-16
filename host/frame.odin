@@ -2,6 +2,7 @@ package host
 
 import "base:runtime"
 import "core:c"
+import "core:fmt"
 import "core:log"
 import "core:math"
 import "core:os"
@@ -11,6 +12,7 @@ import "core:time"
 import audio "mirai:audio"
 import "mirai:core"
 import "mirai:platform"
+import "mirai:project"
 import render "mirai:render"
 import "mirai:rhi"
 import "mirai:std/base"
@@ -36,7 +38,6 @@ FRAME_INSTANCE_RESERVE :: 256
 FRAME_UI_TEXTURE_CAPACITY :: 32
 FRAME_EFFECT_VIEW_CAPACITY :: 16
 TEXTURE_VIEW_CAPACITY :: 8
-PIPELINE_CACHE_FILE :: "pipelines.bin"
 
 CAMERA_DEFAULT :: render.Camera{position={0,2,6},forward={0,-1,-6},up={0,1,0},fov_y=60,near=0.1}
 
@@ -82,7 +83,7 @@ app_gpu_create :: proc(app:^App,desc:App_Desc) -> App_Error {
     // Compiled once, the pipelines of a project are read back from its user
     // folder: building them all again takes the GPU driver many seconds.
     pipelines:string
-    if folder:=app_user_folder(app.root,context.temp_allocator);folder!="" {pipelines,_=filepath.join({folder,PIPELINE_CACHE_FILE},context.temp_allocator)}
+    if folder:=app_user_folder(app.root,context.temp_allocator);folder!="" {pipelines,_=filepath.join({folder,project.PIPELINES_FILE},context.temp_allocator)}
     surface:rhi.Surface_Desc
     if desc.window {
         surface={
@@ -114,7 +115,8 @@ app_gpu_create :: proc(app:^App,desc:App_Desc) -> App_Error {
         free(renderer,app.allocator)
         return .Out_Of_Memory
     }
-    if !render.renderer_init(renderer,{
+    wait:=Pipelines_Wait{app=app,started=platform.clock_ns()}
+    initialized:=render.renderer_init(renderer,{
         device=device,width=u32(app.drawable.x),height=u32(app.drawable.y),
         settings=desc.render_settings,allocator=app.allocator,shaders=shaders,
         // The pages of streamed meshes decode in the jobs of the app, from this thread, its owner.
@@ -122,7 +124,10 @@ app_gpu_create :: proc(app:^App,desc:App_Desc) -> App_Error {
         // A window or a surface shows each frame to someone, who would see one
         // wait for the driver; without them, what a frame draws does not depend on that time.
         pipeline_thread=desc.window || desc.shown,
-    }) {
+        on_pipelines=pipelines_wait_report if desc.window else nil,on_pipelines_user=&wait,
+    })
+    pipelines_wait_end(&wait)
+    if !initialized {
         log.errorf("renderer: %s",renderer.error)
         return .Renderer_Failed
     }

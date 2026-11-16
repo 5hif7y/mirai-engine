@@ -611,17 +611,5 @@ app_world_ref :: proc(app:^App,data:rawptr) -> core.World_Ref {return core.world
 // Seconds of real time since the application was created.
 app_seconds :: proc(app:^App) -> f64 {return f64(platform.clock_ns()-app.start_ns)/1e9}
 
-USER_ORGANIZATION :: "Mirai"
-
-// What the project keeps for its user, the saves and the compiled GPU
-// pipelines: <user data>/Mirai/<name of the project>, made when missing. ""
-// without a project or a folder of user data.
-app_user_folder :: proc(root:string,allocator:=context.allocator) -> string {
-    if root=="" {return ""}
-    name:=filepath.base(root)
-    if manifest,error:=project.manifest_read(project.path(root,project.PROJECT_FILE,allocator=context.temp_allocator));error.code==.None {
-        if declared:=base.text_get(manifest.name[:]);declared!="" {name=strings.clone(declared,context.temp_allocator)}
-    }
-    folder,_:=platform.path_user_data_folder(USER_ORGANIZATION,name,allocator)
-    return folder
-}
+// What the project keeps for its user (project.user_folder).
+app_user_folder :: proc(root:string,allocator:=context.allocator) -> string {return project.user_folder(root,allocator)}

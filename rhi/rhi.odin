@@ -751,6 +751,30 @@ Device_Stats :: struct {
 	deletion_overflows: int, // times a frame slot held more destroyed objects than its capacity
 	oversized:          int, // transients past the frame ring, each given a buffer for its frame
 	host_memory:        int, // Vulkan: resources of GPU memory placed in system memory because device memory was full
+	pipelines_made:     int, // pipelines created since the device was, on any thread
+	pipelines_kept:     int, // of those, read whole from the pipelines kept across runs: no compilation
+	pipeline_ns:        i64, // what creating them took, summed over the threads
+	pipeline_longest_ns: i64,
+	pipeline_store:     Pipeline_Store_State,
+}
+
+// What the device found of the pipelines kept across runs when it was created.
+// Other_Device: they were of another GPU or driver (an update of the driver),
+// so every pipeline compiles again.
+Pipeline_Store_State :: enum u8 {None, Read, Missing, Other_Device, Unreadable}
+
+// Counts a pipeline whose creation call took took nanoseconds; kept: the
+// driver did not compile it.
+@(private)
+pipeline_counted :: proc "contextless" (d: ^Device, took: i64, kept: bool) {
+	sync.atomic_add(&d.stats.pipelines_made, 1)
+	if kept {sync.atomic_add(&d.stats.pipelines_kept, 1)}
+	sync.atomic_add(&d.stats.pipeline_ns, took)
+	for {
+		longest := sync.atomic_load(&d.stats.pipeline_longest_ns)
+		if took <= longest {break}
+		if _, ok := sync.atomic_compare_exchange_weak(&d.stats.pipeline_longest_ns, longest, took); ok {break}
+	}
 }
 
 @(private)

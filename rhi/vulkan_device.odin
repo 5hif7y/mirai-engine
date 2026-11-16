@@ -270,6 +270,7 @@ Device :: struct {
 	memory_budget:     bool, // VK_EXT_memory_budget: the driver says what memory the process holds and may hold
 	waited_out:        bool, // a wait passed GPU_WAIT_LIMIT_NS: the GPU may still run that work
 	lose_asked:        bool, // device_lose
+	lose_unreported:   bool, // device_lose without reported
 	lose_provoked:     bool,
 	refuse:            Pipeline_Refusal,
 	presenter:         Presenter,
@@ -1176,8 +1177,18 @@ vk_collect_timestamps :: proc(d: ^Device, f: ^Vk_Frame) {
 	f.submitted = false
 	if f.queries == 0 || count < 2 {return}
 	values: [MAX_TIMESTAMPS]u64
-	// The slot's submission already completed, so WAIT returns immediately.
-	result := d.dvk.GetQueryPoolResults(d.handle, f.queries, 0, count, size_of(values), &values, size_of(u64), {._64, .WAIT})
+	// The timeline passed the slot's submission, so its timestamps are written
+	// unless the GPU was reset under it. A driver may report such a reset
+	// nowhere and never write them (amdvlk on Windows after a timeout
+	// detection and recovery): a WAIT for them would not return.
+	result := d.dvk.GetQueryPoolResults(d.handle, f.queries, 0, count, size_of(values), &values, size_of(u64), {._64})
+	if result == .NOT_READY {
+		d.timing_measured = false
+		stopped_buffer: [256]u8
+		stopped := vk_stopped(d, stopped_buffer[:])
+		device_fail(d, .Lost, "frame %d ended without the work it was given: the GPU was reset under it%s%s", f.number, "; the GPU stopped in " if stopped != "" else "", stopped)
+		return
+	}
 	if result != .SUCCESS {d.timing_measured = false; vk_lost(d, result, "vkGetQueryPoolResults"); return}
 	gpu, now := values[count - 1], time.duration_nanoseconds(time.tick_diff({}, time.tick_now()))
 	if d.calibrate != nil {
@@ -1220,6 +1231,7 @@ frame_begin :: proc(d: ^Device, present := true) -> (cmd: ^Command_List, ok: boo
 	// Before the deletions: the copy of this slot stops naming what goes.
 	vk_table_take(d, table_copy(false, d.slot))
 	vk_collect_timestamps(d, f)
+	if d.failure != .None {return nil, false}
 	vk_flush_deletions(d, f)
 	// What waited for the uploads sent since the last frame waits for this one, which follows them.
 	if len(d.unframed) > 0 {
@@ -1306,9 +1318,16 @@ frame_end :: proc(d: ^Device, cmd: ^Command_List, generated := false) -> bool {
 	}
 	submit.signalSemaphoreInfoCount = u32(signal_count)
 	submit.pSignalSemaphoreInfos = raw_data(signals[:])
+	// A reset no call reports: the semaphores pass, the list and its timestamps do not run.
+	unreported := d.lose_asked && d.lose_unreported
+	if unreported {
+		d.lose_asked, d.lose_unreported, d.lose_provoked = false, false, true
+		if f.queries != 0 {d.dvk.ResetQueryPool(d.handle, f.queries, 0, MAX_TIMESTAMPS)}
+		submit.commandBufferInfoCount = 0
+	}
 	sync.mutex_lock(&d.queue_lock)
 	submitted := d.dvk.QueueSubmit2(d.queue, 1, &submit, 0)
-	f.marks.sent = submitted == .SUCCESS
+	f.marks.sent = submitted == .SUCCESS && !unreported
 	ok := vk_check(d, submitted, "vkQueueSubmit2")
 	f.signal_value = d.timeline_value
 	f.number, f.submitted = d.frame_number, submitted == .SUCCESS

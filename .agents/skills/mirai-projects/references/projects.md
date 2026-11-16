@@ -518,6 +518,7 @@ by its absolute path, which hands it to Git Bash ([launcher](#tool-and-machine))
 | Capture without UI | `mirai capture [project] --out x.png [--reference r.png] [--repeat]` |
 | Validate demo image and cost | `mirai render check [project] [--views a,b] [--quality] [--release]` |
 | Measure the cost against main | `mirai bench compare [project] --base main` |
+| Measure compiling pipelines | `mirai bench pipelines [project] [--scene S] [--frames N]` |
 | Compare and crop images | `mirai image diff\|mottle\|stats\|montage\|crop\|zoom\|pick ...` |
 | Measure only between measurements | `mirai measure -- <command> [arguments...]` |
 | See who is building or measuring | `mirai locks` |

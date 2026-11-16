@@ -22,19 +22,13 @@ a_change_inside_a_procedure_links_what_links_against_it_again :: proc(t:^testing
     base_source:="engine/plugins/base_thing/runtime/base.odin"
     files:=[][2]string{
         {"engine/core/data.odin","package core\n"},
-        {"engine/std/compressor/compressor.odin","package compressor\n"}, // the build names its collection
         {"engine/plugins/base_thing/plugin.mirai",`{"name": "base_thing", "version": "1.0.0", "parts": ["Runtime"]}`},
         {base_source,"package base_thing\n\nanswer :: proc() -> i32 {return 21}\n"},
         {"engine/plugins/middle/plugin.mirai",`{"name": "middle", "version": "1.0.0", "dependencies": ["base_thing"], "parts": ["Runtime"]}`},
         {"engine/plugins/middle/runtime/middle.odin","package middle\n\nimport base_thing \"plugins:base_thing/runtime\"\n\ntwice :: proc() -> i32 {return 2*base_thing.answer()}\n"},
         {"game/project.mirai",`{"name": "Relink", "plugins": ["middle"]}`},
     }
-    for file in files {
-        path:=project.path(folder,file[0])
-        testing.expect(t,os.make_directory_all(path[:strings.last_index_byte(path,'/')])==nil)
-        testing.expect(t,os.write_entire_file(path,file[1])==nil,path)
-    }
-    engine,game:=project.path(folder,"engine"),project.path(folder,"game")
+    engine,game:=fixture_write(t,folder,files)
     p,error:=project.open(game,engine)
     if !testing.expectf(t,error.code==.None,"the project opens: %v",error) {return}
     testing.expect(t,os.make_directory_all(engine_paths(engine,.Dev).decl)==nil)

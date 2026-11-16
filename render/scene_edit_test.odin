@@ -385,7 +385,7 @@ program_catalog_names_the_programs_and_packs_their_parameters :: proc(t: ^testin
 	testing.expect(t, !program_parameter_set(&values, &paint.parameters[0], {1, 0, 0, 0}), "a texture is not a number")
 	testing.expect(t, paint.parameters[0].srgb && program_parameter_set_texture(r, &values, &paint.parameters[0], 0))
 	testing.expect(t, !program_parameter_set_texture(r, &values, &paint.parameters[1], 0))
-	broken := `{"version":2,"programs":[{"id":1,"name":"Wide","domain":"Surface","size":8,"parameters":[{"name":"far","kind":"Float","components":4,"offset":248}]}]}`
+	broken := `{"version":3,"programs":[{"id":1,"name":"Wide","domain":"Surface","size":8,"parameters":[{"name":"far","kind":"Float","components":4,"offset":248}]}]}`
 	_, wide := program_catalog_parse(transmute([]u8)broken)
 	testing.expect(t, !wide, "a parameter past the 256 bytes of a row makes the catalog invalid")
 }
